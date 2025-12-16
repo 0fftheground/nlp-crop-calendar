@@ -1,10 +1,3 @@
-"""
-Tool registry scaffolding.
-
-Previous demo tools have been removed so you can plug in your own LangChain tools.
-Use `register_tool()` to add `BaseTool` instances that wrap your custom logic.
-"""
-
 from typing import Dict, List, Optional
 
 from langchain_core.tools import BaseTool, tool as lc_tool
