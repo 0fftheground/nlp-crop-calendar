@@ -1,17 +1,18 @@
-from typing import List, TypedDict
+"""
+LangGraph state scaffolding.
 
-from ..models import FarmerQuery, Recommendation
+Define your own TypedDict (or Pydantic model) to describe the state shared between
+workflow nodes. Remove the placeholders below once you finalize the fields you need.
+"""
+
+from typing import TypedDict
 
 
 class GraphState(TypedDict, total=False):
-    user_prompt: str
-    query: FarmerQuery
-    recommendations: List[Recommendation]
-    trace: List[str]
+    """TODO: define workflow state fields."""
+    pass
 
 
 def add_trace(state: GraphState, message: str) -> GraphState:
-    trace = list(state.get("trace", []))
-    trace.append(message)
-    state["trace"] = trace
-    return state
+    """TODO: implement trace helper if needed."""
+    raise NotImplementedError("请根据新的 GraphState 实现 add_trace。")

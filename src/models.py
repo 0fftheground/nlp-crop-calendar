@@ -1,55 +1,39 @@
-from typing import Any, Dict, List, Literal, Optional
+"""
+Pydantic schema scaffolding.
 
-from pydantic import BaseModel, Field
+The previous concrete models have been removed so that you can redefine the request /
+response payloads from scratch. Replace the placeholder classes below with the fields
+that match your new workflow and tool contract.
+"""
+
+from pydantic import BaseModel
 
 
 class FarmerQuery(BaseModel):
-    crop: str = Field(..., description="Normalized crop name")
-    month: Optional[str] = Field(None, description="Calendar month keyword")
-    region: Optional[str] = Field(None, description="Geographic region")
-    growth_stage: Optional[str] = Field(None, description="Crop growth stage")
-    issues: List[str] = Field(default_factory=list)
-    requested_actions: List[str] = Field(default_factory=list)
-    urgency: Optional[str] = Field(None, description="Urgency or priority")
-
-    def summary(self) -> str:
-        parts = [self.crop]
-        if self.growth_stage:
-            parts.append(self.growth_stage)
-        if self.region:
-            parts.append(self.region)
-        if self.month:
-            parts.append(self.month)
-        return " / ".join(parts)
+    """TODO: define normalized farmer query schema."""
+    pass
 
 
 class Recommendation(BaseModel):
-    title: str
-    description: str
-    reasoning: str
-    resources: Optional[str] = None
+    """TODO: define recommendation payload schema."""
+    pass
 
 
 class PlanRequest(BaseModel):
-    prompt: str = Field(..., description="User natural language request")
-    region: Optional[str] = None
-    locale: Optional[str] = "zh"
+    """TODO: define planner request schema."""
+    pass
 
 
 class PlanResponse(BaseModel):
-    query: FarmerQuery
-    recommendations: List[Recommendation]
-    message: str
-    trace: List[str] = Field(default_factory=list)
+    """TODO: define planner response schema."""
+    pass
 
 
 class ToolInvocation(BaseModel):
-    name: str
-    message: str
-    data: Dict[str, Any] = Field(default_factory=dict)
+    """TODO: define tool invocation response schema."""
+    pass
 
 
 class HandleResponse(BaseModel):
-    mode: Literal["tool", "workflow"]
-    plan: Optional[PlanResponse] = None
-    tool: Optional[ToolInvocation] = None
+    """TODO: define router response schema."""
+    pass
