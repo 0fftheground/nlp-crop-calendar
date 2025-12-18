@@ -1,9 +1,11 @@
 from functools import lru_cache
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .config import get_config
-from .models import HandleResponse, PlanRequest
-from .router import RequestRouter
+
+from ..agent.router import RequestRouter
+from ..data.config import get_config
+from ..schemas.models import HandleResponse, UserRequest
 
 
 @lru_cache(maxsize=1)
@@ -28,6 +30,6 @@ async def health():
 
 
 @app.post("/api/v1/handle", response_model=HandleResponse)
-async def handle_request(request: PlanRequest):
+async def handle_request(request: UserRequest):
     router = get_router()
     return router.handle(request)

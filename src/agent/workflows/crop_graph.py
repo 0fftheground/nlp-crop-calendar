@@ -26,4 +26,4 @@ def build_graph():
 
     Replace this stub with your actual implementation.
     """
-    raise NotImplementedError("请在 src/workflows/crop_graph.py 中实现自定义 LangGraph workflow。")
+    raise NotImplementedError("请在 src/agent/workflows/crop_graph.py 中实现自定义 LangGraph workflow。")
