@@ -8,7 +8,7 @@ from typing import List
 def build_commands() -> List[list]:
     python = sys.executable
     return [
-        [python, "-m", "uvicorn", "src.server:app", "--reload", "--port", "8000"],
+        [python, "-m", "uvicorn", "src.api.server:app", "--reload", "--port", "8000"],
         [python, "-m", "chainlit", "run", "chainlit_app.py", "--watch"],
     ]
 

@@ -1,8 +1,13 @@
 from typing import Optional
 
-from .models import HandleResponse, PlanRequest, PlanResponse, ToolInvocation
+from ..schemas.models import (
+    HandleResponse,
+    ToolInvocation,
+    UserRequest,
+    WorkflowResponse,
+)
+from ..tools.registry import execute_tool
 from .tool_selector import ToolSelector
-from .tools import execute_tool
 from .workflows.crop_graph import build_graph
 
 
@@ -13,7 +18,7 @@ class RequestRouter:
         self.graph = build_graph()
         self.selector = ToolSelector()
 
-    def handle(self, request: PlanRequest) -> HandleResponse:
+    def handle(self, request: UserRequest) -> HandleResponse:
         tool_result = self._try_tool(request.prompt)
         if tool_result:
             return HandleResponse(mode="tool", tool=tool_result)
@@ -29,10 +34,10 @@ class RequestRouter:
                 return result
         return None
 
-    def _run_workflow(self, request: PlanRequest) -> PlanResponse:
+    def _run_workflow(self, request: UserRequest) -> WorkflowResponse:
         initial_state = {"user_prompt": request.prompt, "trace": []}
         state = self.graph.invoke(initial_state)
-        return PlanResponse(
+        return WorkflowResponse(
             query=state["query"],
             recommendations=state.get("recommendations", []),
             message=state.get("message", ""),

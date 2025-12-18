@@ -1,3 +1,3 @@
-from .server import app  # FastAPI app for ASGI servers
+from .api.server import app  # FastAPI app for ASGI servers
 
 __all__ = ["app"]
