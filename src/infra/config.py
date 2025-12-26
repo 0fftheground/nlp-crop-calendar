@@ -14,12 +14,35 @@ class AppConfig(BaseSettings):
 
     llm_provider: str = Field(default="openai", validation_alias="LLM_PROVIDER")
     openai_api_key: Optional[str] = Field(default=None, validation_alias="OPENAI_API_KEY")
+    openai_api_base: Optional[str] = Field(
+        default=None, validation_alias="OPENAI_API_BASE"
+    )
+    extractor_provider: str = Field(
+        default="openai", validation_alias="EXTRACTOR_PROVIDER"
+    )
+    extractor_model: str = Field(
+        default="gpt-4.1-mini", validation_alias="EXTRACTOR_MODEL"
+    )
+    extractor_api_key: Optional[str] = Field(
+        default=None, validation_alias="EXTRACTOR_API_KEY"
+    )
+    extractor_api_base: Optional[str] = Field(
+        default=None, validation_alias="EXTRACTOR_API_BASE"
+    )
+    extractor_temperature: float = Field(
+        default=0.0, validation_alias="EXTRACTOR_TEMPERATURE"
+    )
     default_region: str = Field(default="global", validation_alias="DEFAULT_REGION")
     fastapi_port: int = Field(default=8000, validation_alias="FASTAPI_PORT")
 
     @field_validator("llm_provider", mode="after")
     @classmethod
     def normalize_llm_provider(cls, value: str) -> str:
+        return value.lower() if value else value
+
+    @field_validator("extractor_provider", mode="after")
+    @classmethod
+    def normalize_extractor_provider(cls, value: str) -> str:
         return value.lower() if value else value
 
 

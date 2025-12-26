@@ -2,7 +2,7 @@ import json
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..data.llm import get_chat_model
+from ..infra.llm import get_chat_model
 from ..tools.registry import list_tool_specs
 
 

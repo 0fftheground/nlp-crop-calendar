@@ -1,0 +1,24 @@
+{"id":"variety_lookup_basic","prompt":"请帮我查询水稻品种美香占2号的抗性和生育期。","expect":{"mode":"tool","tool":"variety_lookup"}}
+{"id":"variety_lookup_traits","prompt":"小麦品种郑麦9023的特性是什么？","expect":{"mode":"tool","tool":"variety_lookup"}}
+{"id":"variety_lookup_duration","prompt":"玉米品种先玉335生育期多长？","expect":{"mode":"tool","tool":"variety_lookup"}}
+{"id":"weather_lookup_basic","prompt":"武汉未来三天的天气如何？","expect":{"mode":"tool","tool":"weather_lookup"}}
+{"id":"weather_lookup_rain","prompt":"帮我查一下长沙最近三天降雨情况。","expect":{"mode":"tool","tool":"weather_lookup"}}
+{"id":"weather_lookup_forecast","prompt":"南昌的气温预报。","expect":{"mode":"tool","tool":"weather_lookup"}}
+{"id":"growth_stage_prediction_complete","prompt":"湖北宜昌水稻美香占2号直播，2025-04-01播种，想知道当前生育期。","expect":{"mode":"workflow","tool":null}}
+{"id":"growth_stage_prediction_rice","prompt":"江西赣州水稻两优718插秧，2025-03-20播种，预测生育期。","expect":{"mode":"workflow","tool":null}}
+{"id":"growth_stage_prediction_wheat","prompt":"河南周口小麦周麦27号直播，2024-10-15播种，请判断生育期。","expect":{"mode":"workflow","tool":null}}
+{"id":"farming_recommendation_basic","prompt":"在武汉，水稻分蘖期有哪些简短管理建议？","expect":{"mode":"tool","tool":"farming_recommendation"}}
+{"id":"farming_recommendation_stage","prompt":"贵州遵义玉米拔节期需要注意什么？给我简短建议。","expect":{"mode":"tool","tool":"farming_recommendation"}}
+{"id":"farming_recommendation_time","prompt":"江苏盐城小麦播后20天该做什么农事？给简短建议。","expect":{"mode":"tool","tool":"farming_recommendation"}}
+{"id":"workflow_full_plan","prompt":"给我一份水稻从播种到收获的全流程种植计划。","expect":{"mode":"workflow","tool":null}}
+{"id":"workflow_missing_info","prompt":"我准备种玉米，请给我完整种植方案。","expect":{"mode":"workflow","tool":null}}
+{"id":"workflow_multi_steps","prompt":"我要在湖北种油菜，包含选种、播种、田管、病虫害防治和收获流程。","expect":{"mode":"workflow","tool":null}}
+{"id":"workflow_management_plan","prompt":"给我一份大豆整季管理计划，越详细越好。","expect":{"mode":"workflow","tool":null}}
+{"id":"workflow_followup_start_1","session_id":"followup_1","prompt":"我想种水稻，帮我做一个完整的种植计划。","expect":{"mode":"workflow","tool":null}}
+{"id":"workflow_followup_reply_1","session_id":"followup_1","prompt":"水稻，地点在湖北，直播，播种日期是2025-04-01。","expect":{"mode":"workflow","tool":null}}
+{"id":"workflow_followup_start_2","session_id":"followup_2","prompt":"请给我一份玉米完整种植方案，包含选种-播种-田管-病虫害-收获。","expect":{"mode":"workflow","tool":null}}
+{"id":"workflow_followup_reply_2","session_id":"followup_2","prompt":"作物是玉米，地区在吉林，直播，计划2025-05-10播种。","expect":{"mode":"workflow","tool":null}}
+{"id":"irrelevant_joke","prompt":"讲个笑话。","expect":{"mode":"none","tool":null}}
+{"id":"irrelevant_math","prompt":"计算一下 12345 * 6789。","expect":{"mode":"none","tool":null}}
+{"id":"irrelevant_translation","prompt":"把这句话翻译成英文：今天的风很大。","expect":{"mode":"none","tool":null}}
+{"id":"irrelevant_news","prompt":"最近股市怎么样？","expect":{"mode":"none","tool":null}}

@@ -5,6 +5,7 @@ import re
 from datetime import date, datetime, time, timedelta
 from typing import Callable, Dict, List, Optional, TypedDict
 
+from ..infra.variety_store import retrieve_variety_candidates
 from ..schemas import (
     FarmWorkRecommendInput,
     GrowthStageResult,
@@ -13,11 +14,9 @@ from ..schemas import (
     PlantingDetails,
     PlantingDetailsDraft,
     PredictGrowthStageInput,
-    StageProbability,
     WeatherDataPoint,
     WeatherQueryInput,
     WeatherSeries,
-    WeatherSeriesResult,
 )
 
 
@@ -29,7 +28,7 @@ class CropCalendarArtifacts(TypedDict):
     assumptions: List[str]
 
 
-CROP_REQUIRED_FIELDS = ["crop", "planting_method", "sowing_date"]
+CROP_REQUIRED_FIELDS = ["crop","variety", "planting_method", "sowing_date"]
 
 
 CROP_KEYWORDS = ["水稻", "小麦", "玉米", "大豆", "油菜", "棉花", "花生"]
@@ -43,6 +42,9 @@ METHOD_KEYWORDS = {
 }
 DATE_PATTERN = re.compile(r"(20\\d{2})[-/年](\\d{1,2})[-/月](\\d{1,2})")
 REGION_PATTERN = re.compile(r"(\\w+[省市区县])")
+VARIETY_PATTERN = re.compile(r"(?:品种|品名|品系)[:：\\s]*([\\w\\u4e00-\\u9fff-]{2,20})")
+VARIETY_FALLBACK_PATTERN = re.compile(r"([\\w\\u4e00-\\u9fff-]{2,20}号)")
+VARIETY_TOKEN_PATTERN = re.compile(r"[\\u4e00-\\u9fff]{2,10}")
 
 
 class MissingPlantingInfoError(ValueError):
@@ -97,6 +99,80 @@ def merge_planting_answers(
     return PlantingDetailsDraft(**data)
 
 
+def _infer_variety_from_prompt(prompt: str) -> Optional[str]:
+    if not prompt:
+        return None
+    match = VARIETY_PATTERN.search(prompt)
+    if match:
+        return match.group(1)
+    match = VARIETY_FALLBACK_PATTERN.search(prompt)
+    if match:
+        return match.group(1)
+
+    cleaned = DATE_PATTERN.sub(" ", prompt)
+    for alias in METHOD_KEYWORDS:
+        cleaned = cleaned.replace(alias, " ")
+    for crop in CROP_KEYWORDS:
+        cleaned = cleaned.replace(crop, " ")
+    cleaned = cleaned.replace("播种", " ").replace("种植", " ")
+
+    tokens = re.split(r"[，,。；;、\\s]+", cleaned)
+    for token in tokens:
+        candidate = token.strip()
+        if not candidate:
+            continue
+        if any(char.isdigit() for char in candidate):
+            continue
+        if candidate in METHOD_KEYWORDS:
+            continue
+        if candidate in CROP_KEYWORDS:
+            continue
+        if REGION_PATTERN.search(candidate):
+            continue
+        if len(candidate) < 2:
+            continue
+        fallback = VARIETY_TOKEN_PATTERN.search(candidate)
+        if fallback:
+            return fallback.group(0)
+    candidates = retrieve_variety_candidates(prompt, limit=1)
+    if candidates:
+        return candidates[0]
+    return None
+
+
+def _apply_heuristics(data: Dict[str, object], prompt: str) -> None:
+    if "crop" not in data:
+        for crop in CROP_KEYWORDS:
+            if crop in prompt:
+                data["crop"] = crop
+                break
+
+    if "planting_method" not in data:
+        for alias, canonical in METHOD_KEYWORDS.items():
+            if alias in prompt:
+                data["planting_method"] = canonical
+                break
+
+    if "sowing_date" not in data:
+        date_match = DATE_PATTERN.search(prompt)
+        if date_match:
+            year, month, day = date_match.groups()
+            month = month.zfill(2)
+            day = day.zfill(2)
+            iso_string = f"{year}-{month}-{day}"
+            data["sowing_date"] = date.fromisoformat(iso_string)
+
+    if "region" not in data:
+        region_match = REGION_PATTERN.search(prompt)
+        if region_match:
+            data["region"] = region_match.group(1)
+
+    if "variety" not in data:
+        variety = _infer_variety_from_prompt(prompt)
+        if variety:
+            data["variety"] = variety
+
+
 def extract_planting_details(
     prompt: str,
     *,
@@ -112,31 +188,11 @@ def extract_planting_details(
         if not isinstance(raw_payload, dict):
             raise TypeError("llm_extract 必须返回包含字段的 dict。")
         data.update(raw_payload)
+        _apply_heuristics(data, prompt)
         data.setdefault("confidence", 0.9)
         return PlantingDetailsDraft(**data)
 
-    for crop in CROP_KEYWORDS:
-        if crop in prompt:
-            data["crop"] = crop
-            break
-
-    for alias, canonical in METHOD_KEYWORDS.items():
-        if alias in prompt:
-            data["planting_method"] = canonical
-            break
-
-    date_match = DATE_PATTERN.search(prompt)
-    if date_match:
-        year, month, day = date_match.groups()
-        month = month.zfill(2)
-        day = day.zfill(2)
-        iso_string = f"{year}-{month}-{day}"
-        data["sowing_date"] = date.fromisoformat(iso_string)
-
-    region_match = REGION_PATTERN.search(prompt)
-    if region_match:
-        data["region"] = region_match.group(1)
-
+    _apply_heuristics(data, prompt)
     data["confidence"] = 0.4 if len(data) == 1 else 0.75
     return PlantingDetailsDraft(**data)
 
@@ -158,7 +214,7 @@ def normalize_and_validate_planting(draft: PlantingDetailsDraft) -> PlantingDeta
 def derive_weather_range(
     planting: PlantingDetails,
     *,
-    duration_days: int = 120,
+    duration_days: int = 160,
     default_region: Optional[str] = None,
 ) -> WeatherQueryInput:
     """
@@ -168,7 +224,7 @@ def derive_weather_range(
     if not region:
         raise ValueError("查询气象必须提供地区信息。")
 
-    anchor_date = planting.transplant_date or planting.sowing_date
+    anchor_date = planting.sowing_date
     end_date = anchor_date + timedelta(days=duration_days)
     return WeatherQueryInput(
         region=region,
@@ -179,7 +235,7 @@ def derive_weather_range(
     )
 
 
-def fetch_weather(query: WeatherQueryInput) -> WeatherSeriesResult:
+def fetch_weather(query: WeatherQueryInput) -> WeatherSeries:
     """
     Invoke the weather tool/service. This demo returns synthetic data.
     """
@@ -187,7 +243,7 @@ def fetch_weather(query: WeatherQueryInput) -> WeatherSeriesResult:
 
 
 def assemble_weather_series(
-    raw: WeatherSeriesResult, query: Optional[WeatherQueryInput] = None
+    raw: WeatherSeries, query: Optional[WeatherQueryInput] = None
 ) -> WeatherSeries:
     """
     Ensure the weather payload conforms to WeatherSeries for downstream tasks.
@@ -200,11 +256,22 @@ def assemble_weather_series(
     return WeatherSeries(**payload)
 
 
-def predict_growth_stage(planting: PlantingDetails) -> GrowthStageResult:
+def predict_growth_stage(
+    planting: PlantingDetails, weather_series: Optional[WeatherSeries] = None
+) -> GrowthStageResult:
     """
     Helper wrapper that prepares PredictGrowthStageInput for the prediction service.
     """
-    request = PredictGrowthStageInput(planting=planting)
+    if weather_series is None:
+        weather_series = WeatherSeries(
+            region=planting.region or "unknown",
+            granularity="daily",
+            start_date=planting.sowing_date,
+            end_date=None,
+            points=[],
+            source="synthetic",
+        )
+    request = PredictGrowthStageInput(planting=planting, weatherSeries=weather_series)
     return predict_growth_stage_gdd(request)
 
 
@@ -258,7 +325,7 @@ def generate_crop_calendar(
     )
     weather_result = fetch_weather(weather_query)
     weather_series = assemble_weather_series(weather_result, weather_query)
-    growth_stage = predict_growth_stage(planting)
+    growth_stage = predict_growth_stage(planting, weather_series)
     operation_plan = build_operation_plan(planting)
     assumptions = list(draft.assumptions)
     return CropCalendarArtifacts(
@@ -272,8 +339,6 @@ def generate_crop_calendar(
 
 def predict_growth_stage_gdd(input: PredictGrowthStageInput) -> GrowthStageResult:
     sowing_date = input.planting.sowing_date
-    today = input.current_date
-    days_since = max((today - sowing_date).days, 0)
 
     stage_boundaries = [
         ("germination", 10),
@@ -282,32 +347,16 @@ def predict_growth_stage_gdd(input: PredictGrowthStageInput) -> GrowthStageResul
         ("heading", 90),
         ("maturity", 120),
     ]
-    predicted_stage = "harvest"
-    for stage, boundary in stage_boundaries:
-        if days_since <= boundary:
-            predicted_stage = stage
-            break
-    confidence = max(0.3, min(0.9, 1 - abs(days_since - 60) / 120))
-    probabilities = [
-        StageProbability(stage=name, probability=max(0.0, 1 - abs(days_since - idx * 20) / 100))
-        for idx, (name, _) in enumerate(stage_boundaries, start=1)
-    ]
 
-    return GrowthStageResult(
-        crop=input.planting.crop,
-        sowing_date=sowing_date,
-        predicted_stage=predicted_stage,
-        confidence=confidence,
-        variety=input.planting.variety,
-        region=input.planting.region,
-        days_since_sowing=days_since,
-        estimated_next_stage="maturity" if predicted_stage != "maturity" else None,
-        stages=probabilities,
-        metadata={"method": "synthetic_gdd"},
-    )
+    stage_dates = {
+        stage: (sowing_date + timedelta(days=boundary)).isoformat()
+        for stage, boundary in stage_boundaries
+    }
+
+    return GrowthStageResult(stages=stage_dates)
 
 
-def get_farm_weather(input: WeatherQueryInput) -> WeatherSeriesResult:
+def get_farm_weather(input: WeatherQueryInput) -> WeatherSeries:
     start = input.start_date
     end = input.end_date
     total_days = (end - start).days + 1
@@ -329,15 +378,13 @@ def get_farm_weather(input: WeatherQueryInput) -> WeatherSeriesResult:
         )
         points.append(point)
 
-    summary = f"{input.region} {total_days} 天合成气象序列"
-    return WeatherSeriesResult(
+    return WeatherSeries(
         region=input.region,
         granularity=input.granularity,
         start_date=start,
         end_date=end,
         points=points,
-        summary=summary,
-        advisory=["数据仅供演示，实际请接入自动站。"] if input.include_advice else [],
+        source="synthetic",
     )
 
 
