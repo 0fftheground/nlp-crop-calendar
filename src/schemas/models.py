@@ -25,6 +25,9 @@ class UserRequest(BaseModel):
 
     prompt: str
     region: Optional[str] = None
+    session_id: Optional[str] = Field(
+        default=None, description="客户端会话标识，用于多用户状态隔离。"
+    )
 
 
 class Recommendation(BaseModel):
@@ -46,6 +49,7 @@ class WorkflowResponse(BaseModel):
     recommendations: List[Recommendation] = Field(default_factory=list)
     message: str = ""
     trace: List[str] = Field(default_factory=list)
+    data: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolInvocation(BaseModel):
@@ -59,9 +63,10 @@ class ToolInvocation(BaseModel):
 class HandleResponse(BaseModel):
     """Unified response for both tool and workflow execution paths."""
 
-    mode: Literal["tool", "workflow"]
+    mode: Literal["tool", "workflow", "none"]
     tool: Optional[ToolInvocation] = None
     plan: Optional[WorkflowResponse] = None
+
 
 class PlantingDetailsDraft(BaseModel):
     """Raw planting info parsed from free-form user queries before validation."""
@@ -77,7 +82,9 @@ class PlantingDetailsDraft(BaseModel):
     )
     sowing_date: Optional[date] = None
     transplant_date: Optional[date] = None
-    region: Optional[str] = None
+    region: Optional[str] = Field(
+        default=None, description="行政区域，如省/市/县。"
+    )
     planting_location: Optional[str] = None
     notes: Optional[str] = None
     assumptions: List[str] = Field(
@@ -135,15 +142,11 @@ class PlantingDetails(BaseModel):
     )
     region: Optional[str] = Field(
         default=None,
-        description="行政区域或站点编号，便于匹配气象与知识库。",
+        description="行政区域，如省/市/县。",
     )
     planting_location: Optional[str] = Field(
         default=None,
         description="更精细的地址或地块编号。",
-    )
-    notes: Optional[str] = Field(
-        default=None,
-        description="额外的补充说明，如土壤或播量。",
     )
 
     @field_validator("planting_method", mode="before")
@@ -156,11 +159,11 @@ class PlantingDetails(BaseModel):
 class PredictGrowthStageInput(BaseModel):
     """Inputs required for the growth stage prediction service."""
 
+    weatherSeries:WeatherSeries = Field(...)
     planting: PlantingDetails = Field(
         ...,
         description="标准化后的种植详情，可被不同工具共享。",
     )
-    current_date: date = Field(default_factory=date.today)
 
     @property
     def crop(self) -> str:
@@ -183,30 +186,10 @@ class PredictGrowthStageInput(BaseModel):
         return self.planting.region
 
 
-class StageProbability(BaseModel):
-    """Probability distribution over crop growth stages."""
-
-    stage: str
-    label: Optional[str] = None
-    probability: float = Field(ge=0.0, le=1.0)
-    expected_days: Optional[int] = Field(
-        default=None, description="Estimated remaining days in this stage."
-    )
-
 
 class GrowthStageResult(BaseModel):
     """Result payload returned by the growth stage prediction service."""
-
-    crop: str
-    sowing_date: date
-    predicted_stage: str
-    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
-    variety: Optional[str] = None
-    region: Optional[str] = None
-    days_since_sowing: int = 0
-    estimated_next_stage: Optional[str] = None
-    stages: List[StageProbability] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    stages: Dict[str, str] = Field(default_factory=dict)
 
 
 class WeatherQueryInput(BaseModel):
@@ -250,12 +233,6 @@ class WeatherSeries(BaseModel):
         default=None, description="数据来源，例如自动站或模式。"
     )
 
-
-class WeatherSeriesResult(WeatherSeries):
-    """Structured result for a weather query."""
-
-    summary: Optional[str] = None
-    advisory: List[str] = Field(default_factory=list)
 
 class WeatherSeriesDraft(BaseModel):
     """Weather intent extracted from user language before hitting data services."""
@@ -301,18 +278,10 @@ class WeatherSeriesDraft(BaseModel):
 class FarmWorkRecommendInput(BaseModel):
     """Input payload for requesting farm operation recommendations."""
 
-    crop: str
-    region: Optional[str] = None
-    target_stage: Optional[str] = None
-    focus_issues: List[str] = Field(
-        default_factory=list, description="Specific issues (e.g., pest, drought)."
-    )
-    constraints: Dict[str, Any] = Field(
-        default_factory=dict, description="Optional constraints like labor or budget."
-    )
-    planting: Optional[PlantingDetails] = Field(
+    weatherSeries: WeatherSeries
+    planting: PlantingDetails = Field(
         default=None,
-        description="可选的种植详情，便于推荐引擎共享上下文。",
+        description="种植详情，便于推荐引擎共享上下文。",
     )
 
 
