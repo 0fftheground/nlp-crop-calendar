@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
+from src.agent.intent_rules import IntentRouter
 from src.agent.router import RequestRouter
 from src.schemas.models import UserRequest
 
@@ -30,16 +31,29 @@ def _load_cases(path: Path) -> list[dict]:
     raise ValueError("cases file must be .jsonl or .json")
 
 
-def _evaluate_case(router: RequestRouter, case: dict) -> dict:
+def _evaluate_case(
+    case: dict,
+    *,
+    strategy: str,
+    router: RequestRouter | None = None,
+    rule_router: IntentRouter | None = None,
+) -> dict:
     prompt = case.get("prompt", "")
     session_id = case.get("session_id")
     expected = case.get("expect", {})
     started = time.time()
-    response = router.handle(UserRequest(prompt=prompt, session_id=session_id))
-    elapsed = time.time() - started
-
-    actual_mode = response.mode
-    actual_tool = response.tool.name if response.tool else None
+    if strategy == "rule":
+        if rule_router is None:
+            raise ValueError("rule strategy requires IntentRouter")
+        actual_mode, actual_tool = rule_router.route(prompt, session_id=session_id)
+        elapsed = time.time() - started
+    else:
+        if router is None:
+            raise ValueError("llm strategy requires RequestRouter")
+        response = router.handle(UserRequest(prompt=prompt, session_id=session_id))
+        elapsed = time.time() - started
+        actual_mode = response.mode
+        actual_tool = response.tool.name if response.tool else None
     expected_mode = expected.get("mode")
     expected_tool = expected.get("tool")
 
@@ -73,6 +87,12 @@ def main() -> int:
         action="store_true",
         help="Exit non-zero if any case fails.",
     )
+    parser.add_argument(
+        "--strategy",
+        default="llm",
+        choices=["llm", "rule"],
+        help="Routing strategy to use for evaluation.",
+    )
     args = parser.parse_args()
 
     cases = _load_cases(Path(args.cases))
@@ -80,11 +100,17 @@ def main() -> int:
         print("No cases found.")
         return 1
 
-    router = RequestRouter()
+    router = RequestRouter() if args.strategy == "llm" else None
+    rule_router = IntentRouter() if args.strategy == "rule" else None
     results = []
     for case in cases:
         try:
-            result = _evaluate_case(router, case)
+            result = _evaluate_case(
+                case,
+                strategy=args.strategy,
+                router=router,
+                rule_router=rule_router,
+            )
         except Exception as exc:
             result = {
                 "id": case.get("id", ""),

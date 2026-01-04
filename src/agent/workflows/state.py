@@ -12,7 +12,6 @@ from ...schemas import (
     PlantingDetails,
     PlantingDetailsDraft,
     Recommendation,
-    WeatherSeries,
 )
 
 
@@ -27,7 +26,7 @@ class GraphState(TypedDict, total=False):
     followup_count: int
     assumptions: List[str]
     weather_info: Dict[str, object]
-    weather_series: WeatherSeries
+    weather_series_ref: str
     growth_stage: GrowthStageResult
     variety_info: Dict[str, object]
     recommendation_info: Dict[str, object]

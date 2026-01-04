@@ -2,11 +2,12 @@ import json
 import re
 from datetime import date, datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple
-
 from langchain_core.tools import BaseTool, tool as lc_tool
+from ..infra.config import get_config
 from ..infra.llm_extract import llm_structured_extract
-from ..infra.variety_store import build_variety_hint, retrieve_variety_candidates
 from ..infra.variety_store import build_variety_hint
+from ..infra.variety_store import retrieve_variety_candidates
+from ..infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ..domain.services import (
     MissingPlantingInfoError,
     list_missing_required_fields,
@@ -26,6 +27,7 @@ from ..schemas.models import (
 
 TOOLS: List[BaseTool] = []
 TOOL_INDEX: Dict[str, BaseTool] = {}
+HIDDEN_TOOL_NAMES = {"farming_recommendation", "growth_stage_prediction"}
 
 VARIETY_PATTERN = re.compile(r"(?:品种|品名|品系)[:：\s]*([\w\u4e00-\u9fff-]{2,20})")
 VARIETY_FALLBACK_PATTERN = re.compile(r"([\w\u4e00-\u9fff-]{2,20}号)")
@@ -60,6 +62,9 @@ PLANTING_FIELD_LABELS = {
 }
 
 
+}
+
+
 def register_tool(tool: BaseTool) -> None:
     """Register a custom LangChain tool for routing."""
     TOOLS.append(tool)
@@ -78,7 +83,11 @@ def list_tool_specs() -> List[Dict[str, str]]:
 
     Each BaseTool should define `name` and `description`.
     """
-    return [{"name": t.name, "description": t.description or ""} for t in TOOLS]
+    return [
+        {"name": t.name, "description": t.description or ""}
+        for t in TOOLS
+        if t.name not in HIDDEN_TOOL_NAMES
+    ]
 
 
 def auto_register_tool(*tool_args, **tool_kwargs):
@@ -283,6 +292,17 @@ def _estimate_stage_dates(
     ),
 )
 def variety_lookup(prompt: str) -> ToolInvocation:
+    cfg = get_config()
+    provider = normalize_provider(cfg.variety_provider)
+    intranet = maybe_intranet_tool(
+        "variety_lookup",
+        prompt,
+        provider,
+        cfg.variety_api_url,
+        cfg.variety_api_key,
+    )
+    if intranet:
+        return intranet
     crop, variety = _infer_crop_and_variety(prompt)
     payload = {
         "query": prompt,
@@ -308,6 +328,17 @@ def variety_lookup(prompt: str) -> ToolInvocation:
     description="查询指定地区气象数据。仅用于获取天气数据本身；不生成农事建议或计划。",
 )
 def weather_lookup(prompt: str) -> ToolInvocation:
+    cfg = get_config()
+    provider = normalize_provider(cfg.weather_provider)
+    intranet = maybe_intranet_tool(
+        "weather_lookup",
+        prompt,
+        provider,
+        cfg.weather_api_url,
+        cfg.weather_api_key,
+    )
+    if intranet:
+        return intranet
     start = date.today()
     points: List[WeatherDataPoint] = []
     for offset in range(3):
@@ -490,6 +521,17 @@ def growth_stage_prediction(prompt: str) -> ToolInvocation:
     ),
 )
 def farming_recommendation(prompt: str) -> ToolInvocation:
+    cfg = get_config()
+    provider = normalize_provider(cfg.recommendation_provider)
+    intranet = maybe_intranet_tool(
+        "farming_recommendation",
+        prompt,
+        provider,
+        cfg.recommendation_api_url,
+        cfg.recommendation_api_key,
+    )
+    if intranet:
+        return intranet
     crop, _ = _infer_crop_and_variety(prompt)
     ops = [
         OperationItem(

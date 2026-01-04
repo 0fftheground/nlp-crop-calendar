@@ -1,14 +1,13 @@
-# Welcome to Chainlit! 🚀🤖
+# 农事助手
 
-Hi there, Developer! 👋 We're excited to have you on board. Chainlit is a powerful tool designed to help you prototype, debug and share applications built on top of LLMs.
+本界面会连接 FastAPI 后端，并将你的问题路由到工具或工作流。
 
-## Useful Links 🔗
+你可以咨询：
+- 作物品种特性
+- 指定地区的气象与时间范围
+- 生育期预测
+- 完整种植方案
 
-- **Documentation:** Get started with our comprehensive [Chainlit Documentation](https://docs.chainlit.io) 📚
-- **Discord Community:** Join our friendly [Chainlit Discord](https://discord.gg/k73SQ3FyUh) to ask questions, share your projects, and connect with other developers! 💬
+如果信息不完整，助手会追问补充。
 
-We can't wait to see what you create with Chainlit! Happy coding! 💻😊
-
-## Welcome screen
-
-To modify the welcome screen, edit the `chainlit.md` file at the root of your project. If you do not want a welcome screen, just leave this file empty.
+提示：如需切换后端地址，请设置 `BACKEND_URL`。

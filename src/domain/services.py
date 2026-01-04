@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from datetime import date, datetime, time, timedelta
 from typing import Callable, Dict, List, Optional, TypedDict
 
+from ..infra.config import get_config
+from ..infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ..infra.variety_store import retrieve_variety_candidates
 from ..schemas import (
     FarmWorkRecommendInput,
@@ -239,6 +242,20 @@ def fetch_weather(query: WeatherQueryInput) -> WeatherSeries:
     """
     Invoke the weather tool/service. This demo returns synthetic data.
     """
+    cfg = get_config()
+    provider = normalize_provider(cfg.weather_provider)
+    prompt = json.dumps(query.model_dump(mode="json"), ensure_ascii=True, default=str)
+    tool_payload = maybe_intranet_tool(
+        "weather_lookup",
+        prompt,
+        provider,
+        cfg.weather_api_url,
+        cfg.weather_api_key,
+    )
+    if tool_payload:
+        weather_series = _coerce_tool_weather_series(tool_payload.data, query)
+        if weather_series is not None:
+            return weather_series
     return get_farm_weather(query)
 
 
@@ -254,6 +271,38 @@ def assemble_weather_series(
     allowed = {"region", "granularity", "start_date", "end_date", "points", "source"}
     payload = {k: v for k, v in payload.items() if k in allowed}
     return WeatherSeries(**payload)
+
+
+def _coerce_tool_weather_series(
+    data: Dict[str, object], query: WeatherQueryInput
+) -> Optional[WeatherSeries]:
+    if not data:
+        return None
+    try:
+        series = WeatherSeries.model_validate(data)
+    except Exception:
+        return None
+    return assemble_weather_series(series, query)
+
+
+def _default_weather_series(planting: PlantingDetails) -> WeatherSeries:
+    return WeatherSeries(
+        region=planting.region or "unknown",
+        granularity="daily",
+        start_date=planting.sowing_date,
+        end_date=None,
+        points=[],
+        source="synthetic",
+    )
+
+
+def _coerce_operation_plan(data: Dict[str, object]) -> Optional[OperationPlanResult]:
+    if not data:
+        return None
+    try:
+        return OperationPlanResult.model_validate(data)
+    except Exception:
+        return None
 
 
 def predict_growth_stage(
@@ -275,13 +324,39 @@ def predict_growth_stage(
     return predict_growth_stage_gdd(request)
 
 
-def build_operation_plan(planting: PlantingDetails) -> OperationPlanResult:
+def build_operation_plan(
+    planting: PlantingDetails,
+    weather_series: Optional[WeatherSeries] = None,
+    *,
+    user_prompt: str = "",
+) -> OperationPlanResult:
     """
     Produce field operation recommendations using the normalized planting details.
     """
+    cfg = get_config()
+    provider = normalize_provider(cfg.recommendation_provider)
+    context = {
+        "user_prompt": user_prompt,
+        "planting": planting.model_dump(mode="json"),
+    }
+    if weather_series:
+        context["weather"] = weather_series.model_dump(mode="json")
+    prompt = json.dumps(context, ensure_ascii=True, default=str)
+    tool_payload = maybe_intranet_tool(
+        "farming_recommendation",
+        prompt,
+        provider,
+        cfg.recommendation_api_url,
+        cfg.recommendation_api_key,
+    )
+    if tool_payload:
+        plan = _coerce_operation_plan(tool_payload.data)
+        if plan is not None:
+            return plan
+    if weather_series is None:
+        weather_series = _default_weather_series(planting)
     request = FarmWorkRecommendInput(
-        crop=planting.crop,
-        region=planting.region,
+        weatherSeries=weather_series,
         planting=planting,
     )
     return recommend_ops(request)
@@ -326,7 +401,11 @@ def generate_crop_calendar(
     weather_result = fetch_weather(weather_query)
     weather_series = assemble_weather_series(weather_result, weather_query)
     growth_stage = predict_growth_stage(planting, weather_series)
-    operation_plan = build_operation_plan(planting)
+    operation_plan = build_operation_plan(
+        planting,
+        weather_series,
+        user_prompt=user_prompt,
+    )
     assumptions = list(draft.assumptions)
     return CropCalendarArtifacts(
         planting=planting,

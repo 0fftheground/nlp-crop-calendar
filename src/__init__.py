@@ -1,3 +1,3 @@
-from .api.server import app  # FastAPI app for ASGI servers
+"""Project package marker."""
 
-__all__ = ["app"]
+__all__: list[str] = []

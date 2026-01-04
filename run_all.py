@@ -9,9 +9,31 @@ from typing import List
 def build_commands() -> List[list]:
     python = sys.executable
     chainlit_port = os.getenv("CHAINLIT_PORT", "8001")
+    host = os.getenv("HOST", "127.0.0.1")
     return [
-        [python, "-m", "uvicorn", "src.api.server:app", "--reload", "--port", "8000"],
-        [python, "-m", "chainlit", "run", "chainlit_app.py", "--watch", "--port", chainlit_port],
+        [
+            python,
+            "-m",
+            "uvicorn",
+            "src.api.server:app",
+            "--reload",
+            "--host",
+            host,
+            "--port",
+            "8000",
+        ],
+        [
+            python,
+            "-m",
+            "chainlit",
+            "run",
+            "chainlit_app.py",
+            "--watch",
+            "--host",
+            host,
+            "--port",
+            chainlit_port,
+        ],
     ]
 
 

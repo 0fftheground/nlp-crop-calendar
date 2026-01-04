@@ -22,7 +22,14 @@ from ...domain.services import (
     merge_planting_answers,
     normalize_and_validate_planting,
 )
-from ...schemas import GrowthStageResult, PlantingDetails, Recommendation, WeatherSeries
+from ...infra.weather_cache import get_weather_series, store_weather_series
+from ...schemas import (
+    GrowthStageResult,
+    OperationPlanResult,
+    PlantingDetails,
+    Recommendation,
+    WeatherSeries,
+)
 from ...tools.registry import execute_tool
 from .common import (
     build_fallback_planting,
@@ -113,6 +120,44 @@ def _format_plan_message(
     return "\n".join(lines)
 
 
+def _coerce_operation_plan(
+    data: Dict[str, object],
+) -> Optional[OperationPlanResult]:
+    if not data:
+        return None
+    try:
+        return OperationPlanResult.model_validate(data)
+    except Exception:
+        return None
+
+
+def _build_recommendations_from_plan(
+    plan: OperationPlanResult, planting: PlantingDetails
+) -> List[Recommendation]:
+    crop = plan.crop or planting.crop
+    regions = [planting.region] if planting.region else []
+    recommendations: List[Recommendation] = []
+    for item in plan.operations:
+        reasoning_parts = []
+        if item.window:
+            reasoning_parts.append(f"时间窗: {item.window}")
+        if item.priority:
+            reasoning_parts.append(f"优先级: {item.priority}")
+        reasoning = "；".join(reasoning_parts)
+        recommendations.append(
+            Recommendation(
+                crop=crop,
+                stage=item.stage,
+                title=item.title,
+                description=item.description,
+                reasoning=reasoning,
+                months=[],
+                regions=list(regions),
+            )
+        )
+    return recommendations
+
+
 def _extract_node(state: GraphState) -> GraphState:
     prompt = state.get("user_prompt", "")
     prior_draft = state.get("planting_draft")
@@ -189,8 +234,30 @@ def _fetch_weather_info(planting: PlantingDetails, prompt: str) -> Dict[str, obj
     query = planting.region or prompt
     result = execute_tool("weather_lookup", query)
     if not result:
-        return {"name": "weather_lookup", "message": "tool not found", "data": {}}
-    return result.model_dump(mode="json")
+        weather_series = _growth_coerce_weather_series(
+            {}, region=planting.region or "unknown"
+        )
+        weather_series_ref = store_weather_series(weather_series)
+        return {
+            "name": "weather_lookup",
+            "message": "tool not found",
+            "data": {
+                "weather_series_ref": weather_series_ref,
+                "summary": _summarize_weather_series(weather_series),
+            },
+        }
+    weather_series = _growth_coerce_weather_series(
+        result.data, region=planting.region or "unknown"
+    )
+    weather_series_ref = store_weather_series(weather_series)
+    return {
+        "name": result.name,
+        "message": result.message,
+        "data": {
+            "weather_series_ref": weather_series_ref,
+            "summary": _summarize_weather_series(weather_series),
+        },
+    }
 
 
 def _context_node(state: GraphState) -> GraphState:
@@ -284,7 +351,10 @@ def _recommend_node(state: GraphState) -> GraphState:
     weather_note = weather_info.get("message") or ""
     variety_note = variety_info.get("message") or ""
     recommendation_note = recommendation_info.get("message") or ""
-    recommendations: List[Recommendation] = []
+    plan = _coerce_operation_plan(recommendation_info.get("data", {}))
+    recommendations = (
+        _build_recommendations_from_plan(plan, planting) if plan else []
+    )
     message = _format_plan_message(
         planting,
         recommendations,
@@ -364,6 +434,22 @@ def _growth_coerce_weather_series(data: Dict[str, object], *, region: str) -> We
         points=[],
         source="workflow",
     )
+
+
+def _summarize_weather_series(weather_series: WeatherSeries) -> Dict[str, object]:
+    return {
+        "region": weather_series.region,
+        "start_date": (
+            weather_series.start_date.isoformat()
+            if weather_series.start_date
+            else None
+        ),
+        "end_date": (
+            weather_series.end_date.isoformat() if weather_series.end_date else None
+        ),
+        "points": len(weather_series.points),
+        "source": weather_series.source,
+    }
 
 
 def _growth_average_temperature(point) -> Optional[float]:
@@ -557,21 +643,35 @@ def _growth_weather_node(state: GraphState) -> GraphState:
     query = planting.region or prompt
     result = execute_tool("weather_lookup", query)
     if not result:
-        weather_info = {"name": "weather_lookup", "message": "tool not found", "data": {}}
         weather_series = _growth_coerce_weather_series(
             {}, region=planting.region or "unknown"
         )
+        weather_info = {
+            "name": "weather_lookup",
+            "message": "tool not found",
+            "data": {},
+        }
     else:
-        weather_info = result.model_dump(mode="json")
         weather_series = _growth_coerce_weather_series(
             result.data, region=planting.region or "unknown"
         )
+        weather_info = {
+            "name": result.name,
+            "message": result.message,
+            "data": {},
+        }
+
+    weather_series_ref = store_weather_series(weather_series)
+    weather_info["data"] = {
+        "weather_series_ref": weather_series_ref,
+        "summary": _summarize_weather_series(weather_series),
+    }
 
     state = add_trace(state, "weather ready")
     state.update(
         {
             "planting": planting,
-            "weather_series": weather_series,
+            "weather_series_ref": weather_series_ref,
             "weather_info": weather_info,
             "assumptions": list(draft.assumptions),
         }
@@ -582,7 +682,7 @@ def _growth_weather_node(state: GraphState) -> GraphState:
 def _growth_predict_node(state: GraphState) -> GraphState:
     prompt = state.get("user_prompt", "")
     planting = state.get("planting")
-    weather_series = state.get("weather_series")
+    weather_series_ref = state.get("weather_series_ref")
     weather_info = state.get("weather_info") or {}
     if planting is None:
         state = add_trace(state, "predict missing planting")
@@ -594,6 +694,7 @@ def _growth_predict_node(state: GraphState) -> GraphState:
             }
         )
         return state
+    weather_series = get_weather_series(weather_series_ref)
     if weather_series is None:
         weather_series = _growth_coerce_weather_series(
             {}, region=planting.region or "unknown"
@@ -649,17 +750,7 @@ def _growth_predict_node(state: GraphState) -> GraphState:
         weather_note=weather_note,
         variety_note=variety_note,
     )
-    weather_summary = {
-        "region": weather_series.region,
-        "start_date": (
-            weather_series.start_date.isoformat() if weather_series.start_date else None
-        ),
-        "end_date": (
-            weather_series.end_date.isoformat() if weather_series.end_date else None
-        ),
-        "points": len(weather_series.points),
-        "source": weather_series.source,
-    }
+    weather_summary = _summarize_weather_series(weather_series)
     state = add_trace(state, "predict complete")
     trace = list(state.get("trace") or [])
     state.update(
