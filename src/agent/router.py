@@ -37,6 +37,7 @@ class RequestRouter:
         session_id = request.session_id or "default"
         token = self._session_id_ctx.set(session_id)
         try:
+            # If the session is mid follow-up, skip routing and resume directly.
             pending = self._pending_followups.get(session_id)
             if pending:
                 if pending.get("mode") == "tool":
@@ -50,29 +51,34 @@ class RequestRouter:
                 else:
                     plan = self._run_crop_calendar_workflow(request.prompt)
                 return HandleResponse(mode="workflow", plan=plan)
+            # No pending state: let the LLM agent decide tool vs workflow.
             result = self.agent.invoke({"input": request.prompt})
         finally:
             self._session_id_ctx.reset(token)
         steps = result.get("intermediate_steps", [])
         trace = self._format_trace(steps)
+        # Prefer workflow payload if a workflow tool was invoked.
         workflow_payload = self._extract_workflow_payload(steps)
         if workflow_payload:
             plan = WorkflowResponse(**workflow_payload)
             plan.trace = trace
             return HandleResponse(mode="workflow", plan=plan)
 
+        # Otherwise handle standalone tool results (may require follow-up).
         tool_payload = self._extract_tool_payload(steps)
         if tool_payload:
             self._update_tool_followup_state(session_id, tool_payload)
             return HandleResponse(mode="tool", tool=tool_payload)
 
+        # If no tools were called, return the agent's direct response.
         if not steps:
             message = result.get("output", "") or "未识别到与农事相关的需求。"
             plan = WorkflowResponse(message=message, trace=trace)
             return HandleResponse(mode="none", plan=plan)
 
+        # Fallback: agent responded but no tool/workflow payload detected.
         plan = WorkflowResponse(message=result.get("output", ""), trace=trace)
-        return HandleResponse(mode="workflow", plan=plan)
+        return HandleResponse(mode="none", plan=plan)
 
     def _build_agent(self) -> AgentExecutor:
         llm = get_chat_model()
@@ -100,8 +106,9 @@ class RequestRouter:
     def _build_crop_workflow_tool(self):
         def _workflow(prompt: str) -> str:
             """
-            完整种植计划工作流（选种-播种-田管-病虫害-收获）。
-            当问题涉及多环节计划、信息不完整需追问或用户在补充种植要素时使用。
+            完整种植计划工作流（抽取→追问→并行工具→推荐）。
+            适用：用户要全流程/多环节方案，或在补充作物/品种/播种方式/播期等关键信息时。与种植无关不要调用
+            输入：用户原始问题或补充描述；输出：WorkflowResponse 的 JSON 字符串。
             """
             try:
                 plan = self._run_crop_calendar_workflow(prompt)

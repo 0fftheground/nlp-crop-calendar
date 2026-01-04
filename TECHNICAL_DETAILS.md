@@ -16,13 +16,15 @@ Chainlit UI --> FastAPI backend --> LangChain Agent (Tools + LangGraph Workflow 
 - `src/infra/config.py` – loads `.env`, exposes `AppConfig`.
 - `src/infra/llm.py` – instantiates `ChatOpenAI` for the main agent plus a lightweight extractor model.
 - `src/infra/llm_extract.py` – shared structured extraction helper that runs against the extractor model.
+- `src/infra/tool_provider.py` – shared provider switch + intranet HTTP caller for tools/domain services.
 - `src/infra/variety_store.py` – lightweight local retrieval for variety name hints (backed by `src/resources/varieties.json`).
 - Variety retrieval prefers embedding-based similarity when possible (env override: `EMBEDDING_MODEL`); if Qdrant is configured, it is queried first (`QDRANT_URL`, `QDRANT_COLLECTIONS` with `"variety"` key).
 - `src/schemas/models.py` – shared schemas (`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`). `UserRequest` 支持 `session_id`。
-- `src/tools/registry.py` – registry of executable tools (variety/weather/growth stage/farming recommendation) and agent-friendly wrappers.
+- `src/tools/registry.py` – registry of executable tools (variety/weather/growth stage/farming recommendation) and agent-friendly wrappers. Providers can switch between `mock` and `intranet` via `*_PROVIDER`/`*_API_URL`/`*_API_KEY`.
 - `src/agent/tool_selector.py` – legacy LLM router (not used by the current agent-based router).
+- `src/agent/intent_rules.py` – deterministic rule-based router for tests (optional).
 - `src/agent/router.py` – orchestrates tool-calling agent execution and parses tool/workflow outputs.
-- `src/domain/services.py` – 封装种植日历流水线（抽取/追问/校验/天气/生育期/农事推荐）及工具占位实现；可在 router 或 LangGraph 节点中直接调用。
+- `src/domain/services.py` – 封装种植日历流水线（抽取/追问/校验/天气/生育期/农事推荐）及工具占位实现；天气/推荐支持 provider 切换。
 - `src/agent/workflows/state.py` / `crop_graph.py` – LangGraph state types and compiled workflow.
 - `src/api/server.py` – FastAPI routers and dependency caching.
 - `chainlit_app.py` – UI client.
@@ -48,8 +50,14 @@ Chainlit UI --> FastAPI backend --> LangChain Agent (Tools + LangGraph Workflow 
 
 ## Tool Notes
 - `growth_stage_prediction` 使用 `PlantingDetailsDraft` 的结构化抽取；若缺少作物/种植方式/播种日期/地区，会返回追问提示，待用户补充后继续调用品种与气象工具并做积温计算。
+- Tools/domain services support `mock`/`intranet` providers; set `*_PROVIDER=intranet` with `*_API_URL`/`*_API_KEY` to call internal endpoints.
 
 ## Deployment Tips
 - Serve FastAPI via `uvicorn`/`gunicorn` behind HTTPS; Chainlit can be reverse-proxied or hosted separately.
 - For streaming, expose a websocket or Server-Sent Events endpoint that forwards LangGraph stream events.
 - Instrument `router.handle` and tool handlers with structured logging to monitor routing accuracy.
+
+## Testing
+- `python -m unittest` runs the minimal suite.
+- `tests/test_intent_routing.py` validates routing against `tests/intent_routing_cases.jsonl` via rule-based router.
+- `scripts/intent_routing_test.py --strategy rule|llm` supports manual routing checks.

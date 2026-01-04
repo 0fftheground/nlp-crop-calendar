@@ -33,8 +33,18 @@ EXTRACTOR_API_KEY=
 EXTRACTOR_API_BASE=
 EXTRACTOR_TEMPERATURE=0.0
 DEFAULT_REGION=global
+VARIETY_PROVIDER=mock
+VARIETY_API_URL=
+VARIETY_API_KEY=
+WEATHER_PROVIDER=mock
+WEATHER_API_URL=
+WEATHER_API_KEY=
+RECOMMENDATION_PROVIDER=mock
+RECOMMENDATION_API_URL=
+RECOMMENDATION_API_KEY=
 ```
 If `EXTRACTOR_API_KEY` is empty, the extractor falls back to `OPENAI_API_KEY`.
+Tool providers default to `mock`. Set `*_PROVIDER=intranet` and supply the `*_API_URL`/`*_API_KEY` fields to switch to intranet endpoints.
 
 ## Development Notes
 - `src/agent/router.py` + `src/tools/registry.py` implement the tool-calling agent logic. Add tool handlers or adjust the agent prompt to expand coverage.
@@ -48,6 +58,15 @@ If `EXTRACTOR_API_KEY` is empty, the extractor falls back to `OPENAI_API_KEY`.
 - A minimal local variety store lives in `src/resources/varieties.json`, used for retrieval hints during extraction.
 - Variety retrieval prefers semantic similarity via embeddings (falls back to fuzzy match); optional env: `EMBEDDING_MODEL`.
 - If Qdrant is configured, retrieval will query Qdrant first (`QDRANT_URL`, `QDRANT_COLLECTIONS` with `"variety"` key).
+
+## Tests
+```bash
+python -m unittest
+```
+For routing checks without LLM calls:
+```bash
+python scripts/intent_routing_test.py --strategy rule
+```
 
 ## Variety Embedding (Qdrant)
 If you run a local Qdrant instance, build the variety embeddings and upsert once:
