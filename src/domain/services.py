@@ -9,6 +9,11 @@ from typing import Callable, Dict, List, Optional, TypedDict
 from ..infra.config import get_config
 from ..infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ..infra.variety_store import retrieve_variety_candidates
+from ..infra.weather_cache import (
+    get_weather_series_by_query,
+    store_weather_series_by_query,
+)
+from ..observability.logging_utils import log_event
 from ..schemas import (
     FarmWorkRecommendInput,
     GrowthStageResult,
@@ -209,7 +214,12 @@ def normalize_and_validate_planting(draft: PlantingDetailsDraft) -> PlantingDeta
         raise MissingPlantingInfoError(missing)
 
     try:
-        return draft.to_canonical()
+        planting = draft.to_canonical()
+        log_event(
+            "normalized_planting",
+            planting=planting.model_dump(mode="json"),
+        )
+        return planting
     except ValueError as exc:
         raise ValueError(f"种植信息校验失败: {exc}") from exc
 
@@ -221,18 +231,15 @@ def derive_weather_range(
     default_region: Optional[str] = None,
 ) -> WeatherQueryInput:
     """
-    Infer the weather query window based on sowing/transplanting dates.
+    Infer the weather query year based on sowing/transplanting dates.
     """
     region = planting.region or default_region
     if not region:
         raise ValueError("查询气象必须提供地区信息。")
 
-    anchor_date = planting.sowing_date
-    end_date = anchor_date + timedelta(days=duration_days)
     return WeatherQueryInput(
         region=region,
-        start_date=planting.sowing_date,
-        end_date=end_date,
+        year=planting.sowing_date.year,
         granularity="daily",
         include_advice=True,
     )
@@ -242,6 +249,9 @@ def fetch_weather(query: WeatherQueryInput) -> WeatherSeries:
     """
     Invoke the weather tool/service. This demo returns synthetic data.
     """
+    cached = get_weather_series_by_query(query)
+    if cached is not None:
+        return cached
     cfg = get_config()
     provider = normalize_provider(cfg.weather_provider)
     prompt = json.dumps(query.model_dump(mode="json"), ensure_ascii=True, default=str)
@@ -252,11 +262,13 @@ def fetch_weather(query: WeatherQueryInput) -> WeatherSeries:
         cfg.weather_api_url,
         cfg.weather_api_key,
     )
+    weather_series = None
     if tool_payload:
         weather_series = _coerce_tool_weather_series(tool_payload.data, query)
-        if weather_series is not None:
-            return weather_series
-    return get_farm_weather(query)
+    if weather_series is None:
+        weather_series = get_farm_weather(query)
+    store_weather_series_by_query(query, weather_series)
+    return weather_series
 
 
 def assemble_weather_series(
@@ -266,8 +278,9 @@ def assemble_weather_series(
     Ensure the weather payload conforms to WeatherSeries for downstream tasks.
     """
     payload = raw.model_dump()
-    payload.setdefault("start_date", query.start_date if query else None)
-    payload.setdefault("end_date", query.end_date if query else None)
+    if query:
+        payload.setdefault("start_date", date(query.year, 1, 1))
+        payload.setdefault("end_date", date(query.year, 12, 31))
     allowed = {"region", "granularity", "start_date", "end_date", "points", "source"}
     payload = {k: v for k, v in payload.items() if k in allowed}
     return WeatherSeries(**payload)
@@ -305,6 +318,24 @@ def _coerce_operation_plan(data: Dict[str, object]) -> Optional[OperationPlanRes
         return None
 
 
+def _coerce_growth_stage_result(
+    data: Dict[str, object],
+) -> Optional[GrowthStageResult]:
+    if not data:
+        return None
+    try:
+        return GrowthStageResult.model_validate(data)
+    except Exception:
+        pass
+    nested = data.get("growth_stage")
+    if isinstance(nested, dict):
+        try:
+            return GrowthStageResult.model_validate(nested)
+        except Exception:
+            return None
+    return None
+
+
 def predict_growth_stage(
     planting: PlantingDetails, weather_series: Optional[WeatherSeries] = None
 ) -> GrowthStageResult:
@@ -321,7 +352,24 @@ def predict_growth_stage(
             source="synthetic",
         )
     request = PredictGrowthStageInput(planting=planting, weatherSeries=weather_series)
-    return predict_growth_stage_gdd(request)
+    cfg = get_config()
+    provider = normalize_provider(cfg.growth_stage_provider)
+    prompt = json.dumps(request.model_dump(mode="json"), ensure_ascii=True, default=str)
+    tool_payload = maybe_intranet_tool(
+        "growth_stage_prediction",
+        prompt,
+        provider,
+        cfg.growth_stage_api_url,
+        cfg.growth_stage_api_key,
+    )
+    if not tool_payload:
+        raise ValueError(
+            "生育期预测需要内网接口，请配置 GROWTH_STAGE_PROVIDER=intranet。"
+        )
+    result = _coerce_growth_stage_result(tool_payload.data)
+    if result is None:
+        raise ValueError(f"生育期接口返回异常: {tool_payload.message}")
+    return result
 
 
 def build_operation_plan(
@@ -417,27 +465,14 @@ def generate_crop_calendar(
 
 
 def predict_growth_stage_gdd(input: PredictGrowthStageInput) -> GrowthStageResult:
-    sowing_date = input.planting.sowing_date
-
-    stage_boundaries = [
-        ("germination", 10),
-        ("tillering", 35),
-        ("jointing", 60),
-        ("heading", 90),
-        ("maturity", 120),
-    ]
-
-    stage_dates = {
-        stage: (sowing_date + timedelta(days=boundary)).isoformat()
-        for stage, boundary in stage_boundaries
-    }
-
-    return GrowthStageResult(stages=stage_dates)
+    raise NotImplementedError(
+        "生育期预测已迁移至内网接口，请改用 GROWTH_STAGE_PROVIDER=intranet。"
+    )
 
 
 def get_farm_weather(input: WeatherQueryInput) -> WeatherSeries:
-    start = input.start_date
-    end = input.end_date
+    start = date(input.year, 1, 1)
+    end = date(input.year, 12, 31)
     total_days = (end - start).days + 1
     points: List[WeatherDataPoint] = []
 

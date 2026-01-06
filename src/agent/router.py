@@ -1,6 +1,6 @@
 import contextvars
 import json
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -8,7 +8,15 @@ from langchain_core.tools import tool as lc_tool
 
 from ..domain.services import MissingPlantingInfoError
 from ..infra.llm import get_chat_model
-from ..schemas.models import HandleResponse, ToolInvocation, UserRequest, WorkflowResponse
+from ..infra.pending_store import build_pending_followup_store
+from ..observability.logging_utils import log_event, summarize_text
+from ..schemas.models import (
+    HandleResponse,
+    PlantingDetailsDraft,
+    ToolInvocation,
+    UserRequest,
+    WorkflowResponse,
+)
 from ..tools.registry import build_agent_tools, execute_tool
 from .workflows.crop_graph import (
     build_graph as build_crop_graph,
@@ -20,6 +28,15 @@ class RequestRouter:
     """Use a LangChain agent to route tool calls and craft responses."""
 
     _session_id_ctx = contextvars.ContextVar("session_id", default="default")
+    _CANCEL_FOLLOWUP_KEYWORDS = (
+        "取消追问",
+        "结束追问",
+        "重新开始",
+        "开始新问题",
+        "换个问题",
+        "不继续",
+        "取消",
+    )
     CROP_WORKFLOW_TOOL = "crop_calendar_workflow"
     GROWTH_WORKFLOW_TOOL = "growth_stage_workflow"
 
@@ -31,14 +48,22 @@ class RequestRouter:
             self._build_growth_stage_workflow_tool(),
         ]
         self.agent = self._build_agent()
-        self._pending_followups: Dict[str, dict] = {}
+        self._pending_store = build_pending_followup_store()
 
     def handle(self, request: UserRequest) -> HandleResponse:
         session_id = request.session_id or "default"
         token = self._session_id_ctx.set(session_id)
         try:
             # If the session is mid follow-up, skip routing and resume directly.
-            pending = self._pending_followups.get(session_id)
+            pending = self._pending_store.get(session_id)
+            if pending and self._should_cancel_followup(request.prompt):
+                self._pending_store.delete(session_id)
+                if self._is_cancel_only(request.prompt):
+                    plan = WorkflowResponse(
+                        message="已取消追问，如需继续请描述新的问题。"
+                    )
+                    return HandleResponse(mode="none", plan=plan)
+                pending = None
             if pending:
                 if pending.get("mode") == "tool":
                     tool_payload = self._run_tool_followup(
@@ -52,10 +77,16 @@ class RequestRouter:
                     plan = self._run_crop_calendar_workflow(request.prompt)
                 return HandleResponse(mode="workflow", plan=plan)
             # No pending state: let the LLM agent decide tool vs workflow.
+            log_event("llm_router_call", prompt=request.prompt)
             result = self.agent.invoke({"input": request.prompt})
         finally:
             self._session_id_ctx.reset(token)
         steps = result.get("intermediate_steps", [])
+        log_event(
+            "llm_router_response",
+            output_summary=summarize_text(result.get("output", "")),
+            steps_count=len(steps),
+        )
         trace = self._format_trace(steps)
         # Prefer workflow payload if a workflow tool was invoked.
         workflow_payload = self._extract_workflow_payload(steps)
@@ -153,7 +184,7 @@ class RequestRouter:
     def _run_graph(self, prompt: str, graph, workflow_name: str) -> WorkflowResponse:
         session_id = self._session_id_ctx.get()
         initial_state = {"user_prompt": prompt, "trace": []}
-        pending = self._pending_followups.get(session_id)
+        pending = self._pending_store.get(session_id)
         if pending and pending.get("workflow_name") == workflow_name:
             initial_state.update(
                 {
@@ -177,7 +208,7 @@ class RequestRouter:
     ) -> ToolInvocation:
         tool_name = pending.get("tool_name")
         if not tool_name:
-            self._pending_followups.pop(session_id, None)
+            self._pending_store.delete(session_id)
             return ToolInvocation(
                 name="unknown_tool",
                 message="tool followup missing tool_name",
@@ -196,7 +227,7 @@ class RequestRouter:
         )
         result = execute_tool(tool_name, followup_prompt)
         if not result:
-            self._pending_followups.pop(session_id, None)
+            self._pending_store.delete(session_id)
             return ToolInvocation(
                 name=tool_name,
                 message="tool not found",
@@ -210,22 +241,35 @@ class RequestRouter:
     ) -> None:
         missing = state.get("missing_fields") or []
         draft = state.get("planting_draft")
-        if missing and draft is not None:
-            self._pending_followups[session_id] = {
-                "mode": "workflow",
-                "workflow_name": workflow_name,
-                "planting_draft": draft,
-                "missing_fields": missing,
-                "followup_count": state.get("followup_count", 0),
-            }
+        draft_payload = None
+        if isinstance(draft, PlantingDetailsDraft):
+            draft_payload = draft.model_dump(mode="json")
+        elif isinstance(draft, dict):
+            try:
+                draft_payload = PlantingDetailsDraft.model_validate(draft).model_dump(
+                    mode="json"
+                )
+            except Exception:
+                draft_payload = draft
+        if missing and isinstance(draft_payload, dict):
+            self._pending_store.set(
+                session_id,
+                {
+                    "mode": "workflow",
+                    "workflow_name": workflow_name,
+                    "planting_draft": draft_payload,
+                    "missing_fields": missing,
+                    "followup_count": state.get("followup_count", 0),
+                },
+            )
         else:
-            pending = self._pending_followups.get(session_id)
+            pending = self._pending_store.get(session_id)
             if (
                 pending
                 and pending.get("mode") == "workflow"
                 and pending.get("workflow_name") == workflow_name
             ):
-                self._pending_followups.pop(session_id, None)
+                self._pending_store.delete(session_id)
 
     def _update_tool_followup_state(
         self, session_id: str, tool_payload: ToolInvocation
@@ -235,17 +279,37 @@ class RequestRouter:
         draft = data.get("draft")
         if missing and isinstance(draft, dict):
             followup_count = data.get("followup_count", 0)
-            self._pending_followups[session_id] = {
-                "mode": "tool",
-                "tool_name": tool_payload.name,
-                "draft": draft,
-                "missing_fields": missing,
-                "followup_count": followup_count,
-            }
+            self._pending_store.set(
+                session_id,
+                {
+                    "mode": "tool",
+                    "tool_name": tool_payload.name,
+                    "draft": draft,
+                    "missing_fields": missing,
+                    "followup_count": followup_count,
+                },
+            )
         else:
-            pending = self._pending_followups.get(session_id)
+            pending = self._pending_store.get(session_id)
             if pending and pending.get("mode") == "tool":
-                self._pending_followups.pop(session_id, None)
+                self._pending_store.delete(session_id)
+
+    @classmethod
+    def _should_cancel_followup(cls, prompt: str) -> bool:
+        text = (prompt or "").strip().lower()
+        if not text:
+            return False
+        return any(keyword in text for keyword in cls._CANCEL_FOLLOWUP_KEYWORDS)
+
+    @classmethod
+    def _is_cancel_only(cls, prompt: str) -> bool:
+        text = (prompt or "").strip().lower()
+        if not text:
+            return False
+        for keyword in cls._CANCEL_FOLLOWUP_KEYWORDS:
+            text = text.replace(keyword, "")
+        text = text.strip(" \t,.;:!?，。！？；：")
+        return not text
 
     def _format_trace(self, steps: List[object]) -> List[str]:
         trace: List[str] = []

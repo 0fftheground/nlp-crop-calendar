@@ -1,3 +1,4 @@
+import calendar
 import importlib.util
 import os
 import sys
@@ -28,12 +29,14 @@ class DomainServiceTests(unittest.TestCase):
     def test_fetch_weather_returns_series(self) -> None:
         query = WeatherQueryInput(
             region="test",
-            start_date=date(2025, 1, 1),
-            end_date=date(2025, 1, 3),
+            year=2025,
         )
         series = fetch_weather(query)
         self.assertEqual(series.region, "test")
-        self.assertEqual(len(series.points), 3)
+        expected_days = 366 if calendar.isleap(2025) else 365
+        self.assertEqual(len(series.points), expected_days)
+        self.assertEqual(series.start_date, date(2025, 1, 1))
+        self.assertEqual(series.end_date, date(2025, 12, 31))
 
     def test_build_operation_plan_returns_ops(self) -> None:
         planting = PlantingDetails(
