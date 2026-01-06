@@ -18,13 +18,17 @@ Chainlit UI --> FastAPI backend --> LangChain Agent (Tools + LangGraph Workflow 
 - `src/infra/llm_extract.py` – shared structured extraction helper that runs against the extractor model.
 - `src/infra/tool_provider.py` – shared provider switch + intranet HTTP caller for tools/domain services.
 - `src/infra/variety_store.py` – lightweight local retrieval for variety name hints (backed by `src/resources/varieties.json`).
+- `src/infra/pending_store.py` – follow-up state persistence with TTL (memory/sqlite).
+- `src/infra/tool_cache.py` – TTL cache for tool responses (memory/sqlite).
+- `src/infra/weather_cache.py` – weather series cache with optional persistence.
+- `src/infra/interaction_store.py` – request/response audit logging (memory/sqlite).
 - Variety retrieval prefers embedding-based similarity when possible (env override: `EMBEDDING_MODEL`); if Qdrant is configured, it is queried first (`QDRANT_URL`, `QDRANT_COLLECTIONS` with `"variety"` key).
 - `src/schemas/models.py` – shared schemas (`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`). `UserRequest` 支持 `session_id`。
 - `src/tools/registry.py` – registry of executable tools (variety/weather/growth stage/farming recommendation) and agent-friendly wrappers. Providers can switch between `mock` and `intranet` via `*_PROVIDER`/`*_API_URL`/`*_API_KEY`.
 - `src/agent/tool_selector.py` – legacy LLM router (not used by the current agent-based router).
 - `src/agent/intent_rules.py` – deterministic rule-based router for tests (optional).
 - `src/agent/router.py` – orchestrates tool-calling agent execution and parses tool/workflow outputs.
-- `src/domain/services.py` – 封装种植日历流水线（抽取/追问/校验/天气/生育期/农事推荐）及工具占位实现；天气/推荐支持 provider 切换。
+- `src/domain/services.py` – 封装种植日历流水线（抽取/追问/校验/天气/生育期/农事推荐）及工具占位实现；天气/生育期/推荐支持 provider 切换。
 - `src/agent/workflows/state.py` / `crop_graph.py` – LangGraph state types and compiled workflow.
 - `src/api/server.py` – FastAPI routers and dependency caching.
 - `chainlit_app.py` – UI client.
@@ -38,6 +42,7 @@ Chainlit UI --> FastAPI backend --> LangChain Agent (Tools + LangGraph Workflow 
 - `src/agent/router.RequestRouter` creates a tool-calling agent and includes a `crop_calendar_workflow` tool that runs LangGraph.
 - Standalone tools and the workflow tool return JSON strings; the router inspects `intermediate_steps` to decide whether to respond with `mode="tool"` or `mode="workflow"`. If no tool/workflow is invoked, it returns `mode="none"` and keeps the assistant reply in `plan.message`.
 - `HandleResponse.mode` 告知前端“tool / workflow / none”，`tool.data` 或 `plan.recommendations` 继续承载结果。
+- 追问状态通过 pending store 持久化（memory/sqlite 可选）并带 TTL，`取消追问/开始新问题` 会清理该状态。
 
 ## Crop Calendar Workflow (Current)
 `src/agent/workflows/crop_graph.py` 已成为运行中的主流程，取代早期的单体 pipeline：
@@ -49,8 +54,9 @@ Chainlit UI --> FastAPI backend --> LangChain Agent (Tools + LangGraph Workflow 
 5. **农事推荐**：调用 `farming_recommendation`，输入为包含 `planting`、`weather`、`variety` 的 JSON 字符串，结果写入 `recommendation_info`；最终消息由 workflow 统一组织。
 
 ## Tool Notes
-- `growth_stage_prediction` 使用 `PlantingDetailsDraft` 的结构化抽取；若缺少作物/种植方式/播种日期/地区，会返回追问提示，待用户补充后继续调用品种与气象工具并做积温计算。
+- `growth_stage_prediction` 使用 `PlantingDetailsDraft` 的结构化抽取；若缺少作物/种植方式/播种日期/地区，会返回追问提示，待用户补充后调用内网生育期接口完成计算。
 - Tools/domain services support `mock`/`intranet` providers; set `*_PROVIDER=intranet` with `*_API_URL`/`*_API_KEY` to call internal endpoints.
+- `variety_lookup` / `weather_lookup` / `farming_recommendation` results are cached with TTL to reduce repeated calls.
 
 ## Deployment Tips
 - Serve FastAPI via `uvicorn`/`gunicorn` behind HTTPS; Chainlit can be reverse-proxied or hosted separately.

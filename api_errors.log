@@ -166,3 +166,41 @@ Traceback (most recent call last):
     raise self._make_status_error_from_response(err.response) from None
 openai.AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-IHe16***************************************FBKQ. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'code': 'invalid_api_key', 'param': None}, 'status': 401}
 
+[2026-01-06T08:59:53.953076Z] 'str' object has no attribute 'model_dump'
+Traceback (most recent call last):
+  File "F:\workspace\nlp-crop-calendar\src\api\server.py", line 79, in handle_request
+    response = router.handle(request)
+               ^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\workspace\nlp-crop-calendar\src\agent\router.py", line 70, in handle
+    plan = self._run_crop_calendar_workflow(request.prompt)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\workspace\nlp-crop-calendar\src\agent\router.py", line 164, in _run_crop_calendar_workflow
+    return self._run_graph(prompt, self.crop_graph, self.CROP_WORKFLOW_TOOL)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\workspace\nlp-crop-calendar\src\agent\router.py", line 183, in _run_graph
+    state = graph.invoke(initial_state)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\software\miniforge3\envs\llm-agent\Lib\site-packages\langgraph\pregel\__init__.py", line 2894, in invoke
+    for chunk in self.stream(
+  File "D:\software\miniforge3\envs\llm-agent\Lib\site-packages\langgraph\pregel\__init__.py", line 2527, in stream
+    for _ in runner.tick(
+  File "D:\software\miniforge3\envs\llm-agent\Lib\site-packages\langgraph\pregel\runner.py", line 157, in tick
+    run_with_retry(
+  File "D:\software\miniforge3\envs\llm-agent\Lib\site-packages\langgraph\pregel\retry.py", line 40, in run_with_retry
+    return task.proc.invoke(task.input, config)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\software\miniforge3\envs\llm-agent\Lib\site-packages\langgraph\utils\runnable.py", line 623, in invoke
+    input = context.run(step.invoke, input, config, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\software\miniforge3\envs\llm-agent\Lib\site-packages\langgraph\utils\runnable.py", line 377, in invoke
+    ret = self.func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\workspace\nlp-crop-calendar\src\agent\workflows\crop_graph.py", line 158, in _extract_node
+    draft = merge_planting_answers(prior_draft, answers=answers)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\workspace\nlp-crop-calendar\src\domain\services.py", line 85, in merge_planting_answers
+    data = draft.model_dump()
+           ^^^^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'model_dump'
+During task with name 'extract' and id 'd4eaa6b1-0ef9-dc51-3621-db368923a1df'
+

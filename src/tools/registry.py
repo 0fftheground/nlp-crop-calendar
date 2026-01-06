@@ -7,6 +7,7 @@ from ..infra.config import get_config
 from ..infra.llm_extract import llm_structured_extract
 from ..infra.variety_store import build_variety_hint
 from ..infra.variety_store import retrieve_variety_candidates
+from ..infra.tool_cache import get_tool_result_cache
 from ..infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ..domain.services import (
     MissingPlantingInfoError,
@@ -14,13 +15,15 @@ from ..domain.services import (
     merge_planting_answers,
     normalize_and_validate_planting,
 )
+from ..observability.logging_utils import log_event
 from ..schemas.models import (
-    GrowthStageResult,
     OperationItem,
     OperationPlanResult,
     PlantingDetailsDraft,
+    PredictGrowthStageInput,
     ToolInvocation,
     WeatherDataPoint,
+    WeatherQueryInput,
     WeatherSeries,
 )
 
@@ -32,27 +35,6 @@ HIDDEN_TOOL_NAMES = {"farming_recommendation", "growth_stage_prediction"}
 VARIETY_PATTERN = re.compile(r"(?:品种|品名|品系)[:：\s]*([\w\u4e00-\u9fff-]{2,20})")
 VARIETY_FALLBACK_PATTERN = re.compile(r"([\w\u4e00-\u9fff-]{2,20}号)")
 
-DEFAULT_STAGE_BOUNDARIES = [
-    ("germination", 10),
-    ("tillering", 35),
-    ("jointing", 60),
-    ("heading", 90),
-    ("maturity", 120),
-]
-DEFAULT_STAGE_TOTAL_DAYS = DEFAULT_STAGE_BOUNDARIES[-1][1]
-DEFAULT_GDD_PER_DAY = 10.0
-DEFAULT_GDD_BASE_TEMP = 10.0
-GDD_BASE_TEMPS = {
-    "水稻": 10.0,
-    "小麦": 5.0,
-    "玉米": 10.0,
-    "大豆": 10.0,
-    "油菜": 5.0,
-    "棉花": 12.0,
-    "花生": 10.0,
-}
-
-
 PLANTING_FIELD_LABELS = {
     "crop": "作物",
     "variety": "品种",
@@ -61,14 +43,43 @@ PLANTING_FIELD_LABELS = {
     "region": "地区",
 }
 
-
-}
+TOOL_CACHEABLE = {"variety_lookup", "weather_lookup", "farming_recommendation"}
 
 
 def register_tool(tool: BaseTool) -> None:
     """Register a custom LangChain tool for routing."""
     TOOLS.append(tool)
     TOOL_INDEX[tool.name] = tool
+
+
+def _should_cache_tool_result(result: ToolInvocation) -> bool:
+    return bool(result.data)
+
+
+def _get_cached_tool_result(
+    tool_name: str, provider: str, prompt: str
+) -> Optional[ToolInvocation]:
+    if tool_name not in TOOL_CACHEABLE:
+        return None
+    cache = get_tool_result_cache()
+    payload = cache.get(tool_name, provider, prompt)
+    if not payload:
+        return None
+    try:
+        return ToolInvocation(**payload)
+    except Exception:
+        return None
+
+
+def _store_tool_result(
+    tool_name: str, provider: str, prompt: str, result: ToolInvocation
+) -> None:
+    if tool_name not in TOOL_CACHEABLE:
+        return None
+    if not _should_cache_tool_result(result):
+        return None
+    cache = get_tool_result_cache()
+    cache.set(tool_name, provider, prompt, result.model_dump(mode="json"))
 
 
 def clear_tools() -> None:
@@ -201,16 +212,6 @@ def _format_missing_planting_question(missing_fields: List[str]) -> str:
     return f"生育期预测还需要补充：{joined}。请提供后继续。"
 
 
-def _normalize_growth_days(value: object, default: int = DEFAULT_STAGE_TOTAL_DAYS) -> int:
-    try:
-        if value is None:
-            return default
-        days = int(value)
-        return days if days > 0 else default
-    except (TypeError, ValueError):
-        return default
-
-
 def _coerce_weather_series(data: Dict[str, object], *, region: str) -> WeatherSeries:
     if data:
         try:
@@ -227,61 +228,100 @@ def _coerce_weather_series(data: Dict[str, object], *, region: str) -> WeatherSe
     )
 
 
-def _average_temperature(point: WeatherDataPoint) -> Optional[float]:
-    if point.temperature is not None:
-        return float(point.temperature)
-    if point.temperature_max is not None and point.temperature_min is not None:
-        return (float(point.temperature_max) + float(point.temperature_min)) / 2
+def _summarize_tool_output(result: ToolInvocation) -> Dict[str, object]:
+    summary: Dict[str, object] = {
+        "name": result.name,
+        "message": result.message,
+    }
+    data = result.data or {}
+    if isinstance(data, dict):
+        summary["data_keys"] = list(data.keys())
+        points = data.get("points")
+        if isinstance(points, list):
+            summary["points_count"] = len(points)
+        operations = data.get("operations")
+        if isinstance(operations, list):
+            summary["operations_count"] = len(operations)
+        recommendations = data.get("recommendations")
+        if isinstance(recommendations, list):
+            summary["recommendations_count"] = len(recommendations)
+    return summary
+
+
+def _parse_year(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, date):
+        return value.year
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit() and len(text) == 4:
+            return int(text)
+        try:
+            return date.fromisoformat(text).year
+        except ValueError:
+            return None
     return None
 
 
-def _sum_gdd(points: List[WeatherDataPoint], base_temp: float) -> float:
-    total = 0.0
-    for point in points:
-        avg_temp = _average_temperature(point)
-        if avg_temp is None:
-            continue
-        total += max(0.0, avg_temp - base_temp)
-    return total
+def _build_weather_query_from_payload(
+    payload: Dict[str, object],
+) -> Optional[WeatherQueryInput]:
+    region = payload.get("region")
+    if not region:
+        return None
+    year = _parse_year(payload.get("year"))
+    if year is None:
+        year = _parse_year(payload.get("start_date")) or _parse_year(payload.get("end_date"))
+    if year is None:
+        return None
+    data: Dict[str, object] = {"region": region, "year": year}
+    granularity = payload.get("granularity")
+    if granularity in {"hourly", "daily"}:
+        data["granularity"] = granularity
+    include_advice = payload.get("include_advice")
+    if isinstance(include_advice, bool):
+        data["include_advice"] = include_advice
+    try:
+        return WeatherQueryInput(**data)
+    except Exception:
+        return None
 
 
-def _build_gdd_thresholds(total_required_gdd: float) -> List[Tuple[str, float]]:
-    total = total_required_gdd or (DEFAULT_GDD_PER_DAY * DEFAULT_STAGE_TOTAL_DAYS)
-    thresholds: List[Tuple[str, float]] = []
-    for stage, day in DEFAULT_STAGE_BOUNDARIES:
-        thresholds.append((stage, total * (day / DEFAULT_STAGE_TOTAL_DAYS)))
-    return thresholds
-
-
-def _infer_stage(
-    cumulative_gdd: float, thresholds: List[Tuple[str, float]]
-) -> Tuple[str, str]:
-    predicted = "harvest"
-    next_stage = ""
-    for index, (stage, boundary) in enumerate(thresholds):
-        if cumulative_gdd <= boundary:
-            predicted = stage
-            next_stage = (
-                thresholds[index + 1][0] if index + 1 < len(thresholds) else "harvest"
-            )
-            break
-    return predicted, next_stage
-
-
-def _estimate_stage_dates(
-    sowing_date: date,
-    avg_gdd_per_day: float,
-    thresholds: List[Tuple[str, float]],
-) -> Dict[str, str]:
-    if avg_gdd_per_day <= 0:
-        return {}
-    stage_dates: Dict[str, str] = {}
-    for stage, boundary in thresholds:
-        days_needed = int(round(boundary / avg_gdd_per_day))
-        stage_dates[f"{stage}_date"] = (
-            sowing_date + timedelta(days=days_needed)
-        ).isoformat()
-    return stage_dates
+def _normalize_weather_prompt(
+    prompt: str,
+) -> Tuple[str, Optional[WeatherQueryInput]]:
+    if not prompt:
+        return "", None
+    text = prompt.strip()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            query = WeatherQueryInput(region=text, year=date.today().year)
+        except Exception:
+            return text, None
+        canonical = json.dumps(
+            query.model_dump(mode="json"),
+            ensure_ascii=True,
+            sort_keys=True,
+            default=str,
+        )
+        return canonical, query
+    if not isinstance(payload, dict):
+        return text, None
+    query = _build_weather_query_from_payload(payload)
+    if query is None:
+        return text, None
+    canonical = json.dumps(
+        query.model_dump(mode="json"),
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    return canonical, query
 
 
 @auto_register_tool(
@@ -294,6 +334,9 @@ def _estimate_stage_dates(
 def variety_lookup(prompt: str) -> ToolInvocation:
     cfg = get_config()
     provider = normalize_provider(cfg.variety_provider)
+    cached = _get_cached_tool_result("variety_lookup", provider, prompt)
+    if cached:
+        return cached
     intranet = maybe_intranet_tool(
         "variety_lookup",
         prompt,
@@ -302,6 +345,7 @@ def variety_lookup(prompt: str) -> ToolInvocation:
         cfg.variety_api_key,
     )
     if intranet:
+        _store_tool_result("variety_lookup", provider, prompt, intranet)
         return intranet
     crop, variety = _infer_crop_and_variety(prompt)
     payload = {
@@ -316,11 +360,13 @@ def variety_lookup(prompt: str) -> ToolInvocation:
         },
         "source": "mock",
     }
-    return ToolInvocation(
+    result = ToolInvocation(
         name="variety_lookup",
         message=f"已返回 {crop} 品种 {variety} 的模拟信息。",
         data=payload,
     )
+    _store_tool_result("variety_lookup", provider, prompt, result)
+    return result
 
 
 @auto_register_tool(
@@ -330,18 +376,36 @@ def variety_lookup(prompt: str) -> ToolInvocation:
 def weather_lookup(prompt: str) -> ToolInvocation:
     cfg = get_config()
     provider = normalize_provider(cfg.weather_provider)
+    prompt = prompt or ""
+    cache_prompt, query = _normalize_weather_prompt(prompt)
+    cached = _get_cached_tool_result("weather_lookup", provider, cache_prompt)
+    if cached:
+        return cached
+    intranet_prompt = cache_prompt if query else prompt
     intranet = maybe_intranet_tool(
         "weather_lookup",
-        prompt,
+        intranet_prompt,
         provider,
         cfg.weather_api_url,
         cfg.weather_api_key,
     )
     if intranet:
+        _store_tool_result("weather_lookup", provider, cache_prompt, intranet)
         return intranet
-    start = date.today()
+    if query:
+        start = date(query.year, 1, 1)
+        end = date(query.year, 12, 31)
+        granularity = query.granularity or "daily"
+        region = query.region
+        total_days = max(1, (end - start).days + 1)
+    else:
+        start = date.today()
+        end = start + timedelta(days=2)
+        granularity = "daily"
+        region = prompt or "unknown"
+        total_days = 3
     points: List[WeatherDataPoint] = []
-    for offset in range(3):
+    for offset in range(total_days):
         current = start + timedelta(days=offset)
         points.append(
             WeatherDataPoint(
@@ -356,25 +420,27 @@ def weather_lookup(prompt: str) -> ToolInvocation:
             )
         )
     series = WeatherSeries(
-        region=prompt or "unknown",
-        granularity="daily",
+        region=region,
+        granularity=granularity,
         start_date=start,
-        end_date=start + timedelta(days=2),
+        end_date=end,
         points=points,
         source="mock",
     )
-    return ToolInvocation(
+    result = ToolInvocation(
         name="weather_lookup",
-        message="已返回 3 天游模拟气象数据。",
+        message="已返回模拟气象数据。",
         data=series.model_dump(mode="json"),
     )
+    _store_tool_result("weather_lookup", provider, cache_prompt, result)
+    return result
 
 
 @auto_register_tool(
     "growth_stage_prediction",
     description=(
         "基于自然语言抽取种植信息（作物/品种/方式/播期/地区），"
-        "依次调用品种/气象工具并用积温预测生育期。仅用于生育期预测。"
+        "补齐后调用内网生育期接口完成预测。仅用于生育期预测。"
     ),
 )
 def growth_stage_prediction(prompt: str) -> ToolInvocation:
@@ -457,59 +523,55 @@ def growth_stage_prediction(prompt: str) -> ToolInvocation:
         trace.append("weather_lookup missing")
 
     weather_series = _coerce_weather_series(weather_data, region=region)
-    gdd_base = GDD_BASE_TEMPS.get(crop, DEFAULT_GDD_BASE_TEMP)
-    cumulative_gdd = _sum_gdd(weather_series.points, gdd_base)
-    observed_days = len(weather_series.points)
-    avg_gdd_per_day = cumulative_gdd / observed_days if observed_days else 0.0
-
-    growth_days = _normalize_growth_days(variety_data.get("growth_duration_days"))
-    total_required_gdd = growth_days * DEFAULT_GDD_PER_DAY
-    thresholds = _build_gdd_thresholds(total_required_gdd)
-    predicted_stage, next_stage = _infer_stage(cumulative_gdd, thresholds)
-
-    sowing_date = planting.sowing_date
-    days_since = (date.today() - sowing_date).days
-
-    stage_dates = _estimate_stage_dates(sowing_date, avg_gdd_per_day, thresholds)
-    result = GrowthStageResult(
-        stages={
-            "predicted_stage": predicted_stage,
-            "estimated_next_stage": next_stage,
-            "days_since_sowing": str(days_since),
-            "gdd_accumulated": f"{cumulative_gdd:.1f}",
-            "gdd_required_maturity": f"{total_required_gdd:.1f}",
-            "base_temperature": f"{gdd_base:.1f}",
-            "growth_duration_days": str(growth_days),
-            "sowing_date": sowing_date.isoformat(),
-            "method": "gdd_workflow",
-            **stage_dates,
-        }
+    weather_summary = {
+        "region": weather_series.region,
+        "start_date": (
+            weather_series.start_date.isoformat()
+            if weather_series.start_date
+            else None
+        ),
+        "end_date": (
+            weather_series.end_date.isoformat() if weather_series.end_date else None
+        ),
+        "points": len(weather_series.points),
+        "source": weather_series.source,
+    }
+    request = PredictGrowthStageInput(planting=planting, weatherSeries=weather_series)
+    request_payload = json.dumps(
+        request.model_dump(mode="json"), ensure_ascii=True, default=str
     )
-    payload = result.model_dump(mode="json")
-    payload["workflow"] = {
+    cfg = get_config()
+    provider = normalize_provider(cfg.growth_stage_provider)
+    intranet = maybe_intranet_tool(
+        "growth_stage_prediction",
+        request_payload,
+        provider,
+        cfg.growth_stage_api_url,
+        cfg.growth_stage_api_key,
+    )
+    trace.append(
+        "growth_stage_intranet ok" if intranet else "growth_stage_intranet missing"
+    )
+    workflow_payload = {
         "inputs": {
             "planting": planting.model_dump(exclude_none=True, mode="json"),
         },
         "variety": variety_data,
-        "weather_summary": {
-            "region": weather_series.region,
-            "start_date": (
-                weather_series.start_date.isoformat()
-                if weather_series.start_date
-                else None
-            ),
-            "end_date": (
-                weather_series.end_date.isoformat() if weather_series.end_date else None
-            ),
-            "points": len(weather_series.points),
-            "source": weather_series.source,
-        },
+        "weather_summary": weather_summary,
         "trace": trace,
     }
+    if intranet:
+        payload = dict(intranet.data or {})
+        payload.setdefault("workflow", workflow_payload)
+        return ToolInvocation(
+            name=intranet.name,
+            message=intranet.message,
+            data=payload,
+        )
     return ToolInvocation(
         name="growth_stage_prediction",
-        message="已完成品种查询、气象查询与积温计算，返回生育期预测结果。",
-        data=payload,
+        message="生育期预测需要内网接口，请配置 GROWTH_STAGE_PROVIDER=intranet。",
+        data={"workflow": workflow_payload},
     )
 
 
@@ -523,6 +585,9 @@ def growth_stage_prediction(prompt: str) -> ToolInvocation:
 def farming_recommendation(prompt: str) -> ToolInvocation:
     cfg = get_config()
     provider = normalize_provider(cfg.recommendation_provider)
+    cached = _get_cached_tool_result("farming_recommendation", provider, prompt)
+    if cached:
+        return cached
     intranet = maybe_intranet_tool(
         "farming_recommendation",
         prompt,
@@ -531,6 +596,7 @@ def farming_recommendation(prompt: str) -> ToolInvocation:
         cfg.recommendation_api_key,
     )
     if intranet:
+        _store_tool_result("farming_recommendation", provider, prompt, intranet)
         return intranet
     crop, _ = _infer_crop_and_variety(prompt)
     ops = [
@@ -562,11 +628,13 @@ def farming_recommendation(prompt: str) -> ToolInvocation:
         operations=ops,
         metadata={"source": "mock"},
     )
-    return ToolInvocation(
+    result = ToolInvocation(
         name="farming_recommendation",
         message="已返回模拟农事推荐。",
         data=plan.model_dump(mode="json"),
     )
+    _store_tool_result("farming_recommendation", provider, prompt, result)
+    return result
 
 
 def initialize_tools() -> None:
@@ -584,6 +652,7 @@ def execute_tool(name: str, prompt: str) -> Optional[ToolInvocation]:
         return None
     result = tool.invoke(prompt)
     if isinstance(result, ToolInvocation):
+        log_event("tool_output", tool=_summarize_tool_output(result))
         return result
     raise TypeError(
         f"Tool '{name}' returned unsupported type {type(result)!r}; "

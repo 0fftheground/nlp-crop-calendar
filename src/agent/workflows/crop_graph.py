@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from langgraph.graph import END, StateGraph
 
@@ -22,11 +21,16 @@ from ...domain.services import (
     merge_planting_answers,
     normalize_and_validate_planting,
 )
+from ...infra.config import get_config
+from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ...infra.weather_cache import get_weather_series, store_weather_series
+from ...observability.logging_utils import get_trace_id, reset_trace_id, set_trace_id
 from ...schemas import (
     GrowthStageResult,
     OperationPlanResult,
     PlantingDetails,
+    PlantingDetailsDraft,
+    PredictGrowthStageInput,
     Recommendation,
     WeatherSeries,
 )
@@ -56,26 +60,6 @@ GROWTH_FIELD_LABELS = {
 PLANTING_METHOD_LABELS = {
     "direct_seeding": "直播",
     "transplanting": "移栽",
-}
-
-STAGE_BOUNDARIES = [
-    ("germination", 10),
-    ("tillering", 35),
-    ("jointing", 60),
-    ("heading", 90),
-    ("maturity", 120),
-]
-DEFAULT_STAGE_TOTAL_DAYS = STAGE_BOUNDARIES[-1][1]
-DEFAULT_GDD_PER_DAY = 10.0
-DEFAULT_GDD_BASE_TEMP = 10.0
-GDD_BASE_TEMPS = {
-    "水稻": 10.0,
-    "小麦": 5.0,
-    "玉米": 10.0,
-    "大豆": 10.0,
-    "油菜": 5.0,
-    "棉花": 12.0,
-    "花生": 10.0,
 }
 
 
@@ -158,9 +142,32 @@ def _build_recommendations_from_plan(
     return recommendations
 
 
+def _coerce_planting_draft(value: object) -> Optional[PlantingDetailsDraft]:
+    if value is None:
+        return None
+    if isinstance(value, PlantingDetailsDraft):
+        return value
+    if isinstance(value, dict):
+        try:
+            return PlantingDetailsDraft.model_validate(value)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict):
+            try:
+                return PlantingDetailsDraft.model_validate(payload)
+            except Exception:
+                return None
+    return None
+
+
 def _extract_node(state: GraphState) -> GraphState:
     prompt = state.get("user_prompt", "")
-    prior_draft = state.get("planting_draft")
+    prior_draft = _coerce_planting_draft(state.get("planting_draft"))
     prior_missing = state.get("missing_fields") or []
     followup_count = state.get("followup_count", 0)
     try:
@@ -293,9 +300,25 @@ def _context_node(state: GraphState) -> GraphState:
         )
         return state
 
+    trace_id = get_trace_id()
+
+    def _wrap_with_trace(func):
+        def _inner(*args, **kwargs):
+            token = set_trace_id(trace_id)
+            try:
+                return func(*args, **kwargs)
+            finally:
+                reset_trace_id(token)
+
+        return _inner
+
     with ThreadPoolExecutor(max_workers=2) as executor:
-        weather_future = executor.submit(_fetch_weather_info, planting, prompt)
-        variety_future = executor.submit(_fetch_variety_info, planting, prompt)
+        weather_future = executor.submit(
+            _wrap_with_trace(_fetch_weather_info), planting, prompt
+        )
+        variety_future = executor.submit(
+            _wrap_with_trace(_fetch_variety_info), planting, prompt
+        )
         weather_info = weather_future.result()
         variety_info = variety_future.result()
 
@@ -408,18 +431,6 @@ def _growth_format_missing_question(missing_fields: List[str]) -> str:
     )
 
 
-def _growth_normalize_growth_days(
-    value: object, default: int = DEFAULT_STAGE_TOTAL_DAYS
-) -> int:
-    try:
-        if value is None:
-            return default
-        days = int(value)
-        return days if days > 0 else default
-    except (TypeError, ValueError):
-        return default
-
-
 def _growth_coerce_weather_series(data: Dict[str, object], *, region: str) -> WeatherSeries:
     if data:
         try:
@@ -452,61 +463,22 @@ def _summarize_weather_series(weather_series: WeatherSeries) -> Dict[str, object
     }
 
 
-def _growth_average_temperature(point) -> Optional[float]:
-    if point.temperature is not None:
-        return float(point.temperature)
-    if point.temperature_max is not None and point.temperature_min is not None:
-        return (float(point.temperature_max) + float(point.temperature_min)) / 2
+def _coerce_growth_stage_result(
+    data: Dict[str, object],
+) -> Optional[GrowthStageResult]:
+    if not data:
+        return None
+    try:
+        return GrowthStageResult.model_validate(data)
+    except Exception:
+        pass
+    nested = data.get("growth_stage")
+    if isinstance(nested, dict):
+        try:
+            return GrowthStageResult.model_validate(nested)
+        except Exception:
+            return None
     return None
-
-
-def _growth_sum_gdd(points, base_temp: float) -> float:
-    total = 0.0
-    for point in points:
-        avg_temp = _growth_average_temperature(point)
-        if avg_temp is None:
-            continue
-        total += max(0.0, avg_temp - base_temp)
-    return total
-
-
-def _growth_build_gdd_thresholds(total_required_gdd: float) -> List[Tuple[str, float]]:
-    total = total_required_gdd or (DEFAULT_GDD_PER_DAY * DEFAULT_STAGE_TOTAL_DAYS)
-    thresholds: List[Tuple[str, float]] = []
-    for stage, day in STAGE_BOUNDARIES:
-        thresholds.append((stage, total * (day / DEFAULT_STAGE_TOTAL_DAYS)))
-    return thresholds
-
-
-def _growth_infer_stage(
-    cumulative_gdd: float, thresholds: List[Tuple[str, float]]
-) -> Tuple[str, str]:
-    predicted = "harvest"
-    next_stage = ""
-    for index, (stage, boundary) in enumerate(thresholds):
-        if cumulative_gdd <= boundary:
-            predicted = stage
-            next_stage = (
-                thresholds[index + 1][0] if index + 1 < len(thresholds) else "harvest"
-            )
-            break
-    return predicted, next_stage
-
-
-def _growth_estimate_stage_dates(
-    sowing_date: date,
-    avg_gdd_per_day: float,
-    thresholds: List[Tuple[str, float]],
-) -> Dict[str, str]:
-    if avg_gdd_per_day <= 0:
-        return {}
-    stage_dates: Dict[str, str] = {}
-    for stage, boundary in thresholds:
-        days_needed = int(round(boundary / avg_gdd_per_day))
-        stage_dates[f"{stage}_date"] = (
-            sowing_date + timedelta(days=days_needed)
-        ).isoformat()
-    return stage_dates
 
 
 def _growth_format_growth_stage_message(
@@ -541,7 +513,7 @@ def _growth_format_growth_stage_message(
 
 def _growth_extract_node(state: GraphState) -> GraphState:
     prompt = state.get("user_prompt", "")
-    prior_draft = state.get("planting_draft")
+    prior_draft = _coerce_planting_draft(state.get("planting_draft"))
     prior_missing = state.get("missing_fields") or []
     followup_count = state.get("followup_count", 0)
     try:
@@ -680,7 +652,6 @@ def _growth_weather_node(state: GraphState) -> GraphState:
 
 
 def _growth_predict_node(state: GraphState) -> GraphState:
-    prompt = state.get("user_prompt", "")
     planting = state.get("planting")
     weather_series_ref = state.get("weather_series_ref")
     weather_info = state.get("weather_info") or {}
@@ -713,61 +684,73 @@ def _growth_predict_node(state: GraphState) -> GraphState:
         variety_data = {}
         state = add_trace(state, "variety_lookup missing")
 
-    gdd_base = GDD_BASE_TEMPS.get(crop, DEFAULT_GDD_BASE_TEMP)
-    cumulative_gdd = _growth_sum_gdd(weather_series.points, gdd_base)
-    observed_days = len(weather_series.points)
-    avg_gdd_per_day = cumulative_gdd / observed_days if observed_days else 0.0
-
-    growth_days = _growth_normalize_growth_days(variety_data.get("growth_duration_days"))
-    total_required_gdd = growth_days * DEFAULT_GDD_PER_DAY
-    thresholds = _growth_build_gdd_thresholds(total_required_gdd)
-    predicted_stage, next_stage = _growth_infer_stage(cumulative_gdd, thresholds)
-
-    sowing_date = planting.sowing_date
-    days_since = (date.today() - sowing_date).days
-    stage_dates = _growth_estimate_stage_dates(sowing_date, avg_gdd_per_day, thresholds)
-
-    result = GrowthStageResult(
-        stages={
-            "predicted_stage": predicted_stage,
-            "estimated_next_stage": next_stage,
-            "days_since_sowing": str(days_since),
-            "gdd_accumulated": f"{cumulative_gdd:.1f}",
-            "gdd_required_maturity": f"{total_required_gdd:.1f}",
-            "base_temperature": f"{gdd_base:.1f}",
-            "growth_duration_days": str(growth_days),
-            "sowing_date": sowing_date.isoformat(),
-            "method": "gdd_workflow",
-            **stage_dates,
-        }
+    request = PredictGrowthStageInput(planting=planting, weatherSeries=weather_series)
+    request_payload = json.dumps(
+        request.model_dump(mode="json"), ensure_ascii=True, default=str
+    )
+    cfg = get_config()
+    provider = normalize_provider(cfg.growth_stage_provider)
+    tool_payload = maybe_intranet_tool(
+        "growth_stage_prediction",
+        request_payload,
+        provider,
+        cfg.growth_stage_api_url,
+        cfg.growth_stage_api_key,
     )
 
     weather_note = weather_info.get("message") or ""
     variety_note = variety_info.get("message") or ""
-    message = _growth_format_growth_stage_message(
-        planting,
-        result.stages,
-        weather_note=weather_note,
-        variety_note=variety_note,
-    )
     weather_summary = _summarize_weather_series(weather_series)
+    workflow_payload = {
+        "inputs": {
+            "planting": planting.model_dump(exclude_none=True, mode="json"),
+        },
+        "variety": variety_data,
+        "weather_summary": weather_summary,
+    }
+
+    if not tool_payload:
+        state = add_trace(state, "growth_stage_intranet missing")
+        trace = list(state.get("trace") or [])
+        workflow_payload["trace"] = trace
+        state.update(
+            {
+                "message": "生育期预测需要内网接口，请配置 GROWTH_STAGE_PROVIDER=intranet。",
+                "data": {"workflow": workflow_payload},
+                "weather_info": weather_info,
+                "variety_info": variety_info,
+            }
+        )
+        return state
+
+    state = add_trace(state, "growth_stage_intranet ok")
+    result = _coerce_growth_stage_result(tool_payload.data or {})
+    if result:
+        message = _growth_format_growth_stage_message(
+            planting,
+            result.stages,
+            weather_note=weather_note,
+            variety_note=variety_note,
+        )
+    else:
+        message = tool_payload.message or "已完成生育期预测。"
     state = add_trace(state, "predict complete")
     trace = list(state.get("trace") or [])
+    workflow_payload.update(
+        {
+            "trace": trace,
+            "provider_message": tool_payload.message,
+            "provider_response": tool_payload.data,
+        }
+    )
+    data_payload = {"workflow": workflow_payload}
+    if result:
+        data_payload["growth_stage"] = result.model_dump(mode="json")
     state.update(
         {
             "growth_stage": result,
             "message": message,
-            "data": {
-                "growth_stage": result.model_dump(mode="json"),
-                "workflow": {
-                    "inputs": {
-                        "planting": planting.model_dump(exclude_none=True, mode="json"),
-                    },
-                    "variety": variety_data,
-                    "weather_summary": weather_summary,
-                    "trace": trace,
-                },
-            },
+            "data": data_payload,
             "weather_info": weather_info,
             "variety_info": variety_info,
         }

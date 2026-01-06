@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional
 from ..domain.enums import PlantingMethod
 from ..domain.normalizers import EnumNormalizer
-from pydantic import BaseModel, Field,field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class FarmerQuery(BaseModel):
@@ -192,14 +193,49 @@ class GrowthStageResult(BaseModel):
     stages: Dict[str, str] = Field(default_factory=dict)
 
 
+def _strip_admin_prefix(value: str) -> str:
+    for marker in ("特别行政区", "自治区", "省"):
+        if marker in value:
+            candidate = value.split(marker)[-1]
+            if candidate:
+                return candidate
+    return value
+
+
 class WeatherQueryInput(BaseModel):
     """Parameters for querying weather data."""
 
-    region: str
-    start_date: date
-    end_date: date
+    region: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="市级行政区或站点名称。",
+    )
+    year: int = Field(
+        ...,
+        ge=1900,
+        le=2100,
+        description="查询年份（按自然年返回气象序列）。",
+    )
     granularity: Literal["hourly", "daily"] = "daily"
     include_advice: bool = False
+
+    @field_validator("region", mode="before")
+    @classmethod
+    def _normalize_region(cls, value: object) -> object:
+        if value is None:
+            return value
+        text = str(value).strip()
+        if not text:
+            return text
+        text = re.sub(r"\s+", "", text)
+        match = re.search(r".+?市", text)
+        if match:
+            return _strip_admin_prefix(match.group(0))
+        match = re.search(r".+?(州|盟|地区)", text)
+        if match:
+            return _strip_admin_prefix(match.group(0))
+        return _strip_admin_prefix(text)
 
 
 class WeatherDataPoint(BaseModel):
@@ -243,6 +279,9 @@ class WeatherSeriesDraft(BaseModel):
     region: Optional[str] = Field(
         default=None, description="自然语言·地区，如“武汉”或“松滋市”。"
     )
+    year: Optional[int] = Field(
+        default=None, description="自然语言中的年份。"
+    )
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     granularity: Optional[Literal["hourly", "daily"]] = None
@@ -262,17 +301,32 @@ class WeatherSeriesDraft(BaseModel):
         Args:
             defaults: Optional defaults, e.g., from user profile or workflow state.
         Raises:
-            ValueError: if region or date range is still missing.
+            ValueError: if region or year is still missing.
         """
         base = defaults.model_dump() if defaults else {}
         merged: Dict[str, Any] = {**base, **self.model_dump(exclude_none=True)}
-        required = ["region", "start_date", "end_date"]
+        year = merged.get("year")
+        start_date = merged.get("start_date")
+        end_date = merged.get("end_date")
+        if year is None:
+            if start_date and end_date and start_date.year != end_date.year:
+                raise ValueError("start_date and end_date must be in the same year")
+            if start_date:
+                year = start_date.year
+            elif end_date:
+                year = end_date.year
+            else:
+                year = date.today().year
+        merged["year"] = year
+        required = ["region", "year"]
         missing = [f for f in required if merged.get(f) is None]
         if missing:
             raise ValueError(f"Missing required fields for WeatherQueryInput: {missing}")
         merged.setdefault("granularity", "daily")
         merged.setdefault("include_advice", False)
-        return WeatherQueryInput(**merged)
+        allowed = {"region", "year", "granularity", "include_advice"}
+        filtered = {k: v for k, v in merged.items() if k in allowed}
+        return WeatherQueryInput(**filtered)
 
 
 class FarmWorkRecommendInput(BaseModel):
@@ -283,6 +337,10 @@ class FarmWorkRecommendInput(BaseModel):
         default=None,
         description="种植详情，便于推荐引擎共享上下文。",
     )
+
+    @property
+    def crop(self) -> str:
+        return self.planting.crop
 
 
 class OperationItem(BaseModel):
