@@ -1,12 +1,21 @@
 import contextvars
 import json
+import re
 from typing import List, Optional
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool as lc_tool
 
-from ..domain.services import MissingPlantingInfoError
+from ..domain.services import (
+    CROP_KEYWORDS,
+    DATE_PATTERN,
+    METHOD_KEYWORDS,
+    MissingPlantingInfoError,
+    REGION_PATTERN,
+    VARIETY_FALLBACK_PATTERN,
+    VARIETY_PATTERN,
+)
 from ..infra.llm import get_chat_model
 from ..infra.pending_store import build_pending_followup_store
 from ..observability.logging_utils import log_event, summarize_text
@@ -22,6 +31,7 @@ from .workflows.crop_graph import (
     build_graph as build_crop_graph,
     build_growth_stage_graph,
 )
+from .workflows.common import UNKNOWN_MARKERS
 
 
 class RequestRouter:
@@ -37,6 +47,33 @@ class RequestRouter:
         "不继续",
         "取消",
     )
+    _RELATIVE_DATE_MARKERS = (
+        "今天",
+        "明天",
+        "后天",
+        "本周",
+        "下周",
+        "本月",
+        "下月",
+        "今年",
+        "明年",
+        "近期",
+        "最近",
+    )
+    _WEATHER_KEYWORDS = (
+        "天气",
+        "气象",
+        "气温",
+        "温度",
+        "降雨",
+        "降水",
+        "雨量",
+        "风速",
+        "湿度",
+        "预报",
+    )
+    _MONTH_DAY_PATTERN = re.compile(r"(?:^|\\D)(\\d{1,2})月(\\d{1,2})[日号]?")
+    _MONTH_PATTERN = re.compile(r"(?:^|\\D)(\\d{1,2})月(?:上旬|中旬|下旬|初|底)?")
     CROP_WORKFLOW_TOOL = "crop_calendar_workflow"
     GROWTH_WORKFLOW_TOOL = "growth_stage_workflow"
 
@@ -63,6 +100,9 @@ class RequestRouter:
                         message="已取消追问，如需继续请描述新的问题。"
                     )
                     return HandleResponse(mode="none", plan=plan)
+                pending = None
+            if pending and not self._should_resume_followup(request.prompt, pending):
+                self._pending_store.delete(session_id)
                 pending = None
             if pending:
                 if pending.get("mode") == "tool":
@@ -317,6 +357,62 @@ class RequestRouter:
             trace.append(f"tool={action.tool} input={action.tool_input}")
             trace.append(f"observation={observation}")
         return trace
+
+    @classmethod
+    def _has_weather_intent(cls, text: str) -> bool:
+        return any(keyword in text for keyword in cls._WEATHER_KEYWORDS)
+
+    @classmethod
+    def _has_date_signal(cls, text: str, *, weather_intent: bool) -> bool:
+        sowing_context = any(token in text for token in ("播种", "播期", "种", "栽"))
+        if weather_intent and not sowing_context:
+            return False
+        if DATE_PATTERN.search(text):
+            return True
+        if cls._MONTH_DAY_PATTERN.search(text) or cls._MONTH_PATTERN.search(text):
+            return True
+        if any(marker in text for marker in cls._RELATIVE_DATE_MARKERS):
+            if len(text) <= 6 or sowing_context:
+                return True
+        return False
+
+    @classmethod
+    def _has_region_signal(cls, text: str, *, weather_intent: bool) -> bool:
+        if weather_intent:
+            return False
+        if REGION_PATTERN.search(text):
+            return True
+        return any(keyword in text for keyword in ("地区", "区域", "位置"))
+
+    def _should_resume_followup(self, prompt: str, pending: dict) -> bool:
+        text = (prompt or "").strip()
+        if not text:
+            return False
+        if any(marker in text for marker in UNKNOWN_MARKERS):
+            return True
+        missing_fields = pending.get("missing_fields") or []
+        if not missing_fields:
+            return False
+        weather_intent = self._has_weather_intent(text)
+        if "crop" in missing_fields and any(crop in text for crop in CROP_KEYWORDS):
+            return True
+        if "variety" in missing_fields and (
+            VARIETY_PATTERN.search(text) or VARIETY_FALLBACK_PATTERN.search(text)
+        ):
+            return True
+        if "planting_method" in missing_fields and any(
+            keyword in text for keyword in METHOD_KEYWORDS
+        ):
+            return True
+        if "sowing_date" in missing_fields and self._has_date_signal(
+            text, weather_intent=weather_intent
+        ):
+            return True
+        if "region" in missing_fields and self._has_region_signal(
+            text, weather_intent=weather_intent
+        ):
+            return True
+        return False
 
     def _extract_workflow_payload(self, steps: List[object]) -> Optional[dict]:
         for action, observation in reversed(steps):
