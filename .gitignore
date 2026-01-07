@@ -1,2 +1,7 @@
 .cache/
 *.sqlite3
+*.log
+*.log.*
+__pycache__/
+*.pyc
+*.pyo

@@ -61,7 +61,7 @@ def summarize_text(text: str, limit: int = 400) -> str:
 
 def _build_payload(event: str, fields: Dict[str, Any]) -> str:
     payload = {"event": event, "trace_id": get_trace_id(), **fields}
-    return json.dumps(payload, ensure_ascii=True, default=str)
+    return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def log_event(event: str, **fields: Any) -> None:
