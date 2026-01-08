@@ -43,6 +43,26 @@ CONTROL_CANCEL_KEYWORDS = [
     "取消",
 ]
 CONTROL_NEW_QUESTION_KEYWORDS = ["开始新问题", "换个问题", "重新开始"]
+CONTROL_MEMORY_ACCEPT_KEYWORDS = [
+    "沿用",
+    "同上",
+    "用上次",
+    "还是上次",
+    "按上次",
+    "继续用",
+    "用之前的",
+]
+CONTROL_MEMORY_DENY_KEYWORDS = [
+    "不用",
+    "不沿用",
+    "不用上次",
+    "不要用",
+    "不用之前的",
+    "不用了",
+    "重新",
+]
+CONTROL_MEMORY_YES = ["是", "好", "好的", "可以", "行"]
+CONTROL_MEMORY_NO = ["否", "不是", "不可以", "不需要"]
 CONTROL_RELATIVE_DATE_MARKERS = [
     "今天",
     "明天",
@@ -109,6 +129,20 @@ def _is_cancel_only(prompt: str) -> bool:
         text = text.replace(keyword, "")
     text = text.strip(" \t,.;:!?，。！？；：")
     return not text
+
+
+def _is_memory_response(text: str, *, prompted: bool) -> Optional[bool]:
+    if _contains_any(text, CONTROL_MEMORY_ACCEPT_KEYWORDS):
+        return True
+    if _contains_any(text, CONTROL_MEMORY_DENY_KEYWORDS):
+        return False
+    if prompted:
+        cleaned = text.strip()
+        if cleaned in CONTROL_MEMORY_YES:
+            return True
+        if cleaned in CONTROL_MEMORY_NO:
+            return False
+    return None
 
 
 def _has_weather_intent(text: str) -> bool:
@@ -205,6 +239,12 @@ class ControlIntentRouter:
             return "cancel_only" if _is_cancel_only(text) else "cancel"
         if _contains_any(text, CONTROL_NEW_QUESTION_KEYWORDS):
             return "new_question"
+        memory_prompted = False
+        if isinstance(pending, dict):
+            memory_prompted = bool(pending.get("memory_prompted"))
+        memory_response = _is_memory_response(text, prompted=memory_prompted)
+        if memory_response is not None:
+            return "continue"
         if _contains_any(text, UNKNOWN_MARKERS):
             return "continue"
 

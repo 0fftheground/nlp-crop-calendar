@@ -16,6 +16,30 @@ from ...schemas import PlantingDetails, PlantingDetailsDraft
 
 
 UNKNOWN_MARKERS = ["不知道", "不清楚", "不确定", "记不清", "不记得", "忘了"]
+MEMORY_ACCEPT_MARKERS = [
+    "沿用",
+    "同上",
+    "用上次",
+    "还是上次",
+    "按上次",
+    "继续用",
+    "用之前的",
+]
+MEMORY_DENY_MARKERS = [
+    "不用",
+    "不沿用",
+    "不用上次",
+    "不要用",
+    "不用之前的",
+    "不用了",
+    "重新",
+]
+MEMORY_YES_MARKERS = ["是", "好", "好的", "可以", "行"]
+MEMORY_NO_MARKERS = ["否", "不是", "不可以", "不需要"]
+MEMORY_METHOD_LABELS = {
+    "direct_seeding": "直播",
+    "transplanting": "移栽",
+}
 
 
 class PlantingExtract(BaseModel):
@@ -96,3 +120,72 @@ def format_missing_question(
             f"{message}如果不清楚，可以直接回复“不知道/不确定”，我会使用默认值继续。"
         )
     return message
+
+
+def classify_memory_confirmation(
+    prompt: str, *, prompted: bool = False
+) -> Optional[bool]:
+    if not prompt:
+        return None
+    if any(marker in prompt for marker in MEMORY_ACCEPT_MARKERS):
+        return True
+    if any(marker in prompt for marker in MEMORY_DENY_MARKERS):
+        return False
+    if prompted:
+        cleaned = prompt.strip()
+        if cleaned in MEMORY_YES_MARKERS:
+            return True
+        if cleaned in MEMORY_NO_MARKERS:
+            return False
+    return None
+
+
+def _format_memory_parts(planting: PlantingDetails) -> List[str]:
+    parts = [f"作物: {planting.crop}"]
+    if planting.variety:
+        parts.append(f"品种: {planting.variety}")
+    method_key = (
+        planting.planting_method.value
+        if hasattr(planting.planting_method, "value")
+        else str(planting.planting_method)
+    )
+    parts.append(f"方式: {MEMORY_METHOD_LABELS.get(method_key, method_key)}")
+    parts.append(f"播种日期: {planting.sowing_date.isoformat()}")
+    if planting.region:
+        parts.append(f"地区: {planting.region}")
+    if planting.planting_location:
+        parts.append(f"地块: {planting.planting_location}")
+    return parts
+
+
+def format_memory_confirmation(planting: PlantingDetails) -> str:
+    info = "，".join(_format_memory_parts(planting))
+    return (
+        f"检测到上次种植信息：{info}。是否沿用？"
+        "回复“是/沿用/同上”继续，回复“否/不用”将重新询问。"
+    )
+
+
+def apply_memory_to_draft(
+    draft: PlantingDetailsDraft, memory: PlantingDetails
+) -> PlantingDetailsDraft:
+    data = draft.model_dump()
+    assumptions = list(data.get("assumptions") or [])
+    for field in (
+        "crop",
+        "variety",
+        "planting_method",
+        "sowing_date",
+        "transplant_date",
+        "region",
+        "planting_location",
+    ):
+        if data.get(field) is None:
+            value = getattr(memory, field, None)
+            if field == "planting_method" and hasattr(value, "value"):
+                value = value.value
+            if value is not None:
+                data[field] = value
+                assumptions.append(f"{field}: 沿用上次记忆 {value}")
+    data["assumptions"] = assumptions
+    return PlantingDetailsDraft(**data)

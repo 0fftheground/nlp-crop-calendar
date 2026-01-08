@@ -9,16 +9,18 @@ from langchain_core.tools import tool as lc_tool
 from ..domain.services import MissingPlantingInfoError
 from ..infra.llm import get_chat_model
 from ..infra.pending_store import build_pending_followup_store
+from ..infra.preference_store import build_preference_store
 from ..observability.logging_utils import log_event, summarize_text
 from ..schemas.models import (
     HandleResponse,
     PlantingDetailsDraft,
+    PlantingDetails,
     ToolInvocation,
     UserRequest,
     WorkflowResponse,
 )
 from .tools.registry import build_agent_tools, execute_tool
-from .intent_rules import ControlIntentRouter
+from .intent_rules import ControlIntentRouter, classify_intent
 from .workflows.registry import (
     CROP_WORKFLOW_NAME,
     GROWTH_WORKFLOW_NAME,
@@ -31,6 +33,17 @@ class RequestRouter:
     """Use a LangChain agent to route tool calls and craft responses."""
 
     _session_id_ctx = contextvars.ContextVar("session_id", default="default")
+    _MEMORY_CLEAR_KEYWORDS = (
+        "清除记忆",
+        "清空记忆",
+        "删除记忆",
+        "清除偏好",
+        "清空偏好",
+        "删除偏好",
+        "忘记之前",
+        "忘掉之前",
+        "清掉记忆",
+    )
 
     def __init__(self):
         self._workflow_specs = list_workflow_specs()
@@ -40,15 +53,28 @@ class RequestRouter:
         self.agent = self._build_agent()
         self._pending_store = build_pending_followup_store()
         self._control_router = ControlIntentRouter()
+        self._preference_store = build_preference_store()
 
     def handle(self, request: UserRequest) -> HandleResponse:
         session_id = request.session_id or "default"
         token = self._session_id_ctx.set(session_id)
+        prompt = request.prompt
         try:
+            if self._should_clear_memory(prompt):
+                self._preference_store.delete(session_id)
+                pending = self._pending_store.get(session_id)
+                if pending and pending.get("mode") == "workflow":
+                    pending["memory_decision"] = None
+                    pending["memory_prompted"] = False
+                    self._pending_store.set(session_id, pending)
+                prompt = self._strip_memory_clear(prompt)
+                if not prompt:
+                    plan = WorkflowResponse(message="已清除记忆。")
+                    return HandleResponse(mode="none", plan=plan)
             # If the session is mid follow-up, skip routing and resume directly.
             pending = self._pending_store.get(session_id)
             if pending:
-                control = self._control_router.route(request.prompt, pending=pending)
+                control = self._control_router.route(prompt, pending=pending)
                 if control in {"cancel", "cancel_only"}:
                     self._pending_store.delete(session_id)
                     if control == "cancel_only":
@@ -63,15 +89,15 @@ class RequestRouter:
             if pending:
                 if pending.get("mode") == "tool":
                     tool_payload = self._run_tool_followup(
-                        request.prompt, pending, session_id
+                        prompt, pending, session_id
                     )
                     return HandleResponse(mode="tool", tool=tool_payload)
                 workflow_name = pending.get("workflow_name")
-                plan = self._run_named_workflow(request.prompt, workflow_name)
+                plan = self._run_named_workflow(prompt, workflow_name)
                 return HandleResponse(mode="workflow", plan=plan)
             # No pending state: let the LLM agent decide tool vs workflow.
-            log_event("llm_router_call", prompt=request.prompt)
-            result = self.agent.invoke({"input": request.prompt})
+            log_event("llm_router_call", prompt=prompt)
+            result = self.agent.invoke({"input": prompt})
         finally:
             self._session_id_ctx.reset(token)
         steps = result.get("intermediate_steps", [])
@@ -103,6 +129,20 @@ class RequestRouter:
         # Fallback: agent responded but no tool/workflow payload detected.
         plan = WorkflowResponse(message=result.get("output", ""), trace=trace)
         return HandleResponse(mode="none", plan=plan)
+
+    @classmethod
+    def _should_clear_memory(cls, prompt: str) -> bool:
+        text = (prompt or "").strip()
+        if not text:
+            return False
+        return any(keyword in text for keyword in cls._MEMORY_CLEAR_KEYWORDS)
+
+    @classmethod
+    def _strip_memory_clear(cls, prompt: str) -> str:
+        text = prompt or ""
+        for keyword in cls._MEMORY_CLEAR_KEYWORDS:
+            text = text.replace(keyword, "")
+        return text.strip(" \t,.;:!?，。！？；：")
 
     def _build_agent(self) -> AgentExecutor:
         llm = get_chat_model()
@@ -168,15 +208,30 @@ class RequestRouter:
         session_id = self._session_id_ctx.get()
         initial_state = {"user_prompt": prompt, "trace": []}
         pending = self._pending_store.get(session_id)
+        should_use_memory = False
+        if pending and pending.get("workflow_name") == workflow_name:
+            should_use_memory = True
+        else:
+            intent_mode, _ = classify_intent(prompt)
+            should_use_memory = intent_mode != "tool"
+        if should_use_memory:
+            memory = self._preference_store.get(session_id)
+            if memory:
+                initial_state["memory_planting"] = memory.planting
         if pending and pending.get("workflow_name") == workflow_name:
             initial_state.update(
                 {
                     "planting_draft": pending.get("planting_draft"),
                     "missing_fields": pending.get("missing_fields"),
                     "followup_count": pending.get("followup_count", 0),
+                    "memory_decision": pending.get("memory_decision"),
+                    "memory_prompted": pending.get("memory_prompted", False),
                 }
             )
         state = graph.invoke(initial_state)
+        planting = state.get("planting")
+        if isinstance(planting, PlantingDetails):
+            self._preference_store.set(session_id, planting)
         self._update_workflow_followup_state(session_id, state, workflow_name)
         return WorkflowResponse(
             query=state.get("query"),
@@ -235,16 +290,16 @@ class RequestRouter:
             except Exception:
                 draft_payload = draft
         if missing and isinstance(draft_payload, dict):
-            self._pending_store.set(
-                session_id,
-                {
-                    "mode": "workflow",
-                    "workflow_name": workflow_name,
-                    "planting_draft": draft_payload,
-                    "missing_fields": missing,
-                    "followup_count": state.get("followup_count", 0),
-                },
-            )
+            payload = {
+                "mode": "workflow",
+                "workflow_name": workflow_name,
+                "planting_draft": draft_payload,
+                "missing_fields": missing,
+                "followup_count": state.get("followup_count", 0),
+                "memory_decision": state.get("memory_decision"),
+                "memory_prompted": state.get("memory_prompted", False),
+            }
+            self._pending_store.set(session_id, payload)
         else:
             pending = self._pending_store.get(session_id)
             if (
