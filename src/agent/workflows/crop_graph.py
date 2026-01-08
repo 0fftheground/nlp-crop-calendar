@@ -34,7 +34,7 @@ from ...schemas import (
     Recommendation,
     WeatherSeries,
 )
-from ...tools.registry import execute_tool
+from ..tools.registry import execute_tool
 from .common import (
     build_fallback_planting,
     format_missing_question,

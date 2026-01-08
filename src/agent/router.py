@@ -1,21 +1,12 @@
 import contextvars
 import json
-import re
 from typing import List, Optional
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool as lc_tool
 
-from ..domain.services import (
-    CROP_KEYWORDS,
-    DATE_PATTERN,
-    METHOD_KEYWORDS,
-    MissingPlantingInfoError,
-    REGION_PATTERN,
-    VARIETY_FALLBACK_PATTERN,
-    VARIETY_PATTERN,
-)
+from ..domain.services import MissingPlantingInfoError
 from ..infra.llm import get_chat_model
 from ..infra.pending_store import build_pending_followup_store
 from ..observability.logging_utils import log_event, summarize_text
@@ -26,66 +17,29 @@ from ..schemas.models import (
     UserRequest,
     WorkflowResponse,
 )
-from ..tools.registry import build_agent_tools, execute_tool
-from .workflows.crop_graph import (
-    build_graph as build_crop_graph,
-    build_growth_stage_graph,
+from .tools.registry import build_agent_tools, execute_tool
+from .intent_rules import ControlIntentRouter
+from .workflows.registry import (
+    CROP_WORKFLOW_NAME,
+    GROWTH_WORKFLOW_NAME,
+    get_workflow_spec,
+    list_workflow_specs,
 )
-from .workflows.common import UNKNOWN_MARKERS
 
 
 class RequestRouter:
     """Use a LangChain agent to route tool calls and craft responses."""
 
     _session_id_ctx = contextvars.ContextVar("session_id", default="default")
-    _CANCEL_FOLLOWUP_KEYWORDS = (
-        "取消追问",
-        "结束追问",
-        "重新开始",
-        "开始新问题",
-        "换个问题",
-        "不继续",
-        "取消",
-    )
-    _RELATIVE_DATE_MARKERS = (
-        "今天",
-        "明天",
-        "后天",
-        "本周",
-        "下周",
-        "本月",
-        "下月",
-        "今年",
-        "明年",
-        "近期",
-        "最近",
-    )
-    _WEATHER_KEYWORDS = (
-        "天气",
-        "气象",
-        "气温",
-        "温度",
-        "降雨",
-        "降水",
-        "雨量",
-        "风速",
-        "湿度",
-        "预报",
-    )
-    _MONTH_DAY_PATTERN = re.compile(r"(?:^|\\D)(\\d{1,2})月(\\d{1,2})[日号]?")
-    _MONTH_PATTERN = re.compile(r"(?:^|\\D)(\\d{1,2})月(?:上旬|中旬|下旬|初|底)?")
-    CROP_WORKFLOW_TOOL = "crop_calendar_workflow"
-    GROWTH_WORKFLOW_TOOL = "growth_stage_workflow"
 
     def __init__(self):
-        self.crop_graph = None
-        self.growth_graph = None
-        self.tools = build_agent_tools() + [
-            self._build_crop_workflow_tool(),
-            self._build_growth_stage_workflow_tool(),
-        ]
+        self._workflow_specs = list_workflow_specs()
+        self._workflow_names = {spec.name for spec in self._workflow_specs}
+        self._workflow_graphs: dict[str, object] = {}
+        self.tools = build_agent_tools() + self._build_workflow_tools()
         self.agent = self._build_agent()
         self._pending_store = build_pending_followup_store()
+        self._control_router = ControlIntentRouter()
 
     def handle(self, request: UserRequest) -> HandleResponse:
         session_id = request.session_id or "default"
@@ -93,17 +47,19 @@ class RequestRouter:
         try:
             # If the session is mid follow-up, skip routing and resume directly.
             pending = self._pending_store.get(session_id)
-            if pending and self._should_cancel_followup(request.prompt):
-                self._pending_store.delete(session_id)
-                if self._is_cancel_only(request.prompt):
-                    plan = WorkflowResponse(
-                        message="已取消追问，如需继续请描述新的问题。"
-                    )
-                    return HandleResponse(mode="none", plan=plan)
-                pending = None
-            if pending and not self._should_resume_followup(request.prompt, pending):
-                self._pending_store.delete(session_id)
-                pending = None
+            if pending:
+                control = self._control_router.route(request.prompt, pending=pending)
+                if control in {"cancel", "cancel_only"}:
+                    self._pending_store.delete(session_id)
+                    if control == "cancel_only":
+                        plan = WorkflowResponse(
+                            message="已取消追问，如需继续请描述新的问题。"
+                        )
+                        return HandleResponse(mode="none", plan=plan)
+                    pending = None
+                elif control == "new_question":
+                    self._pending_store.delete(session_id)
+                    pending = None
             if pending:
                 if pending.get("mode") == "tool":
                     tool_payload = self._run_tool_followup(
@@ -111,10 +67,7 @@ class RequestRouter:
                     )
                     return HandleResponse(mode="tool", tool=tool_payload)
                 workflow_name = pending.get("workflow_name")
-                if workflow_name == self.GROWTH_WORKFLOW_TOOL:
-                    plan = self._run_growth_stage_workflow(request.prompt)
-                else:
-                    plan = self._run_crop_calendar_workflow(request.prompt)
+                plan = self._run_named_workflow(request.prompt, workflow_name)
                 return HandleResponse(mode="workflow", plan=plan)
             # No pending state: let the LLM agent decide tool vs workflow.
             log_event("llm_router_call", prompt=request.prompt)
@@ -159,8 +112,8 @@ class RequestRouter:
                     "system",
                     "你是农事助手。根据用户意图决定是否调用工具或工作流："
                     "简单查询用工具；生育期预测或补充其所需种植信息时，"
-                    "必须调用 growth_stage_workflow；需要全流程/多环节方案或"
-                    "补充完整种植计划信息时，必须调用 crop_calendar_workflow；"
+                    f"必须调用 {GROWTH_WORKFLOW_NAME}；需要全流程/多环节方案或"
+                    f"补充完整种植计划信息时，必须调用 {CROP_WORKFLOW_NAME}；"
                     "若无关则直接回答。",
                 ),
                 ("human", "{input}"),
@@ -174,15 +127,20 @@ class RequestRouter:
             return_intermediate_steps=True,
         )
 
-    def _build_crop_workflow_tool(self):
+    def _build_workflow_tools(self) -> List[object]:
+        tools: List[object] = []
+
+        for spec in self._workflow_specs:
+            tools.append(self._build_workflow_tool(spec))
+        return tools
+
+    def _build_workflow_tool(self, spec) -> object:
         def _workflow(prompt: str) -> str:
             """
-            完整种植计划工作流（抽取→追问→并行工具→推荐）。
-            适用：用户要全流程/多环节方案，或在补充作物/品种/播种方式/播期等关键信息时。与种植无关不要调用
             输入：用户原始问题或补充描述；输出：WorkflowResponse 的 JSON 字符串。
             """
             try:
-                plan = self._run_crop_calendar_workflow(prompt)
+                plan = self._run_named_workflow(prompt, spec.name)
             except MissingPlantingInfoError as exc:
                 plan = WorkflowResponse(message=str(exc))
             except Exception as exc:
@@ -191,35 +149,20 @@ class RequestRouter:
                 plan.model_dump(mode="json"), ensure_ascii=True, default=str
             )
 
-        return lc_tool(self.CROP_WORKFLOW_TOOL)(_workflow)
+        _workflow.__doc__ = spec.description
+        return lc_tool(spec.name)(_workflow)
 
-    def _build_growth_stage_workflow_tool(self):
-        def _workflow(prompt: str) -> str:
-            """
-            生育期预测工作流（信息抽取-气象数据-生育期计算）。
-            当问题涉及生育期预测或用户在补充相关种植要素时使用。
-            """
-            try:
-                plan = self._run_growth_stage_workflow(prompt)
-            except MissingPlantingInfoError as exc:
-                plan = WorkflowResponse(message=str(exc))
-            except Exception as exc:
-                plan = WorkflowResponse(message=f"workflow 执行失败: {exc}")
-            return json.dumps(
-                plan.model_dump(mode="json"), ensure_ascii=True, default=str
-            )
-
-        return lc_tool(self.GROWTH_WORKFLOW_TOOL)(_workflow)
-
-    def _run_crop_calendar_workflow(self, prompt: str) -> WorkflowResponse:
-        if self.crop_graph is None:
-            self.crop_graph = build_crop_graph()
-        return self._run_graph(prompt, self.crop_graph, self.CROP_WORKFLOW_TOOL)
-
-    def _run_growth_stage_workflow(self, prompt: str) -> WorkflowResponse:
-        if self.growth_graph is None:
-            self.growth_graph = build_growth_stage_graph()
-        return self._run_graph(prompt, self.growth_graph, self.GROWTH_WORKFLOW_TOOL)
+    def _run_named_workflow(self, prompt: str, workflow_name: Optional[str]) -> WorkflowResponse:
+        if not workflow_name:
+            return WorkflowResponse(message="workflow_name 缺失，无法执行。")
+        graph = self._workflow_graphs.get(workflow_name)
+        if graph is None:
+            spec = get_workflow_spec(workflow_name)
+            if spec is None:
+                return WorkflowResponse(message=f"workflow 未注册: {workflow_name}")
+            graph = spec.builder()
+            self._workflow_graphs[workflow_name] = graph
+        return self._run_graph(prompt, graph, workflow_name)
 
     def _run_graph(self, prompt: str, graph, workflow_name: str) -> WorkflowResponse:
         session_id = self._session_id_ctx.get()
@@ -334,23 +277,6 @@ class RequestRouter:
             if pending and pending.get("mode") == "tool":
                 self._pending_store.delete(session_id)
 
-    @classmethod
-    def _should_cancel_followup(cls, prompt: str) -> bool:
-        text = (prompt or "").strip().lower()
-        if not text:
-            return False
-        return any(keyword in text for keyword in cls._CANCEL_FOLLOWUP_KEYWORDS)
-
-    @classmethod
-    def _is_cancel_only(cls, prompt: str) -> bool:
-        text = (prompt or "").strip().lower()
-        if not text:
-            return False
-        for keyword in cls._CANCEL_FOLLOWUP_KEYWORDS:
-            text = text.replace(keyword, "")
-        text = text.strip(" \t,.;:!?，。！？；：")
-        return not text
-
     def _format_trace(self, steps: List[object]) -> List[str]:
         trace: List[str] = []
         for action, observation in steps:
@@ -358,68 +284,9 @@ class RequestRouter:
             trace.append(f"observation={observation}")
         return trace
 
-    @classmethod
-    def _has_weather_intent(cls, text: str) -> bool:
-        return any(keyword in text for keyword in cls._WEATHER_KEYWORDS)
-
-    @classmethod
-    def _has_date_signal(cls, text: str, *, weather_intent: bool) -> bool:
-        sowing_context = any(token in text for token in ("播种", "播期", "种", "栽"))
-        if weather_intent and not sowing_context:
-            return False
-        if DATE_PATTERN.search(text):
-            return True
-        if cls._MONTH_DAY_PATTERN.search(text) or cls._MONTH_PATTERN.search(text):
-            return True
-        if any(marker in text for marker in cls._RELATIVE_DATE_MARKERS):
-            if len(text) <= 6 or sowing_context:
-                return True
-        return False
-
-    @classmethod
-    def _has_region_signal(cls, text: str, *, weather_intent: bool) -> bool:
-        if weather_intent:
-            return False
-        if REGION_PATTERN.search(text):
-            return True
-        return any(keyword in text for keyword in ("地区", "区域", "位置"))
-
-    def _should_resume_followup(self, prompt: str, pending: dict) -> bool:
-        text = (prompt or "").strip()
-        if not text:
-            return False
-        if any(marker in text for marker in UNKNOWN_MARKERS):
-            return True
-        missing_fields = pending.get("missing_fields") or []
-        if not missing_fields:
-            return False
-        weather_intent = self._has_weather_intent(text)
-        if "crop" in missing_fields and any(crop in text for crop in CROP_KEYWORDS):
-            return True
-        if "variety" in missing_fields and (
-            VARIETY_PATTERN.search(text) or VARIETY_FALLBACK_PATTERN.search(text)
-        ):
-            return True
-        if "planting_method" in missing_fields and any(
-            keyword in text for keyword in METHOD_KEYWORDS
-        ):
-            return True
-        if "sowing_date" in missing_fields and self._has_date_signal(
-            text, weather_intent=weather_intent
-        ):
-            return True
-        if "region" in missing_fields and self._has_region_signal(
-            text, weather_intent=weather_intent
-        ):
-            return True
-        return False
-
     def _extract_workflow_payload(self, steps: List[object]) -> Optional[dict]:
         for action, observation in reversed(steps):
-            if action.tool not in {
-                self.CROP_WORKFLOW_TOOL,
-                self.GROWTH_WORKFLOW_TOOL,
-            }:
+            if action.tool not in self._workflow_names:
                 continue
             payload = self._safe_json(observation)
             if isinstance(payload, dict):
@@ -428,10 +295,7 @@ class RequestRouter:
 
     def _extract_tool_payload(self, steps: List[object]) -> Optional[ToolInvocation]:
         for action, observation in reversed(steps):
-            if action.tool in {
-                self.CROP_WORKFLOW_TOOL,
-                self.GROWTH_WORKFLOW_TOOL,
-            }:
+            if action.tool in self._workflow_names:
                 continue
             payload = self._safe_json(observation)
             if isinstance(payload, dict) and payload.get("name"):

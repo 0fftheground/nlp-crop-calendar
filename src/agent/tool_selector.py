@@ -3,7 +3,7 @@ import json
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..infra.llm import get_chat_model
-from ..tools.registry import list_tool_specs
+from .tools.registry import list_tool_specs
 
 
 class ToolSelector:

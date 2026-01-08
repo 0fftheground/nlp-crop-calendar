@@ -5,7 +5,7 @@ This project demonstrates an end-to-end workflow for generating crop recommendat
 ## Components
 - **Chainlit Frontend (`chainlit_app.py`)** - chat interface that sends prompts to the backend and renders results/trace info.
 - **FastAPI Backend (`src/api/server.py`)** - exposes `/api/v1/handle` for agent-driven routing between tools and workflow.
-- **Request Router (`src/agent/router.py`)** - tool-calling agent that can run standalone tools (`src/tools/registry.py`) or invoke the LangGraph workflow tool.
+- **Request Router (`src/agent/router.py`)** - tool-calling agent that can run standalone tools (`src/agent/tools/registry.py`) or invoke the LangGraph workflow tool; follow-up handling is gated by a control-intent router (rules + LLM fallback).
 - **LangGraph Workflow (`src/agent/workflows/crop_graph.py`)** - fixed-step state machine for the crop planning flow (LLM extraction + follow-up + tools).
 
 ## Getting Started
@@ -50,12 +50,13 @@ If `EXTRACTOR_API_KEY` is empty, the extractor falls back to `OPENAI_API_KEY`.
 Tool providers default to `mock`. Set `*_PROVIDER=intranet` and supply the `*_API_URL`/`*_API_KEY` fields to switch to intranet endpoints. Growth stage prediction requires `GROWTH_STAGE_PROVIDER=intranet`.
 
 ## Development Notes
-- `src/agent/router.py` + `src/tools/registry.py` implement the tool-calling agent logic. Add tool handlers or adjust the agent prompt to expand coverage.
+- `src/agent/router.py` + `src/agent/tools/registry.py` implement the tool-calling agent logic. Add tool handlers or adjust the agent prompt to expand coverage.
 - LangGraph state types live in `src/agent/workflows/state.py`. Adding nodes/branches only requires editing `crop_graph.py`.
 - Workflow details: LLM extracts planting details, missing fields trigger follow-up questions (up to 2 times), then weather/variety tools run in parallel, and `farming_recommendation` consumes the combined context.
 - `src/api/server.py` wires HTTP handlers to the router/graph runner; extend it with authentication, logging, or persistence as needed.
 - An OpenAI API key is mandatory. The system instantiates `ChatOpenAI` for both routing and extraction, with extraction optionally using a lighter model via `EXTRACTOR_*` settings.
 - `growth_stage_prediction` uses structured extraction (PlantingDetailsDraft) and will ask for missing planting fields before calling the intranet growth stage service.
+- Follow-up control: pending sessions are checked by a control-intent gate (rules first, LLM fallback) to decide cancel/continue/new_question, so unrelated tool queries can break out of a follow-up.
 - Infrastructure adapters live under `src/infra` (config, LLM clients, structured extraction).
 - For unrelated prompts, the router can return `mode="none"` and skip tool/workflow execution.
 - A minimal local variety store lives in `src/resources/varieties.json`, used for retrieval hints during extraction.

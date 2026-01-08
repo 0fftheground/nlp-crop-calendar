@@ -24,9 +24,9 @@ Chainlit UI --> FastAPI backend --> LangChain Agent (Tools + LangGraph Workflow 
 - `src/infra/interaction_store.py` – request/response audit logging (memory/sqlite).
 - Variety retrieval prefers embedding-based similarity when possible (env override: `EMBEDDING_MODEL`); if Qdrant is configured, it is queried first (`QDRANT_URL`, `QDRANT_COLLECTIONS` with `"variety"` key).
 - `src/schemas/models.py` – shared schemas (`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`). `UserRequest` 支持 `session_id`。
-- `src/tools/registry.py` – registry of executable tools (variety/weather/growth stage/farming recommendation) and agent-friendly wrappers. Providers can switch between `mock` and `intranet` via `*_PROVIDER`/`*_API_URL`/`*_API_KEY`.
+- `src/agent/tools/registry.py` – registry of executable tools (variety/weather/growth stage/farming recommendation) and agent-friendly wrappers. Providers can switch between `mock` and `intranet` via `*_PROVIDER`/`*_API_URL`/`*_API_KEY`.
 - `src/agent/tool_selector.py` – legacy LLM router (not used by the current agent-based router).
-- `src/agent/intent_rules.py` – deterministic rule-based router for tests (optional).
+- `src/agent/intent_rules.py` – intent rules for tests plus control-intent routing (rule-first with LLM fallback) for follow-up gating.
 - `src/agent/router.py` – orchestrates tool-calling agent execution and parses tool/workflow outputs.
 - `src/domain/services.py` – 封装种植日历流水线（抽取/追问/校验/天气/生育期/农事推荐）及工具占位实现；天气/生育期/推荐支持 provider 切换。
 - `src/agent/workflows/state.py` / `crop_graph.py` – LangGraph state types and compiled workflow.
@@ -42,7 +42,8 @@ Chainlit UI --> FastAPI backend --> LangChain Agent (Tools + LangGraph Workflow 
 - `src/agent/router.RequestRouter` creates a tool-calling agent and includes a `crop_calendar_workflow` tool that runs LangGraph.
 - Standalone tools and the workflow tool return JSON strings; the router inspects `intermediate_steps` to decide whether to respond with `mode="tool"` or `mode="workflow"`. If no tool/workflow is invoked, it returns `mode="none"` and keeps the assistant reply in `plan.message`.
 - `HandleResponse.mode` 告知前端“tool / workflow / none”，`tool.data` 或 `plan.recommendations` 继续承载结果。
-- 追问状态通过 pending store 持久化（memory/sqlite 可选）并带 TTL，`取消追问/开始新问题` 会清理该状态。
+- 追问状态通过 pending store 持久化（memory/sqlite 可选）并带 TTL；pending 时先走 `ControlIntentRouter` 判断 cancel/continue/new_question，必要时使用 extractor LLM 分类并记录 `control_intent_llm_response` 日志。
+- `取消追问/开始新问题` 会清理 pending 状态，工具意图（如天气查询）也会跳出追问进入正常路由。
 
 ## Crop Calendar Workflow (Current)
 `src/agent/workflows/crop_graph.py` 已成为运行中的主流程，取代早期的单体 pipeline：
