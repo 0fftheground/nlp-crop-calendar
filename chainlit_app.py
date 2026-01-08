@@ -48,8 +48,6 @@ async def on_message(message: cl.Message):
         tool = data["tool"]
         content = f"工具 `{tool.get('name')}` 已执行：\n{tool.get('message')}"
         await cl.Message(content=content).send()
-        if tool.get("data"):
-            await cl.Message(content=f"附加数据:\n{tool['data']}", author="debug").send()
         return
     if mode == "none":
         plan = data.get("plan") or {}

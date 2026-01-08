@@ -57,6 +57,7 @@ Tool providers default to `mock`. Set `*_PROVIDER=intranet` and supply the `*_AP
 - An OpenAI API key is mandatory. The system instantiates `ChatOpenAI` for both routing and extraction, with extraction optionally using a lighter model via `EXTRACTOR_*` settings.
 - `growth_stage_prediction` uses structured extraction (PlantingDetailsDraft) and will ask for missing planting fields before calling the intranet growth stage service.
 - Follow-up control: pending sessions are checked by a control-intent gate (rules first, LLM fallback) to decide cancel/continue/new_question, so unrelated tool queries can break out of a follow-up.
+- Preference memory: normalized planting details can be stored per session (TTL) and will be suggested with confirmation before reuse. Use “清除记忆” to reset.
 - Infrastructure adapters live under `src/infra` (config, LLM clients, structured extraction).
 - For unrelated prompts, the router can return `mode="none"` and skip tool/workflow execution.
 - A minimal local variety store lives in `src/resources/varieties.json`, used for retrieval hints during extraction.

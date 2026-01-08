@@ -36,8 +36,11 @@ from ...schemas import (
 )
 from ..tools.registry import execute_tool
 from .common import (
+    apply_memory_to_draft,
     build_fallback_planting,
+    classify_memory_confirmation,
     format_missing_question,
+    format_memory_confirmation,
     infer_unknown_fields,
     llm_extract_planting,
 )
@@ -185,6 +188,18 @@ def _extract_node(state: GraphState) -> GraphState:
     else:
         draft = fresh_draft
     missing_fields = list_missing_required_fields(draft)
+    memory_planting = state.get("memory_planting")
+    memory_prompted = bool(state.get("memory_prompted"))
+    memory_decision = state.get("memory_decision")
+    memory_choice = classify_memory_confirmation(prompt, prompted=memory_prompted)
+    if memory_choice is not None:
+        memory_decision = memory_choice
+    if memory_decision and memory_planting:
+        draft = apply_memory_to_draft(draft, memory_planting)
+        missing_fields = list_missing_required_fields(draft)
+        state = add_trace(state, "memory_applied")
+    if memory_choice is not None:
+        state = add_trace(state, f"memory_decision={memory_decision}")
     unknown_fields = infer_unknown_fields(prompt, missing_fields, CROP_FIELD_LABELS)
     if unknown_fields:
         fallback = build_fallback_planting(draft)
@@ -212,6 +227,7 @@ def _extract_node(state: GraphState) -> GraphState:
             "missing_fields": missing_fields,
             "followup_count": followup_count,
             "assumptions": list(draft.assumptions),
+            "memory_decision": memory_decision,
         }
     )
     return state
@@ -224,6 +240,14 @@ def _ask_node(state: GraphState) -> GraphState:
         CROP_FIELD_LABELS,
         "为了给出农事推荐，还需要补充：",
     )
+    memory_planting = state.get("memory_planting")
+    memory_decision = state.get("memory_decision")
+    memory_prompted = bool(state.get("memory_prompted"))
+    if memory_planting and memory_decision is None and not memory_prompted:
+        memory_note = format_memory_confirmation(memory_planting)
+        message = f"{memory_note}\n{message}"
+        state["memory_prompted"] = True
+        state = add_trace(state, "memory_prompted")
     state = add_trace(state, f"ask missing={missing_fields}")
     state.update({"message": message})
     return state
@@ -532,9 +556,21 @@ def _growth_extract_node(state: GraphState) -> GraphState:
         draft = fresh_draft
 
     missing_fields = list_missing_required_fields(draft)
+    memory_planting = state.get("memory_planting")
+    memory_prompted = bool(state.get("memory_prompted"))
+    memory_decision = state.get("memory_decision")
+    memory_choice = classify_memory_confirmation(prompt, prompted=memory_prompted)
+    if memory_choice is not None:
+        memory_decision = memory_choice
+    if memory_decision and memory_planting:
+        draft = apply_memory_to_draft(draft, memory_planting)
+        missing_fields = list_missing_required_fields(draft)
+        state = add_trace(state, "memory_applied")
     if not draft.region:
         missing_fields.append("region")
     missing_fields = list(dict.fromkeys(missing_fields))
+    if memory_choice is not None:
+        state = add_trace(state, f"memory_decision={memory_decision}")
     unknown_fields = infer_unknown_fields(prompt, missing_fields, GROWTH_FIELD_LABELS)
     if unknown_fields:
         fallback = build_fallback_planting(draft)
@@ -568,6 +604,7 @@ def _growth_extract_node(state: GraphState) -> GraphState:
             "missing_fields": missing_fields,
             "followup_count": followup_count,
             "assumptions": list(draft.assumptions),
+            "memory_decision": memory_decision,
         }
     )
     return state
@@ -576,6 +613,14 @@ def _growth_extract_node(state: GraphState) -> GraphState:
 def _growth_ask_node(state: GraphState) -> GraphState:
     missing_fields = state.get("missing_fields", [])
     message = _growth_format_missing_question(missing_fields)
+    memory_planting = state.get("memory_planting")
+    memory_decision = state.get("memory_decision")
+    memory_prompted = bool(state.get("memory_prompted"))
+    if memory_planting and memory_decision is None and not memory_prompted:
+        memory_note = format_memory_confirmation(memory_planting)
+        message = f"{memory_note}\n{message}"
+        state["memory_prompted"] = True
+        state = add_trace(state, "memory_prompted")
     state = add_trace(state, f"ask missing={missing_fields}")
     state.update({"message": message})
     return state

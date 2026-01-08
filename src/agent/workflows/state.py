@@ -5,7 +5,7 @@ Define your own TypedDict (or Pydantic model) to describe the state shared betwe
 workflow nodes. Remove the placeholders below once you finalize the fields you need.
 """
 
-from typing import Dict, List, TypedDict
+from typing import Dict, List, Optional, TypedDict
 
 from ...schemas import (
     GrowthStageResult,
@@ -22,6 +22,9 @@ class GraphState(TypedDict, total=False):
     trace: List[str]
     planting_draft: PlantingDetailsDraft
     planting: PlantingDetails
+    memory_planting: PlantingDetails
+    memory_decision: Optional[bool]
+    memory_prompted: bool
     missing_fields: List[str]
     followup_count: int
     assumptions: List[str]

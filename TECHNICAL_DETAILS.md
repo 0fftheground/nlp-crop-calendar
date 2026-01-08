@@ -22,6 +22,7 @@ Chainlit UI --> FastAPI backend --> LangChain Agent (Tools + LangGraph Workflow 
 - `src/infra/tool_cache.py` – TTL cache for tool responses (memory/sqlite).
 - `src/infra/weather_cache.py` – weather series cache with optional persistence.
 - `src/infra/interaction_store.py` – request/response audit logging (memory/sqlite).
+- `src/infra/preference_store.py` – session-level planting preference memory (normalized PlantingDetails) with TTL.
 - Variety retrieval prefers embedding-based similarity when possible (env override: `EMBEDDING_MODEL`); if Qdrant is configured, it is queried first (`QDRANT_URL`, `QDRANT_COLLECTIONS` with `"variety"` key).
 - `src/schemas/models.py` – shared schemas (`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`). `UserRequest` 支持 `session_id`。
 - `src/agent/tools/registry.py` – registry of executable tools (variety/weather/growth stage/farming recommendation) and agent-friendly wrappers. Providers can switch between `mock` and `intranet` via `*_PROVIDER`/`*_API_URL`/`*_API_KEY`.
@@ -44,6 +45,8 @@ Chainlit UI --> FastAPI backend --> LangChain Agent (Tools + LangGraph Workflow 
 - `HandleResponse.mode` 告知前端“tool / workflow / none”，`tool.data` 或 `plan.recommendations` 继续承载结果。
 - 追问状态通过 pending store 持久化（memory/sqlite 可选）并带 TTL；pending 时先走 `ControlIntentRouter` 判断 cancel/continue/new_question，必要时使用 extractor LLM 分类并记录 `control_intent_llm_response` 日志。
 - `取消追问/开始新问题` 会清理 pending 状态，工具意图（如天气查询）也会跳出追问进入正常路由。
+- 如果存在 planting preference memory，会在 workflow 追问时先提示确认是否沿用，确认后再补齐缺失字段。
+- “清除记忆” 指令会清空偏好记忆（不影响当前追问状态）。
 
 ## Crop Calendar Workflow (Current)
 `src/agent/workflows/crop_graph.py` 已成为运行中的主流程，取代早期的单体 pipeline：
