@@ -36,7 +36,8 @@ class CropCalendarArtifacts(TypedDict):
     assumptions: List[str]
 
 
-CROP_REQUIRED_FIELDS = ["crop","variety", "planting_method", "sowing_date"]
+DEFAULT_CROP = "水稻"
+CROP_REQUIRED_FIELDS = ["crop", "variety", "planting_method", "sowing_date"]
 
 
 CROP_KEYWORDS = ["水稻", "小麦", "玉米", "大豆", "油菜", "棉花", "花生"]
@@ -50,9 +51,6 @@ METHOD_KEYWORDS = {
 }
 DATE_PATTERN = re.compile(r"(20\\d{2})[-/年](\\d{1,2})[-/月](\\d{1,2})")
 REGION_PATTERN = re.compile(r"(\\w+[省市区县])")
-VARIETY_PATTERN = re.compile(r"(?:品种|品名|品系)[:：\\s]*([\\w\\u4e00-\\u9fff-]{2,20})")
-VARIETY_FALLBACK_PATTERN = re.compile(r"([\\w\\u4e00-\\u9fff-]{2,20}号)")
-VARIETY_TOKEN_PATTERN = re.compile(r"[\\u4e00-\\u9fff]{2,10}")
 
 
 class MissingPlantingInfoError(ValueError):
@@ -110,42 +108,17 @@ def merge_planting_answers(
 def _infer_variety_from_prompt(prompt: str) -> Optional[str]:
     if not prompt:
         return None
-    match = VARIETY_PATTERN.search(prompt)
-    if match:
-        return match.group(1)
-    match = VARIETY_FALLBACK_PATTERN.search(prompt)
-    if match:
-        return match.group(1)
-
-    cleaned = DATE_PATTERN.sub(" ", prompt)
-    for alias in METHOD_KEYWORDS:
-        cleaned = cleaned.replace(alias, " ")
-    for crop in CROP_KEYWORDS:
-        cleaned = cleaned.replace(crop, " ")
-    cleaned = cleaned.replace("播种", " ").replace("种植", " ")
-
-    tokens = re.split(r"[，,。；;、\\s]+", cleaned)
-    for token in tokens:
-        candidate = token.strip()
-        if not candidate:
-            continue
-        if any(char.isdigit() for char in candidate):
-            continue
-        if candidate in METHOD_KEYWORDS:
-            continue
-        if candidate in CROP_KEYWORDS:
-            continue
-        if REGION_PATTERN.search(candidate):
-            continue
-        if len(candidate) < 2:
-            continue
-        fallback = VARIETY_TOKEN_PATTERN.search(candidate)
-        if fallback:
-            return fallback.group(0)
     candidates = retrieve_variety_candidates(prompt, limit=1)
     if candidates:
         return candidates[0]
     return None
+
+
+def _is_known_variety(candidate: str) -> bool:
+    if not candidate:
+        return False
+    candidates = retrieve_variety_candidates(candidate, limit=1)
+    return bool(candidates) and candidates[0] == candidate
 
 
 def _apply_heuristics(data: Dict[str, object], prompt: str) -> None:
@@ -181,6 +154,35 @@ def _apply_heuristics(data: Dict[str, object], prompt: str) -> None:
             data["variety"] = variety
 
 
+def _sanitize_crop_field(data: Dict[str, object], prompt: str) -> None:
+    crop = data.get("crop")
+    if not isinstance(crop, str):
+        return
+    candidate = crop.strip()
+    if not candidate:
+        data.pop("crop", None)
+        return
+    if candidate in CROP_KEYWORDS:
+        return
+    variety = data.get("variety")
+    if isinstance(variety, str) and variety.strip() == candidate:
+        data.pop("crop", None)
+        return
+    if _is_known_variety(candidate):
+        if not data.get("variety"):
+            data["variety"] = candidate
+        data.pop("crop", None)
+        return
+    if candidate not in prompt:
+        data.pop("crop", None)
+
+
+def _apply_rice_default(data: Dict[str, object]) -> None:
+    if data.get("crop"):
+        return
+    data["crop"] = DEFAULT_CROP
+
+
 def extract_planting_details(
     prompt: str,
     *,
@@ -197,10 +199,14 @@ def extract_planting_details(
             raise TypeError("llm_extract 必须返回包含字段的 dict。")
         data.update(raw_payload)
         _apply_heuristics(data, prompt)
+        _sanitize_crop_field(data, prompt)
+        _apply_rice_default(data)
         data.setdefault("confidence", 0.9)
         return PlantingDetailsDraft(**data)
 
     _apply_heuristics(data, prompt)
+    _sanitize_crop_field(data, prompt)
+    _apply_rice_default(data)
     data["confidence"] = 0.4 if len(data) == 1 else 0.75
     return PlantingDetailsDraft(**data)
 

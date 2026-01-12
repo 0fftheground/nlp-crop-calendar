@@ -1,26 +1,22 @@
 import json
 import re
+import sqlite3
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from pydantic import BaseModel
 from langchain_core.tools import BaseTool, tool as lc_tool
 from ...infra.config import get_config
-from ...infra.llm_extract import llm_structured_extract
-from ...infra.variety_store import build_variety_hint
+from ...infra.cache_keys import parse_planting_cache_key
+from ...infra.llm import get_chat_model
 from ...infra.variety_store import retrieve_variety_candidates
 from ...infra.tool_cache import get_tool_result_cache
 from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
-from ...domain.services import (
-    MissingPlantingInfoError,
-    list_missing_required_fields,
-    merge_planting_answers,
-    normalize_and_validate_planting,
-)
+from ...domain.services import DEFAULT_CROP
 from ...observability.logging_utils import log_event
 from ...schemas.models import (
     OperationItem,
     OperationPlanResult,
-    PlantingDetailsDraft,
-    PredictGrowthStageInput,
     ToolInvocation,
     WeatherDataPoint,
     WeatherQueryInput,
@@ -32,18 +28,41 @@ TOOLS: List[BaseTool] = []
 TOOL_INDEX: Dict[str, BaseTool] = {}
 HIDDEN_TOOL_NAMES = {"farming_recommendation", "growth_stage_prediction"}
 
-VARIETY_PATTERN = re.compile(r"(?:品种|品名|品系)[:：\s]*([\w\u4e00-\u9fff-]{2,20})")
-VARIETY_FALLBACK_PATTERN = re.compile(r"([\w\u4e00-\u9fff-]{2,20}号)")
 
-PLANTING_FIELD_LABELS = {
-    "crop": "作物",
-    "variety": "品种",
-    "planting_method": "种植方式",
-    "sowing_date": "播种日期",
-    "region": "地区",
+TOOL_CACHEABLE = {
+    "variety_lookup",
+    "weather_lookup",
+    "farming_recommendation",
+    "growth_stage_prediction",
+}
+VARIETY_DB_TABLE = "variety_approvals"
+VARIETY_DB_OUTPUT_FIELDS = (
+    "variety_name",
+    "approval_year",
+    "approval_region",
+    "suitable_region",
+    "rice_type",
+    "subspecies_type",
+    "maturity",
+    "control_variety",
+    "days_vs_control",
+)
+VARIETY_DB_FIELD_LABELS = {
+    "variety_name": "品种名称",
+    "approval_year": "审定年份",
+    "approval_region": "审定区域",
+    "suitable_region": "适种地区",
+    "rice_type": "稻作类型",
+    "subspecies_type": "亚种类型",
+    "maturity": "熟期",
+    "control_variety": "对照品种",
+    "days_vs_control": "比对照长(天)",
 }
 
-TOOL_CACHEABLE = {"variety_lookup", "weather_lookup", "farming_recommendation"}
+
+class VarietyMatchDecision(BaseModel):
+    index: int
+    reason: Optional[str] = None
 
 
 def register_tool(tool: BaseTool) -> None:
@@ -80,6 +99,19 @@ def _store_tool_result(
         return None
     cache = get_tool_result_cache()
     cache.set(tool_name, provider, prompt, result.model_dump(mode="json"))
+
+
+def get_cached_tool_result(
+    tool_name: str, provider: str, prompt: str
+) -> Optional[ToolInvocation]:
+    provider = normalize_provider(provider)
+    return _get_cached_tool_result(tool_name, provider, prompt)
+
+
+def cache_tool_result(
+    tool_name: str, provider: str, prompt: str, result: ToolInvocation
+) -> None:
+    _store_tool_result(tool_name, provider, prompt, result)
 
 
 def clear_tools() -> None:
@@ -126,13 +158,8 @@ def auto_register_tool(*tool_args, **tool_kwargs):
 def _extract_variety(prompt: str) -> Optional[str]:
     if not prompt:
         return None
-    match = VARIETY_PATTERN.search(prompt)
-    if match:
-        return match.group(1)
-    match = VARIETY_FALLBACK_PATTERN.search(prompt)
-    if match:
-        return match.group(1)
-    return None
+    candidates = retrieve_variety_candidates(prompt, limit=1)
+    return candidates[0] if candidates else None
 
 
 def _infer_crop_and_variety(prompt: str) -> Tuple[str, str]:
@@ -140,92 +167,8 @@ def _infer_crop_and_variety(prompt: str) -> Tuple[str, str]:
     crop = next((item for item in crop_keywords if item in prompt), "水稻")
     variety = _extract_variety(prompt)
     if not variety:
-        candidates = retrieve_variety_candidates(prompt, limit=1)
-        if candidates:
-            variety = candidates[0]
-    if not variety:
         variety = "美香占2号" if crop == "水稻" else f"{crop}示例品种"
     return crop, variety
-
-
-def _llm_extract_planting_details(prompt: str) -> PlantingDetailsDraft:
-    system_prompt = (
-        "你是农事助手，负责从用户描述中抽取种植信息。"
-        "只输出可确定的信息；不确定或未提及时保持为空。"
-        "种植方式使用 direct_seeding 或 transplanting。"
-        "日期格式为 YYYY-MM-DD。"
-    )
-    hint = build_variety_hint(prompt)
-    if hint:
-        system_prompt = f"{system_prompt}{hint}"
-    payload = llm_structured_extract(
-        prompt,
-        schema=PlantingDetailsDraft,
-        system_prompt=system_prompt,
-    )
-    allowed = {
-        "crop",
-        "variety",
-        "planting_method",
-        "sowing_date",
-        "transplant_date",
-        "region",
-        "planting_location",
-        "notes",
-        "confidence",
-    }
-    filtered = {k: v for k, v in payload.items() if k in allowed}
-    data: Dict[str, object] = {"source_text": prompt, **filtered}
-    return PlantingDetailsDraft(**data)
-
-
-def _parse_followup_payload(prompt: str) -> Optional[Dict[str, object]]:
-    if not prompt:
-        return None
-    try:
-        payload = json.loads(prompt)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    followup = payload.get("followup")
-    return followup if isinstance(followup, dict) else None
-
-
-def _merge_followup_draft(
-    prompt: str, prior_draft: Optional[Dict[str, object]]
-) -> PlantingDetailsDraft:
-    try:
-        seed = PlantingDetailsDraft(**(prior_draft or {}))
-    except Exception:
-        seed = PlantingDetailsDraft()
-    if not prompt:
-        return seed
-    fresh = _llm_extract_planting_details(prompt)
-    answers = fresh.model_dump(exclude_none=True)
-    return merge_planting_answers(seed, answers=answers)
-
-
-def _format_missing_planting_question(missing_fields: List[str]) -> str:
-    labels = [PLANTING_FIELD_LABELS.get(field, field) for field in missing_fields]
-    joined = "、".join(labels)
-    return f"生育期预测还需要补充：{joined}。请提供后继续。"
-
-
-def _coerce_weather_series(data: Dict[str, object], *, region: str) -> WeatherSeries:
-    if data:
-        try:
-            return WeatherSeries.model_validate(data)
-        except Exception:
-            pass
-    return WeatherSeries(
-        region=region or "unknown",
-        granularity="daily",
-        start_date=None,
-        end_date=None,
-        points=[],
-        source="workflow",
-    )
 
 
 def _summarize_tool_output(result: ToolInvocation) -> Dict[str, object]:
@@ -246,6 +189,245 @@ def _summarize_tool_output(result: ToolInvocation) -> Dict[str, object]:
         if isinstance(recommendations, list):
             summary["recommendations_count"] = len(recommendations)
     return summary
+
+
+def _get_variety_db_path() -> Optional[Path]:
+    cfg = get_config()
+    if cfg.variety_db_path:
+        return Path(cfg.variety_db_path)
+    return Path(__file__).resolve().parents[2] / "resources" / "rice_variety_approvals.sqlite3"
+
+
+def _query_variety_db_by_name(
+    conn: sqlite3.Connection, name: str, limit: int
+) -> List[sqlite3.Row]:
+    rows = conn.execute(
+        f"SELECT {', '.join(VARIETY_DB_OUTPUT_FIELDS)} "
+        f"FROM {VARIETY_DB_TABLE} WHERE variety_name = ?",
+        (name,),
+    ).fetchall()
+    if rows:
+        return rows
+    like_prefix = f"{name}%"
+    rows = conn.execute(
+        f"SELECT {', '.join(VARIETY_DB_OUTPUT_FIELDS)} "
+        f"FROM {VARIETY_DB_TABLE} WHERE variety_name LIKE ? LIMIT ?",
+        (like_prefix, limit),
+    ).fetchall()
+    if rows:
+        return rows
+    like_any = f"%{name}%"
+    return conn.execute(
+        f"SELECT {', '.join(VARIETY_DB_OUTPUT_FIELDS)} "
+        f"FROM {VARIETY_DB_TABLE} WHERE variety_name LIKE ? LIMIT ?",
+        (like_any, limit),
+    ).fetchall()
+
+
+def _query_variety_db_by_prompt(
+    conn: sqlite3.Connection, prompt: str, limit: int
+) -> List[sqlite3.Row]:
+    return conn.execute(
+        f"SELECT {', '.join(VARIETY_DB_OUTPUT_FIELDS)} "
+        f"FROM {VARIETY_DB_TABLE} "
+        "WHERE ? LIKE '%' || variety_name || '%' "
+        "ORDER BY LENGTH(variety_name) DESC LIMIT ?",
+        (prompt, limit),
+    ).fetchall()
+
+
+def _rows_to_variety_records(rows: List[sqlite3.Row]) -> List[Dict[str, object]]:
+    records: List[Dict[str, object]] = []
+    for row in rows:
+        record: Dict[str, object] = {}
+        for field in VARIETY_DB_OUTPUT_FIELDS:
+            record[VARIETY_DB_FIELD_LABELS[field]] = row[field]
+        records.append(record)
+    return records
+
+
+def _lookup_variety_records(prompt: str, *, limit: int = 5) -> List[Dict[str, object]]:
+    path = _get_variety_db_path()
+    if not path or not path.exists():
+        return []
+    prompt_text = prompt or ""
+    variety_name = _extract_variety(prompt_text)
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows: List[sqlite3.Row] = []
+            if variety_name:
+                rows = _query_variety_db_by_name(conn, variety_name, limit)
+            if not rows and prompt_text:
+                rows = _query_variety_db_by_prompt(conn, prompt_text, limit)
+    except Exception:
+        return []
+    return _rows_to_variety_records(rows)
+
+
+def _normalize_region_token(value: str) -> str:
+    return re.sub(r"(省|市|州|盟|地区|区|县)$", "", value or "").strip()
+
+
+def _extract_region_tokens(
+    prompt: str, records: List[Dict[str, object]]
+) -> List[str]:
+    tokens: List[str] = []
+    if prompt:
+        tokens.extend(
+            re.findall(r"[\u4e00-\u9fff]{2,8}(?:省|市|州|盟|地区|区|县)", prompt)
+        )
+    approval_regions = {
+        str(record.get("审定区域") or "").strip()
+        for record in records
+        if record.get("审定区域")
+    }
+    if prompt:
+        for region in approval_regions:
+            if region and region in prompt:
+                tokens.append(region)
+    unique: List[str] = []
+    seen = set()
+    for token in tokens:
+        if token and token not in seen:
+            seen.add(token)
+            unique.append(token)
+    return unique
+
+
+def _parse_approval_year(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit() and len(text) == 4:
+        return int(text)
+    match = re.search(r"(20\d{2})", text)
+    return int(match.group(1)) if match else None
+
+
+def _score_record_by_region(
+    record: Dict[str, object], region_tokens: List[str]
+) -> int:
+    approval_region = str(record.get("审定区域") or "")
+    suitable_region = str(record.get("适种地区") or "")
+    best = 0
+    for token in region_tokens:
+        normalized = _normalize_region_token(token)
+        if token and token in suitable_region:
+            best = max(best, 100)
+        elif normalized and normalized in suitable_region:
+            best = max(best, 90)
+        if token and token in approval_region:
+            best = max(best, 80)
+        elif normalized and normalized in approval_region:
+            best = max(best, 70)
+    return best
+
+
+def _pick_latest_year_record(
+    records: List[Dict[str, object]], indices: Optional[List[int]] = None
+) -> int:
+    best_index = (indices[0] if indices else 0)
+    best_year = -1
+    for idx, record in enumerate(records):
+        if indices and idx not in indices:
+            continue
+        year = _parse_approval_year(record.get("审定年份")) or 0
+        if year > best_year:
+            best_year = year
+            best_index = idx
+            continue
+        if year == best_year:
+            region = str(record.get("审定区域") or "")
+            current = str(records[best_index].get("审定区域") or "")
+            if region == "国审" and current != "国审":
+                best_index = idx
+    return best_index
+
+
+def _llm_choose_variety_record(
+    prompt: str,
+    candidates: List[Dict[str, object]],
+    region_tokens: List[str],
+) -> Optional[VarietyMatchDecision]:
+    try:
+        llm = get_chat_model()
+    except Exception:
+        return None
+    system_prompt = (
+        "你是品种审定记录选择器，根据用户种植地点与审定信息选择最匹配的一条记录。"
+        "只输出 JSON：index(候选列表序号)、reason(简短理由)。"
+    )
+    payload = {
+        "prompt": prompt,
+        "region_tokens": region_tokens,
+        "candidates": candidates,
+    }
+    try:
+        chooser = llm.with_structured_output(VarietyMatchDecision)
+        result = chooser.invoke(
+            [
+                ("system", system_prompt),
+                ("human", json.dumps(payload, ensure_ascii=True, default=str)),
+            ]
+        )
+        decision = (
+            result
+            if isinstance(result, VarietyMatchDecision)
+            else VarietyMatchDecision.model_validate(result)
+        )
+    except Exception:
+        return None
+    if decision.index < 0 or decision.index >= len(candidates):
+        return None
+    return decision
+
+
+def _select_best_variety_record(
+    prompt: str, records: List[Dict[str, object]]
+) -> Tuple[Dict[str, object], str]:
+    region_tokens = _extract_region_tokens(prompt, records)
+    if region_tokens:
+        scored = [
+            (_score_record_by_region(record, region_tokens), idx)
+            for idx, record in enumerate(records)
+        ]
+        max_score = max(score for score, _ in scored)
+        best_indices = [idx for score, idx in scored if score == max_score]
+        if max_score > 0 and len(best_indices) == 1:
+            return records[best_indices[0]], "规则匹配"
+        if max_score > 0 and len(best_indices) > 1:
+            candidates = [
+                {
+                    "index": i,
+                    "审定区域": records[i].get("审定区域"),
+                    "适种地区": records[i].get("适种地区"),
+                    "审定年份": records[i].get("审定年份"),
+                    "稻作类型": records[i].get("稻作类型"),
+                    "亚种类型": records[i].get("亚种类型"),
+                    "熟期": records[i].get("熟期"),
+                    "对照品种": records[i].get("对照品种"),
+                }
+                for i in best_indices
+            ]
+            decision = _llm_choose_variety_record(
+                prompt, candidates, region_tokens
+            )
+            if decision:
+                selected = records[decision.index]
+                reason = decision.reason or "LLM 匹配"
+                log_event(
+                    "variety_match_llm_choice",
+                    selected_index=decision.index,
+                    reason=reason,
+                )
+                return selected, reason
+            fallback = _pick_latest_year_record(records, best_indices)
+            return records[fallback], "年份优先"
+    fallback = _pick_latest_year_record(records)
+    return records[fallback], "年份优先"
 
 
 def _parse_year(value: object) -> Optional[int]:
@@ -347,6 +529,31 @@ def variety_lookup(prompt: str) -> ToolInvocation:
     if intranet:
         _store_tool_result("variety_lookup", provider, prompt, intranet)
         return intranet
+    records = _lookup_variety_records(prompt)
+    if records:
+        selected, reason = _select_best_variety_record(prompt, records)
+        variety = selected.get("品种名称") or _extract_variety(prompt) or "未知"
+        approval_regions = sorted(
+            {r.get("审定区域") for r in records if r.get("审定区域")}
+        )
+        region_note = f"（{len(approval_regions)}个区域）" if approval_regions else ""
+        payload = {
+            "query": prompt,
+            "crop": DEFAULT_CROP,
+            "variety": variety,
+            "selected": selected,
+            "selection_reason": reason,
+            "matches": records,
+            "source": "sqlite",
+        }
+        message = f"已返回品种 {variety} 的审定信息{region_note}。"
+        result = ToolInvocation(
+            name="variety_lookup",
+            message=message,
+            data=payload,
+        )
+        _store_tool_result("variety_lookup", provider, prompt, result)
+        return result
     crop, variety = _infer_crop_and_variety(prompt)
     payload = {
         "query": prompt,
@@ -439,139 +646,23 @@ def weather_lookup(prompt: str) -> ToolInvocation:
 @auto_register_tool(
     "growth_stage_prediction",
     description=(
-        "基于自然语言抽取种植信息（作物/品种/方式/播期/地区），"
-        "补齐后调用内网生育期接口完成预测。仅用于生育期预测。"
+        "仅用于读取已缓存的生育期预测结果。"
+        "缺少缓存时需走生育期预测 workflow。"
     ),
 )
 def growth_stage_prediction(prompt: str) -> ToolInvocation:
-    followup = _parse_followup_payload(prompt)
-    followup_count = 0
-    if followup:
-        prompt = str(followup.get("prompt") or "")
-        try:
-            prior_count = int(followup.get("followup_count") or 0)
-        except (TypeError, ValueError):
-            prior_count = 0
-        followup_count = prior_count + 1
-        prior_draft = followup.get("draft")
-        draft = _merge_followup_draft(prompt, prior_draft)
-    else:
-        draft = _llm_extract_planting_details(prompt)
-    missing_fields = list_missing_required_fields(draft)
-    if not draft.region:
-        missing_fields.append("region")
-    missing_fields = list(dict.fromkeys(missing_fields))
-
-    trace = [
-        f"extract draft={draft.model_dump(exclude_none=True)}",
-        f"extract missing={missing_fields} followup_count={followup_count}",
-    ]
-
-    if missing_fields:
-        message = _format_missing_planting_question(missing_fields)
-        return ToolInvocation(
-            name="growth_stage_prediction",
-            message=message,
-            data={
-                "missing_fields": missing_fields,
-                "draft": draft.model_dump(exclude_none=True),
-                "followup_count": followup_count,
-                "trace": trace,
-            },
+    provider = "workflow"
+    cache_key = parse_planting_cache_key(prompt)
+    if cache_key:
+        cached = _get_cached_tool_result(
+            "growth_stage_prediction", provider, cache_key
         )
-
-    try:
-        planting = normalize_and_validate_planting(draft)
-    except MissingPlantingInfoError as exc:
-        message = _format_missing_planting_question(exc.missing_fields)
-        return ToolInvocation(
-            name="growth_stage_prediction",
-            message=message,
-            data={
-                "missing_fields": exc.missing_fields,
-                "draft": draft.model_dump(exclude_none=True),
-                "followup_count": followup_count,
-                "trace": trace,
-            },
-        )
-    except ValueError as exc:
-        return ToolInvocation(
-            name="growth_stage_prediction",
-            message=f"种植信息校验失败: {exc}",
-            data={"draft": draft.model_dump(exclude_none=True), "trace": trace},
-        )
-
-    crop = planting.crop
-    variety = planting.variety or f"{crop}示例品种"
-    region = planting.region or "unknown"
-
-    variety_prompt = f"{crop} {variety}".strip()
-    variety_result = execute_tool("variety_lookup", variety_prompt)
-    if variety_result:
-        variety_data = variety_result.data
-        trace.append("variety_lookup ok")
-    else:
-        variety_data = {}
-        trace.append("variety_lookup missing")
-
-    weather_result = execute_tool("weather_lookup", region)
-    if weather_result:
-        weather_data = weather_result.data
-        trace.append("weather_lookup ok")
-    else:
-        weather_data = {}
-        trace.append("weather_lookup missing")
-
-    weather_series = _coerce_weather_series(weather_data, region=region)
-    weather_summary = {
-        "region": weather_series.region,
-        "start_date": (
-            weather_series.start_date.isoformat()
-            if weather_series.start_date
-            else None
-        ),
-        "end_date": (
-            weather_series.end_date.isoformat() if weather_series.end_date else None
-        ),
-        "points": len(weather_series.points),
-        "source": weather_series.source,
-    }
-    request = PredictGrowthStageInput(planting=planting, weatherSeries=weather_series)
-    request_payload = json.dumps(
-        request.model_dump(mode="json"), ensure_ascii=True, default=str
-    )
-    cfg = get_config()
-    provider = normalize_provider(cfg.growth_stage_provider)
-    intranet = maybe_intranet_tool(
-        "growth_stage_prediction",
-        request_payload,
-        provider,
-        cfg.growth_stage_api_url,
-        cfg.growth_stage_api_key,
-    )
-    trace.append(
-        "growth_stage_intranet ok" if intranet else "growth_stage_intranet missing"
-    )
-    workflow_payload = {
-        "inputs": {
-            "planting": planting.model_dump(exclude_none=True, mode="json"),
-        },
-        "variety": variety_data,
-        "weather_summary": weather_summary,
-        "trace": trace,
-    }
-    if intranet:
-        payload = dict(intranet.data or {})
-        payload.setdefault("workflow", workflow_payload)
-        return ToolInvocation(
-            name=intranet.name,
-            message=intranet.message,
-            data=payload,
-        )
+        if cached:
+            return cached
     return ToolInvocation(
         name="growth_stage_prediction",
-        message="生育期预测需要内网接口，请配置 GROWTH_STAGE_PROVIDER=intranet。",
-        data={"workflow": workflow_payload},
+        message="生育期预测必须走工作流，当前仅支持返回历史缓存结果。",
+        data={"cache_hit": False},
     )
 
 
@@ -658,31 +749,3 @@ def execute_tool(name: str, prompt: str) -> Optional[ToolInvocation]:
         f"Tool '{name}' returned unsupported type {type(result)!r}; "
         "please return ToolInvocation."
     )
-
-
-def build_agent_tools() -> List[BaseTool]:
-    """Build agent-friendly tools that return JSON strings for LLM consumption."""
-    tools: List[BaseTool] = []
-
-    def _make_tool_impl(tool_name: str, tool_description: str):
-        def _tool_impl(prompt: str) -> str:
-            result = execute_tool(tool_name, prompt)
-            if not result:
-                payload = {
-                    "name": tool_name,
-                    "message": "tool not found",
-                    "data": {},
-                }
-            else:
-                payload = result.model_dump(mode="json")
-            return json.dumps(payload, ensure_ascii=True, default=str)
-
-        _tool_impl.__doc__ = tool_description or ""
-        return _tool_impl
-
-    for spec in list_tool_specs():
-        name = spec["name"]
-        description = spec["description"]
-        tool_impl = _make_tool_impl(name, description)
-        tools.append(lc_tool(name)(tool_impl))
-    return tools

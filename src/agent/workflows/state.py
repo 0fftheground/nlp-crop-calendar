@@ -28,6 +28,7 @@ class GraphState(TypedDict, total=False):
     missing_fields: List[str]
     followup_count: int
     assumptions: List[str]
+    cache_hit: bool
     weather_info: Dict[str, object]
     weather_series_ref: str
     growth_stage: GrowthStageResult

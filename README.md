@@ -1,29 +1,29 @@
 # NLP Crop Calendar (Chainlit + FastAPI + LangGraph)
 
-This project demonstrates an end-to-end workflow for generating crop recommendations from farmer questions. A Chainlit UI collects inputs, a FastAPI backend hosts a LangChain tool-calling agent, and LangGraph powers the fixed-step crop planning workflow. When a request is simple, the agent can call a single tool; for planning, it invokes the LangGraph workflow tool. **OpenAI GPT models are required--no mock LLM is provided.**
+本项目展示了从农户问题生成种植建议的端到端流程。Chainlit 负责收集输入，FastAPI 提供后端服务，路由采用 LLM 驱动的 Planner+Executor，LangGraph 负责固定步骤的种植规划流程。简单问题由 planner 选择单一工具处理，复杂规划则进入 LangGraph 工作流。**必须使用 OpenAI GPT 模型（不提供 mock LLM）。**
 
-## Components
-- **Chainlit Frontend (`chainlit_app.py`)** - chat interface that sends prompts to the backend and renders results/trace info.
-- **FastAPI Backend (`src/api/server.py`)** - exposes `/api/v1/handle` for agent-driven routing between tools and workflow.
-- **Request Router (`src/agent/router.py`)** - tool-calling agent that can run standalone tools (`src/agent/tools/registry.py`) or invoke the LangGraph workflow tool; follow-up handling is gated by a control-intent router (rules + LLM fallback).
-- **LangGraph Workflow (`src/agent/workflows/crop_graph.py`)** - fixed-step state machine for the crop planning flow (LLM extraction + follow-up + tools).
+## 组件
+- **Chainlit 前端 (`chainlit_app.py`)** - 对话界面，向后端发送请求并展示结果/trace。
+- **FastAPI 后端 (`src/api/server.py`)** - 对外提供 `/api/v1/handle`，由 planner 决定工具或工作流。
+- **请求路由 (`src/agent/router.py`)** - Planner+Executor：通过 `src/agent/planner.py` 选择 tool/workflow 并执行，同时管理追问状态。
+- **LangGraph 工作流 (`src/agent/workflows/crop_calendar_graph.py`/`src/agent/workflows/growth_stage_graph.py`)** - 固定步骤的种植规划流程（LLM 抽取 + 追问 + 工具并行）。
 
-## Getting Started
+## 快速开始
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-1. **Start both backend + Chainlit**
+1. **启动后端与 Chainlit**
    ```bash
    python run_all.py
    ```
-   This launches `uvicorn` (`src.api.server:app`) and `chainlit run chainlit_app.py --watch` in parallel. Press `Ctrl+C` once to stop both.
-2. Open the Chainlit URL from the console and converse with the assistant.
+   该命令会并行启动 `uvicorn`（`src.api.server:app`）和 `chainlit run chainlit_app.py --watch`。按一次 `Ctrl+C` 停止。
+2. 打开控制台输出的 Chainlit URL 与助手对话。
 
-## Environment
-Create a `.env` file (see `.env.example`) to specify LLM provider and API keys, e.g.:
+## 环境变量
+创建 `.env` 文件（参考 `.env.example`），配置 LLM 与各工具的 API 参数，例如：
 ```
 LLM_PROVIDER=openai
 OPENAI_API_KEY=sk-...
@@ -33,7 +33,7 @@ EXTRACTOR_API_KEY=
 EXTRACTOR_API_BASE=
 EXTRACTOR_TEMPERATURE=0.0
 DEFAULT_REGION=global
-VARIETY_PROVIDER=mock
+VARIETY_PROVIDER=local
 VARIETY_API_URL=
 VARIETY_API_KEY=
 WEATHER_PROVIDER=mock
@@ -46,45 +46,33 @@ RECOMMENDATION_PROVIDER=mock
 RECOMMENDATION_API_URL=
 RECOMMENDATION_API_KEY=
 ```
-If `EXTRACTOR_API_KEY` is empty, the extractor falls back to `OPENAI_API_KEY`.
-Tool providers default to `mock`. Set `*_PROVIDER=intranet` and supply the `*_API_URL`/`*_API_KEY` fields to switch to intranet endpoints. Growth stage prediction requires `GROWTH_STAGE_PROVIDER=intranet`.
+若 `EXTRACTOR_API_KEY` 为空，抽取模型将回退使用 `OPENAI_API_KEY`。
+工具默认使用 `mock`。品种查询默认读取本地 SQLite（`VARIETY_PROVIDER=local`），仅在切换到内网接口时设为 `VARIETY_PROVIDER=intranet`；其他工具将 `*_PROVIDER` 设为 `intranet` 并配置 `*_API_URL`/`*_API_KEY` 可切换到内网接口；生育期预测必须使用 `GROWTH_STAGE_PROVIDER=intranet`。
 
-## Development Notes
-- `src/agent/router.py` + `src/agent/tools/registry.py` implement the tool-calling agent logic. Add tool handlers or adjust the agent prompt to expand coverage.
-- LangGraph state types live in `src/agent/workflows/state.py`. Adding nodes/branches only requires editing `crop_graph.py`.
-- Workflow details: LLM extracts planting details, missing fields trigger follow-up questions (up to 2 times), then weather/variety tools run in parallel, and `farming_recommendation` consumes the combined context.
-- `src/api/server.py` wires HTTP handlers to the router/graph runner; extend it with authentication, logging, or persistence as needed.
-- An OpenAI API key is mandatory. The system instantiates `ChatOpenAI` for both routing and extraction, with extraction optionally using a lighter model via `EXTRACTOR_*` settings.
-- `growth_stage_prediction` uses structured extraction (PlantingDetailsDraft) and will ask for missing planting fields before calling the intranet growth stage service.
-- Follow-up control: pending sessions are checked by a control-intent gate (rules first, LLM fallback) to decide cancel/continue/new_question, so unrelated tool queries can break out of a follow-up.
-- Preference memory: normalized planting details can be stored per session (TTL) and will be suggested with confirmation before reuse. Use “清除记忆” to reset.
-- Infrastructure adapters live under `src/infra` (config, LLM clients, structured extraction).
-- For unrelated prompts, the router can return `mode="none"` and skip tool/workflow execution.
-- A minimal local variety store lives in `src/resources/varieties.json`, used for retrieval hints during extraction.
-- Variety retrieval prefers semantic similarity via embeddings (falls back to fuzzy match); optional env: `EMBEDDING_MODEL`.
-- If Qdrant is configured, retrieval will query Qdrant first (`QDRANT_URL`, `QDRANT_COLLECTIONS` with `"variety"` key).
+## 开发说明
+- `src/agent/router.py` + `src/agent/planner.py` 实现 Planner+Executor 逻辑，可通过调整 planner 提示词或新增工具扩展能力。
+- LangGraph 状态类型在 `src/agent/workflows/state.py`，新增节点/分支分别在 `src/agent/workflows/crop_calendar_graph.py` 与 `src/agent/workflows/growth_stage_graph.py` 编辑。
+- 工作流流程：LLM 抽取种植信息，缺失字段触发追问（最多 2 次），随后气象/品种工具并行执行，`farming_recommendation` 消费上下文输出推荐。
+- `src/api/server.py` 负责将 HTTP 请求绑定到 router/graph，可按需扩展鉴权、日志或持久化。
+- 必须提供 OpenAI API key。系统使用 `ChatOpenAI` 完成规划与抽取，抽取可通过 `EXTRACTOR_*` 选择轻量模型。
+- `growth_stage_prediction` 仅用于读取历史缓存结果；生育期预测必须走 workflow，由工作流完成抽取/追问/内网调用。
+- 作物日历/生育期 workflow 结果会基于标准化 `PlantingDetails` 生成缓存 key，命中则直接返回。
+- 命中生育期缓存时，需要传入 `PlantingDetails` JSON（或包含 `planting` 字段的 JSON）。
+- 追问控制：pending 状态会传入 LLM planner；显式“取消追问”会清理 pending，从而允许切换到新问题。
+- 记忆偏好：标准化后的种植信息可按 session 缓存（TTL），使用前会提示确认；回复“清除记忆”可重置。
+- 基础设施适配器集中在 `src/infra`（配置、LLM 客户端、结构化抽取等）。
+- 与农事无关的请求会返回 `mode="none"`，跳过工具/工作流执行。
+- 品种抽取使用关键词严格匹配；数据来源使用 `src/resources/rice_variety_approvals.sqlite3`（可用 `VARIETY_DB_PATH` 覆盖）。
 
-## Tests
+## 测试
 ```bash
 python -m unittest
 ```
-For routing checks without LLM calls:
+不调用 LLM 的意图测试：
 ```bash
 python scripts/intent_routing_test.py --strategy rule
 ```
 
-## Variety Embedding (Qdrant)
-If you run a local Qdrant instance, build the variety embeddings and upsert once:
-```bash
-python scripts/build_variety_qdrant.py --qdrant-url http://localhost:6333
-```
-Ensure `.env` includes:
-```
-QDRANT_URL=http://localhost:6333
-QDRANT_COLLECTIONS={"variety":"varieties"}
-EMBEDDING_MODEL=text-embedding-3-small
-```
-
-More details live in `TECHNICAL_DETAILS.md`.
+更多细节请查看 `TECHNICAL_DETAILS.md`。
 
 

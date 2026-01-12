@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
-from .crop_graph import build_graph as build_crop_graph
-from .crop_graph import build_growth_stage_graph
+from .crop_calendar_graph import build_crop_calendar_graph
+from .growth_stage_graph import build_growth_stage_graph
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ _WORKFLOWS = (
             "适用：用户要全流程/多环节方案，或在补充作物/品种/播种方式/播期等关键信息时。"
             "与种植无关不要调用"
         ),
-        builder=build_crop_graph,
+        builder=build_crop_calendar_graph,
     ),
     WorkflowSpec(
         name=GROWTH_WORKFLOW_NAME,

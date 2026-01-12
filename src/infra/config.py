@@ -35,13 +35,16 @@ class AppConfig(BaseSettings):
     default_region: str = Field(default="global", validation_alias="DEFAULT_REGION")
     fastapi_port: int = Field(default=8000, validation_alias="FASTAPI_PORT")
     variety_provider: str = Field(
-        default="mock", validation_alias="VARIETY_PROVIDER"
+        default="local", validation_alias="VARIETY_PROVIDER"
     )
     variety_api_url: Optional[str] = Field(
         default=None, validation_alias="VARIETY_API_URL"
     )
     variety_api_key: Optional[str] = Field(
         default=None, validation_alias="VARIETY_API_KEY"
+    )
+    variety_db_path: Optional[str] = Field(
+        default=None, validation_alias="VARIETY_DB_PATH"
     )
     weather_provider: str = Field(
         default="mock", validation_alias="WEATHER_PROVIDER"

@@ -73,7 +73,7 @@ def maybe_intranet_tool(
     api_key: Optional[str],
 ) -> Optional[ToolInvocation]:
     provider = normalize_provider(provider)
-    if provider == "mock":
+    if provider in {"mock", "local", "sqlite"}:
         return None
     if provider == "intranet":
         return invoke_intranet_tool(tool_name, prompt, api_url, api_key)

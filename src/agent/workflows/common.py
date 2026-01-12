@@ -4,6 +4,7 @@ Shared helpers for LangGraph workflows.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Dict, List, Optional, Type
 
@@ -12,7 +13,7 @@ from pydantic import BaseModel, Field
 from ...infra.config import get_config
 from ...infra.llm_extract import llm_structured_extract
 from ...infra.variety_store import build_variety_hint
-from ...schemas import PlantingDetails, PlantingDetailsDraft
+from ...schemas import PlantingDetails, PlantingDetailsDraft, WeatherSeries
 
 
 UNKNOWN_MARKERS = ["不知道", "不清楚", "不确定", "记不清", "不记得", "忘了"]
@@ -53,6 +54,63 @@ class PlantingExtract(BaseModel):
     region: Optional[str] = None
     planting_location: Optional[str] = None
     notes: Optional[str] = None
+
+
+def coerce_planting_draft(value: object) -> Optional[PlantingDetailsDraft]:
+    if value is None:
+        return None
+    if isinstance(value, PlantingDetailsDraft):
+        return value
+    if isinstance(value, dict):
+        try:
+            return PlantingDetailsDraft.model_validate(value)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict):
+            try:
+                return PlantingDetailsDraft.model_validate(payload)
+            except Exception:
+                return None
+    return None
+
+
+def coerce_weather_series(
+    data: Dict[str, object], *, region: str, source: str = "workflow"
+) -> WeatherSeries:
+    if data:
+        try:
+            return WeatherSeries.model_validate(data)
+        except Exception:
+            pass
+    return WeatherSeries(
+        region=region or "unknown",
+        granularity="daily",
+        start_date=None,
+        end_date=None,
+        points=[],
+        source=source,
+    )
+
+
+def summarize_weather_series(weather_series: WeatherSeries) -> Dict[str, object]:
+    return {
+        "region": weather_series.region,
+        "start_date": (
+            weather_series.start_date.isoformat()
+            if weather_series.start_date
+            else None
+        ),
+        "end_date": (
+            weather_series.end_date.isoformat() if weather_series.end_date else None
+        ),
+        "points": len(weather_series.points),
+        "source": weather_series.source,
+    }
 
 
 def infer_unknown_fields(
