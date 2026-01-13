@@ -66,6 +66,29 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertIsNotNone(result.plan)
         self.assertEqual(result.plan.message, "ok")
 
+    def test_none_action_falls_back_to_rule_tool(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        plan = ActionPlan(action="none")
+        tool_payload = ToolInvocation(
+            name="variety_lookup",
+            message="ok",
+            data={},
+        )
+        with patch.object(self.router._planner, "plan", return_value=plan):
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = self.router.handle(
+                    UserRequest(prompt="水稻品种美香占2号", session_id="s6")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertIsNotNone(result.tool)
+        self.assertEqual(result.tool.name, "variety_lookup")
+        mocked_execute.assert_called_once()
+
     def test_tool_action_sets_pending(self) -> None:
         from src.agent.planner import ActionPlan
         from src.schemas.models import ToolInvocation, UserRequest

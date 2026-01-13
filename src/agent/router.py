@@ -14,6 +14,7 @@ from ..schemas.models import (
     WorkflowResponse,
 )
 from .intent_rules import (
+    classify_intent,
     is_cancel_only,
     is_cancel_request,
     is_memory_clear_request,
@@ -102,7 +103,27 @@ class RequestRouter:
                 pending_mode=pending.get("mode"),
             )
             return self._resume_pending(prompt, pending, session_id)
+        if not plan.response:
+            fallback = self._fallback_to_rule_tool(prompt, pending)
+            if fallback:
+                return self._execute_tool_plan(
+                    fallback, prompt, pending, session_id
+                )
         return self._respond_none(plan, pending, session_id)
+
+    def _fallback_to_rule_tool(
+        self, prompt: str, pending: Optional[dict]
+    ) -> Optional[ActionPlan]:
+        if pending:
+            return None
+        mode, tool_name = classify_intent(prompt)
+        if mode != "tool" or not tool_name:
+            return None
+        if tool_name not in self._tool_names:
+            log_event("rule_invalid_tool", name=tool_name)
+            return None
+        log_event("planner_rule_fallback", tool=tool_name)
+        return ActionPlan(action="tool", name=tool_name)
 
     def _execute_tool_plan(
         self,

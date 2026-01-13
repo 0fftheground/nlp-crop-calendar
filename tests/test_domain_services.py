@@ -12,7 +12,10 @@ sys.path.insert(0, str(ROOT))
 _MISSING_PYDANTIC_SETTINGS = importlib.util.find_spec("pydantic_settings") is None
 
 if not _MISSING_PYDANTIC_SETTINGS:
-    from src.domain.services import build_operation_plan, fetch_weather
+    from src.application.services.crop_calendar_service import (
+        build_operation_plan,
+        fetch_weather,
+    )
     from src.infra.config import get_config
     from src.schemas import PlantingDetails, WeatherQueryInput, WeatherSeries
 

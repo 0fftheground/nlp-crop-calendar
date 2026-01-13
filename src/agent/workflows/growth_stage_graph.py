@@ -9,9 +9,9 @@ from typing import Dict, List, Optional
 
 from langgraph.graph import END, StateGraph
 
-from ...domain.services import (
+from ...application.services.planting_service import extract_planting_details
+from ...domain.planting import (
     MissingPlantingInfoError,
-    extract_planting_details,
     list_missing_required_fields,
     merge_planting_answers,
     normalize_and_validate_planting,
