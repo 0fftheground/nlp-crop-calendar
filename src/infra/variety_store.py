@@ -15,14 +15,14 @@ _VARIETY_DB_TABLE = "variety_approvals"
 
 
 def _default_store_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "resources" / "varieties.json"
+    return Path(__file__).resolve().parents[2] / "resources" / "varieties.json"
 
 
 def _get_variety_db_path() -> Optional[Path]:
     cfg = get_config()
     if cfg.variety_db_path:
         return Path(cfg.variety_db_path)
-    default_path = Path(__file__).resolve().parents[1] / "resources" / "rice_variety_approvals.sqlite3"
+    default_path = Path(__file__).resolve().parents[2] / "resources" / "rice_variety_approvals.sqlite3"
     return default_path if default_path.exists() else None
 
 

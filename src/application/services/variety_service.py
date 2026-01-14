@@ -14,6 +14,7 @@ from ...infra.llm import get_chat_model
 from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ...infra.variety_store import retrieve_variety_candidates
 from ...observability.logging_utils import log_event
+from ...prompts.variety_match import VARIETY_MATCH_SYSTEM_PROMPT
 from ...schemas.models import ToolInvocation
 
 
@@ -86,7 +87,7 @@ def _get_variety_db_path() -> Optional[Path]:
     cfg = get_config()
     if cfg.variety_db_path:
         return Path(cfg.variety_db_path)
-    return Path(__file__).resolve().parents[2] / "resources" / "rice_variety_approvals.sqlite3"
+    return Path(__file__).resolve().parents[3] / "resources" / "rice_variety_approvals.sqlite3"
 
 
 def _normalize_variety_prompt(prompt: str) -> str:
@@ -329,10 +330,7 @@ def _llm_choose_variety_record(
         llm = get_chat_model()
     except Exception:
         return None
-    system_prompt = (
-        "你是品种审定记录选择器，根据用户种植地点与审定信息选择最匹配的一条记录。"
-        "只输出 JSON：index(候选列表序号)、reason(简短理由)。"
-    )
+    system_prompt = VARIETY_MATCH_SYSTEM_PROMPT
     payload = {
         "prompt": prompt,
         "region_tokens": region_tokens,

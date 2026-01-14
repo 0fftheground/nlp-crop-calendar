@@ -18,23 +18,25 @@ Chainlit UI --> FastAPI 后端 --> Planner（LLM）+ Executor（工具 + LangGra
 - `src/infra/llm_extract.py` – 结构化抽取的通用封装。
 - `src/infra/cache_keys.py` – 基于 `PlantingDetails` 生成缓存 key 的工具。
 - `src/infra/tool_provider.py` – provider 切换与内网 HTTP 调用封装。
-- `src/infra/variety_store.py` – 轻量品种检索（`src/resources/rice_variety_approvals.sqlite3`）。
+- `src/infra/variety_store.py` – 轻量品种检索（`resources/rice_variety_approvals.sqlite3`）。
 - `src/infra/pending_store.py` – 追问状态持久化与 TTL（memory/sqlite）。
 - `src/infra/tool_cache.py` – 工具结果缓存（memory/sqlite）。
 - `src/infra/weather_cache.py` – 气象序列缓存（可持久化）。
 - `src/infra/interaction_store.py` – 请求/响应审计记录（memory/sqlite）。
 - `src/infra/preference_store.py` – 会话级偏好记忆（标准化 PlantingDetails）与 TTL。
-- 品种检索采用关键词严格匹配，不使用 embedding/Qdrant。
+- `src/prompts/*` – LLM 提示词与 workflow/tool 的用户文案（planner/extract/兜底提示）。
+- 品种检索采用候选名称 + 模糊 token，不使用 embedding/Qdrant。
 - `src/schemas/models.py` – 共享 schema（`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`），`UserRequest` 支持 `session_id`。
-- `src/agent/planner.py` – LLM planner，输出 `ActionPlan`（tool/workflow/none），综合工具/工作流清单与 pending 上下文。
+- `src/agent/planner.py` – LLM planner，输出 `ActionPlan`（tool/workflow/none），综合工具/工作流清单与 pending 上下文（提示词见 `src/prompts/planner.py`）。
 - `src/agent/tools/registry.py` – 工具注册与执行（品种/气象/生育期/农事推荐），支持 `mock`/`intranet` provider。
 - `src/agent/intent_rules.py` – 规则意图与取消/清除记忆关键词辅助。
 - `src/agent/router.py` – 执行 planner 决策、分发工具/工作流，并更新追问状态。
-- `src/domain/services.py` – 封装种植日历流水线（抽取/追问/校验/天气/生育期/农事推荐）及工具占位实现。
+- `src/application/services/*` – 应用层业务服务（品种/气象/推荐/作物日历/种植抽取），供工具与工作流调用。
+- `src/domain/planting.py` – 种植信息抽取/校验的领域逻辑与启发式规则。
 - `src/agent/workflows/state.py` / `crop_calendar_graph.py` / `growth_stage_graph.py` – LangGraph 状态定义与工作流实现。
 - `src/api/server.py` – FastAPI 路由与依赖缓存。
 - `chainlit_app.py` – UI 客户端。
-- `src/resources/rice_variety_approvals.sqlite3` – 水稻品种审定数据库（可用 `VARIETY_DB_PATH` 覆盖路径）。
+- `resources/rice_variety_approvals.sqlite3` – 水稻品种审定数据库（可用 `VARIETY_DB_PATH` 覆盖路径）。
 
 ## LangGraph 说明
 - `StateGraph` 作为调度骨架，目前包含 `extract`、`ask`、`context`、`recommend` 四个节点。

@@ -27,6 +27,12 @@ from ...schemas import (
     Recommendation,
     WorkflowResponse,
 )
+from ...prompts.workflow_messages import (
+    build_crop_calendar_missing_question,
+    format_crop_calendar_plan_message,
+    format_memory_confirmation,
+)
+from ...prompts.tool_messages import TOOL_NOT_FOUND_MESSAGE
 from ..tools.registry import execute_tool
 from .common import (
     apply_memory_to_draft,
@@ -34,8 +40,6 @@ from .common import (
     coerce_weather_series,
     build_fallback_planting,
     classify_memory_confirmation,
-    format_missing_question,
-    format_memory_confirmation,
     infer_unknown_fields,
     llm_extract_planting,
     summarize_weather_series,
@@ -49,53 +53,8 @@ CROP_FIELD_LABELS = {
     "planting_method": "种植方式",
     "sowing_date": "播种日期",
 }
-PLANTING_METHOD_LABELS = {
-    "direct_seeding": "直播",
-    "transplanting": "移栽",
-}
 CROP_CACHE_NAME = "crop_calendar_workflow"
 CROP_CACHE_PROVIDER = "workflow"
-
-
-def _format_plan_message(
-    planting: PlantingDetails,
-    recommendations: List[Recommendation],
-    assumptions: List[str],
-    weather_note: Optional[str] = None,
-    variety_note: Optional[str] = None,
-    recommendation_note: Optional[str] = None,
-) -> str:
-    info_parts = [f"作物: {planting.crop}"]
-    if planting.variety:
-        info_parts.append(f"品种: {planting.variety}")
-    if planting.region:
-        info_parts.append(f"区域: {planting.region}")
-    method_key = (
-        planting.planting_method.value
-        if hasattr(planting.planting_method, "value")
-        else str(planting.planting_method)
-    )
-    method_label = PLANTING_METHOD_LABELS.get(method_key, method_key)
-    info_parts.append(f"方式: {method_label}")
-    info_parts.append(f"播种日期: {planting.sowing_date.isoformat()}")
-
-    lines = ["已生成农事推荐。", "种植信息: " + "，".join(info_parts)]
-    if weather_note:
-        lines.append(f"气象信息: {weather_note}")
-    if variety_note:
-        lines.append(f"品种信息: {variety_note}")
-    if recommendation_note:
-        lines.append(f"推荐摘要: {recommendation_note}")
-    if recommendations:
-        lines.append("推荐操作:")
-        for idx, rec in enumerate(recommendations, start=1):
-            line = f"{idx}. {rec.title} - {rec.description}"
-            lines.append(line)
-
-    if assumptions:
-        lines.append("默认/假设: " + "；".join(assumptions))
-
-    return "\n".join(lines)
 
 
 def _coerce_operation_plan(
@@ -228,10 +187,9 @@ def _extract_node(state: GraphState) -> GraphState:
 
 def _ask_node(state: GraphState) -> GraphState:
     missing_fields = state.get("missing_fields", [])
-    message = format_missing_question(
+    message = build_crop_calendar_missing_question(
         missing_fields,
         CROP_FIELD_LABELS,
-        "为了给出农事推荐，还需要补充：",
     )
     memory_planting = state.get("memory_planting")
     memory_decision = state.get("memory_decision")
@@ -250,7 +208,11 @@ def _fetch_variety_info(planting: PlantingDetails, prompt: str) -> Dict[str, obj
     query = planting.variety or planting.crop or prompt
     result = execute_tool("variety_lookup", query)
     if not result:
-        return {"name": "variety_lookup", "message": "tool not found", "data": {}}
+        return {
+            "name": "variety_lookup",
+            "message": TOOL_NOT_FOUND_MESSAGE,
+            "data": {},
+        }
     return result.model_dump(mode="json")
 
 
@@ -264,7 +226,7 @@ def _fetch_weather_info(planting: PlantingDetails, prompt: str) -> Dict[str, obj
         weather_series_ref = store_weather_series(weather_series)
         return {
             "name": "weather_lookup",
-            "message": "tool not found",
+            "message": TOOL_NOT_FOUND_MESSAGE,
             "data": {
                 "weather_series_ref": weather_series_ref,
                 "summary": summarize_weather_series(weather_series),
@@ -291,10 +253,9 @@ def _context_node(state: GraphState) -> GraphState:
         state = add_trace(state, "context missing draft")
         state.update(
             {
-                "message": format_missing_question(
+                "message": build_crop_calendar_missing_question(
                     list(CROP_FIELD_LABELS.keys()),
                     CROP_FIELD_LABELS,
-                    "为了给出农事推荐，还需要补充：",
                 )
             }
         )
@@ -308,10 +269,9 @@ def _context_node(state: GraphState) -> GraphState:
         state.update(
             {
                 "missing_fields": missing,
-                "message": format_missing_question(
+                "message": build_crop_calendar_missing_question(
                     missing,
                     CROP_FIELD_LABELS,
-                    "为了给出农事推荐，还需要补充：",
                 ),
             }
         )
@@ -377,10 +337,9 @@ def _recommend_node(state: GraphState) -> GraphState:
         state = add_trace(state, "recommend missing planting")
         state.update(
             {
-                "message": format_missing_question(
+                "message": build_crop_calendar_missing_question(
                     list(CROP_FIELD_LABELS.keys()),
                     CROP_FIELD_LABELS,
-                    "为了给出农事推荐，还需要补充：",
                 )
             }
         )
@@ -402,7 +361,11 @@ def _recommend_node(state: GraphState) -> GraphState:
     recommendation_info = (
         recommendation_payload.model_dump(mode="json")
         if recommendation_payload
-        else {"name": "farming_recommendation", "message": "tool not found", "data": {}}
+        else {
+            "name": "farming_recommendation",
+            "message": TOOL_NOT_FOUND_MESSAGE,
+            "data": {},
+        }
     )
     weather_note = weather_info.get("message") or ""
     variety_note = variety_info.get("message") or ""
@@ -411,7 +374,7 @@ def _recommend_node(state: GraphState) -> GraphState:
     recommendations = (
         _build_recommendations_from_plan(plan, planting) if plan else []
     )
-    message = _format_plan_message(
+    message = format_crop_calendar_plan_message(
         planting,
         recommendations,
         assumptions,

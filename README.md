@@ -50,9 +50,11 @@ RECOMMENDATION_API_KEY=
 工具默认使用 `mock`。品种查询默认读取本地 SQLite（`VARIETY_PROVIDER=local`），仅在切换到内网接口时设为 `VARIETY_PROVIDER=intranet`；其他工具将 `*_PROVIDER` 设为 `intranet` 并配置 `*_API_URL`/`*_API_KEY` 可切换到内网接口；生育期预测必须使用 `GROWTH_STAGE_PROVIDER=intranet`。
 
 ## 开发说明
-- `src/agent/router.py` + `src/agent/planner.py` 实现 Planner+Executor 逻辑，可通过调整 planner 提示词或新增工具扩展能力。
+- `src/agent/router.py` + `src/agent/planner.py` 实现 Planner+Executor 逻辑，可通过调整 planner 提示词或新增工具扩展能力（提示词在 `src/prompts/planner.py`）。
 - LangGraph 状态类型在 `src/agent/workflows/state.py`，新增节点/分支分别在 `src/agent/workflows/crop_calendar_graph.py` 与 `src/agent/workflows/growth_stage_graph.py` 编辑。
 - 工作流流程：LLM 抽取种植信息，缺失字段触发追问（最多 2 次），随后气象/品种工具并行执行，`farming_recommendation` 消费上下文输出推荐。
+- 业务服务集中在 `src/application/services`，工具层为薄适配器调用应用服务。
+- LLM 提示词与工作流用户文案统一在 `src/prompts`（planner / 抽取 / workflow 文案 / tool 兜底）。
 - `src/api/server.py` 负责将 HTTP 请求绑定到 router/graph，可按需扩展鉴权、日志或持久化。
 - 必须提供 OpenAI API key。系统使用 `ChatOpenAI` 完成规划与抽取，抽取可通过 `EXTRACTOR_*` 选择轻量模型。
 - `growth_stage_prediction` 仅用于读取历史缓存结果；生育期预测必须走 workflow，由工作流完成抽取/追问/内网调用。
@@ -62,7 +64,7 @@ RECOMMENDATION_API_KEY=
 - 记忆偏好：标准化后的种植信息可按 session 缓存（TTL），使用前会提示确认；回复“清除记忆”可重置。
 - 基础设施适配器集中在 `src/infra`（配置、LLM 客户端、结构化抽取等）。
 - 与农事无关的请求会返回 `mode="none"`，跳过工具/工作流执行。
-- 品种抽取使用关键词严格匹配；数据来源使用 `src/resources/rice_variety_approvals.sqlite3`（可用 `VARIETY_DB_PATH` 覆盖）。
+- 品种抽取使用候选名称匹配 + 模糊 token；数据来源使用 `resources/rice_variety_approvals.sqlite3`（可用 `VARIETY_DB_PATH` 覆盖）。
 
 ## 测试
 ```bash

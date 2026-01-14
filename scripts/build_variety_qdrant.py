@@ -122,7 +122,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build Qdrant index for varieties.")
     parser.add_argument(
         "--input",
-        default=str(ROOT / "src" / "resources" / "varieties.json"),
+        default=str(ROOT / "resources" / "varieties.json"),
         help="Path to varieties JSON file.",
     )
     parser.add_argument(

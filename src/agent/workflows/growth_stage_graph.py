@@ -5,7 +5,7 @@ LangGraph workflow for growth stage prediction.
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from langgraph.graph import END, StateGraph
 
@@ -20,9 +20,16 @@ from ...infra.config import get_config
 from ...infra.cache_keys import build_planting_cache_key
 from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ...infra.weather_cache import get_weather_series, store_weather_series
+from ...prompts.workflow_messages import (
+    GROWTH_STAGE_INTRANET_REQUIRED_MESSAGE,
+    build_growth_stage_missing_question,
+    format_growth_stage_message,
+    format_memory_confirmation,
+    format_planting_validation_error,
+)
+from ...prompts.tool_messages import TOOL_NOT_FOUND_MESSAGE
 from ...schemas import (
     GrowthStageResult,
-    PlantingDetails,
     PredictGrowthStageInput,
     ToolInvocation,
 )
@@ -33,8 +40,6 @@ from .common import (
     coerce_weather_series,
     build_fallback_planting,
     classify_memory_confirmation,
-    format_missing_question,
-    format_memory_confirmation,
     infer_unknown_fields,
     llm_extract_planting,
     summarize_weather_series,
@@ -50,14 +55,6 @@ GROWTH_FIELD_LABELS = {
     "region": "地区",
 }
 GROWTH_CACHE_PROVIDER = "workflow"
-
-
-def _growth_format_missing_question(missing_fields: List[str]) -> str:
-    return format_missing_question(
-        missing_fields,
-        GROWTH_FIELD_LABELS,
-        "生育期预测还需要补充：",
-    )
 
 
 def _coerce_growth_stage_result(
@@ -76,36 +73,6 @@ def _coerce_growth_stage_result(
         except Exception:
             return None
     return None
-
-
-def _growth_format_growth_stage_message(
-    planting: PlantingDetails,
-    stages: Dict[str, str],
-    weather_note: str = "",
-    variety_note: str = "",
-) -> str:
-    lines = [
-        "已完成生育期预测。",
-        (
-            f"作物: {planting.crop}，品种: {planting.variety or '未知'}，"
-            f"地区: {planting.region or '未知'}"
-        ),
-        f"播种日期: {planting.sowing_date.isoformat()}",
-    ]
-    predicted = stages.get("predicted_stage")
-    next_stage = stages.get("estimated_next_stage")
-    if predicted or next_stage:
-        lines.append(f"当前阶段: {predicted}，预计下一阶段: {next_stage}")
-    gdd = stages.get("gdd_accumulated")
-    gdd_required = stages.get("gdd_required_maturity")
-    base_temp = stages.get("base_temperature")
-    if gdd and gdd_required and base_temp:
-        lines.append(f"积温: {gdd}/{gdd_required} (基温 {base_temp})")
-    if weather_note:
-        lines.append(f"气象信息: {weather_note}")
-    if variety_note:
-        lines.append(f"品种信息: {variety_note}")
-    return "\n".join(lines)
 
 
 def _growth_extract_node(state: GraphState) -> GraphState:
@@ -185,7 +152,10 @@ def _growth_extract_node(state: GraphState) -> GraphState:
 
 def _growth_ask_node(state: GraphState) -> GraphState:
     missing_fields = state.get("missing_fields", [])
-    message = _growth_format_missing_question(missing_fields)
+    message = build_growth_stage_missing_question(
+        missing_fields,
+        GROWTH_FIELD_LABELS,
+    )
     memory_planting = state.get("memory_planting")
     memory_decision = state.get("memory_decision")
     memory_prompted = bool(state.get("memory_prompted"))
@@ -206,8 +176,9 @@ def _growth_weather_node(state: GraphState) -> GraphState:
         state = add_trace(state, "weather missing draft")
         state.update(
             {
-                "message": _growth_format_missing_question(
-                    list(GROWTH_FIELD_LABELS.keys())
+                "message": build_growth_stage_missing_question(
+                    list(GROWTH_FIELD_LABELS.keys()),
+                    GROWTH_FIELD_LABELS,
                 )
             }
         )
@@ -222,12 +193,18 @@ def _growth_weather_node(state: GraphState) -> GraphState:
         missing = list(dict.fromkeys(missing))
         state = add_trace(state, f"weather missing={missing}")
         state.update(
-            {"missing_fields": missing, "message": _growth_format_missing_question(missing)}
+            {
+                "missing_fields": missing,
+                "message": build_growth_stage_missing_question(
+                    missing,
+                    GROWTH_FIELD_LABELS,
+                ),
+            }
         )
         return state
     except ValueError as exc:
         state = add_trace(state, f"weather invalid={exc}")
-        state.update({"message": f"种植信息校验失败: {exc}"})
+        state.update({"message": format_planting_validation_error(exc)})
         return state
 
     cache_key = build_planting_cache_key(planting)
@@ -260,7 +237,7 @@ def _growth_weather_node(state: GraphState) -> GraphState:
         )
         weather_info = {
             "name": "weather_lookup",
-            "message": "tool not found",
+            "message": TOOL_NOT_FOUND_MESSAGE,
             "data": {},
         }
     else:
@@ -299,8 +276,9 @@ def _growth_predict_node(state: GraphState) -> GraphState:
         state = add_trace(state, "predict missing planting")
         state.update(
             {
-                "message": _growth_format_missing_question(
-                    list(GROWTH_FIELD_LABELS.keys())
+                "message": build_growth_stage_missing_question(
+                    list(GROWTH_FIELD_LABELS.keys()),
+                    GROWTH_FIELD_LABELS,
                 )
             }
         )
@@ -320,7 +298,11 @@ def _growth_predict_node(state: GraphState) -> GraphState:
         variety_data = variety_result.data
         state = add_trace(state, "variety_lookup ok")
     else:
-        variety_info = {"name": "variety_lookup", "message": "tool not found", "data": {}}
+        variety_info = {
+            "name": "variety_lookup",
+            "message": TOOL_NOT_FOUND_MESSAGE,
+            "data": {},
+        }
         variety_data = {}
         state = add_trace(state, "variety_lookup missing")
 
@@ -355,7 +337,7 @@ def _growth_predict_node(state: GraphState) -> GraphState:
         workflow_payload["trace"] = trace
         state.update(
             {
-                "message": "生育期预测需要内网接口，请配置 GROWTH_STAGE_PROVIDER=intranet。",
+                "message": GROWTH_STAGE_INTRANET_REQUIRED_MESSAGE,
                 "data": {"workflow": workflow_payload},
                 "weather_info": weather_info,
                 "variety_info": variety_info,
@@ -366,7 +348,7 @@ def _growth_predict_node(state: GraphState) -> GraphState:
     state = add_trace(state, "growth_stage_intranet ok")
     result = _coerce_growth_stage_result(tool_payload.data or {})
     if result:
-        message = _growth_format_growth_stage_message(
+        message = format_growth_stage_message(
             planting,
             result.stages,
             weather_note=weather_note,

@@ -5,6 +5,10 @@ from typing import Optional
 from ..infra.pending_store import build_pending_followup_store
 from ..infra.preference_store import build_preference_store
 from ..observability.logging_utils import log_event
+from ..prompts.tool_messages import (
+    TOOL_FOLLOWUP_MISSING_NAME_MESSAGE,
+    TOOL_NOT_FOUND_MESSAGE,
+)
 from ..schemas.models import (
     HandleResponse,
     PlantingDetails,
@@ -149,7 +153,7 @@ class RequestRouter:
         if not tool_payload:
             tool_payload = ToolInvocation(
                 name=tool_name,
-                message="tool not found",
+                message=TOOL_NOT_FOUND_MESSAGE,
                 data={},
             )
         self._update_tool_followup_state(session_id, tool_payload)
@@ -295,7 +299,7 @@ class RequestRouter:
             self._pending_store.delete(session_id)
             return ToolInvocation(
                 name="unknown_tool",
-                message="tool followup missing tool_name",
+                message=TOOL_FOLLOWUP_MISSING_NAME_MESSAGE,
                 data={},
             )
         followup_payload = {
@@ -314,7 +318,7 @@ class RequestRouter:
             self._pending_store.delete(session_id)
             return ToolInvocation(
                 name=tool_name,
-                message="tool not found",
+                message=TOOL_NOT_FOUND_MESSAGE,
                 data={},
             )
         self._update_tool_followup_state(session_id, result)

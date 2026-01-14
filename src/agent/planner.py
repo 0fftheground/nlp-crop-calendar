@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ..infra.llm import get_chat_model
 from ..observability.logging_utils import log_event, summarize_text
+from ..prompts.planner import build_planner_prompt
 from .workflows.registry import WorkflowSpec
 
 
@@ -77,35 +78,7 @@ class PlannerRunner:
         workflows_text = "\n".join(
             [f"- {spec.name}: {spec.description}" for spec in self._workflow_specs]
         ) or "(none)"
-        return (
-            "你是农事助手的 Planner，负责决定下一步动作。\n"
-            "可选动作:\n"
-            "- tool: 调用单个工具完成查询或简短建议。\n"
-            "- workflow: 进入多步骤流程以补充种植信息并生成方案。\n"
-            "- none: 与农事无关或可直接回答。\n\n"
-            "判定规则（优先级从上到下，尽量命中工具/流程而不是 none）:\n"
-            "- 天气/气象/预报/降雨/气温相关 -> tool: weather_lookup\n"
-            "- 生育期预测/当前生育阶段判断（含播种信息） -> workflow: growth_stage_workflow\n"
-            "- 仅查询品种信息/特性/抗性/生育期/熟期/审定信息 -> tool: variety_lookup\n"
-            "- 需要完整种植计划/全流程/多环节方案 -> workflow: crop_calendar_workflow\n"
-            "- 简短农事建议/注意事项（非完整方案） -> tool: farming_recommendation\n\n"
-            "如果准备输出 action=none，必须先逐条核对以上规则，确认都不匹配才允许输出 none。\n"
-            "输出 none 时必须给出 response，并在 reason 里简要说明不匹配的原因。\n\n"
-            "若 pending 不为空，表示当前处于追问流程：\n"
-            "- 若用户在补充 missing_fields 或表达不知道/不确定，应继续同一 tool/workflow。\n"
-            "- 若 pending.memory_prompted=true 且用户回答沿用/不用，应继续同一 workflow。\n"
-            "- 若用户提出与 pending 无关的新问题，应选择新的 tool/workflow 或 none。\n\n"
-            "工具列表:\n"
-            f"{tools_text}\n\n"
-            "工作流列表:\n"
-            f"{workflows_text}\n\n"
-            "输出 ActionPlan JSON 字段:\n"
-            "- action: tool|workflow|none\n"
-            "- name: 当 action 为 tool/workflow 时，必须是列表中的名称\n"
-            "- input: 可选，若需要结构化输入可给对象/字符串；否则留空\n"
-            "- response: 当 action 为 none 时给出回答\n"
-            "- reason: 可选简短理由\n"
-        )
+        return build_planner_prompt(tools_text, workflows_text)
 
     @staticmethod
     def _summarize_pending(pending: Optional[dict]) -> Optional[dict]:
