@@ -15,7 +15,8 @@ _INITIALIZED = False
 _BEIJING_TZ = timezone(timedelta(hours=8))
 
 
-def _beijing_time(timestamp: float):
+def _beijing_time(*args: float):
+    timestamp = args[-1] if args else 0.0
     return datetime.fromtimestamp(timestamp, _BEIJING_TZ).timetuple()
 
 

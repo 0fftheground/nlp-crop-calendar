@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Chainlit",
+      "type": "python",
+      "request": "launch",
+      "module": "chainlit",
+      "args": ["run", "chainlit_app.py", "--watch", "--port", "8001"],
+      "justMyCode": true,
+      "console": "integratedTerminal",
+      "env": {
+        "BACKEND_URL": "http://127.0.0.1:8000"
+      }
+    },
+    {
+      "name": "FastAPI",
+      "type": "python",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["src.api.server:app", "--reload", "--port", "8000"],
+      "justMyCode": true,
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Chainlit + FastAPI",
+      "configurations": ["Chainlit", "FastAPI"]
+    }
+  ]
+}

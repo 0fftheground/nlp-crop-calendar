@@ -20,5 +20,6 @@ Authentication modes:
   - `CHAINLIT_AUTH_USERS` as `user:pass,user2:pass2`
   - or `CHAINLIT_AUTH_USERNAME` / `CHAINLIT_AUTH_PASSWORD` for a single user
 - If no credentials are configured, any non-empty username/password will be accepted (open mode).
+Authentication requires a JWT secret. Set `CHAINLIT_AUTH_SECRET` (or run `chainlit create-secret` to generate one) before starting Chainlit.
 
 Once configured, your chat threads will persist across page reloads for the same login.

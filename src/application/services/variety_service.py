@@ -12,7 +12,7 @@ from ...domain.planting import DEFAULT_CROP
 from ...infra.config import get_config
 from ...infra.llm import get_chat_model
 from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
-from ...infra.variety_store import retrieve_variety_candidates
+from ...infra.variety_store import extract_variety_tokens, retrieve_variety_candidates
 from ...observability.logging_utils import log_event
 from ...prompts.variety_match import VARIETY_MATCH_SYSTEM_PROMPT
 from ...schemas.models import ToolInvocation
@@ -30,36 +30,20 @@ VARIETY_DB_FIELD_LABELS = {
     "control_variety": "对照品种",
     "days_vs_control": "比对照长(天)",
 }
-VARIETY_QUERY_STOPWORDS = {
-    "水稻",
-    "小麦",
-    "玉米",
-    "大豆",
-    "油菜",
-    "棉花",
-    "花生",
-    "品种",
-    "品系",
-    "抗性",
-    "特性",
-    "生育期",
-    "熟期",
-    "审定",
-    "信息",
-    "查询",
-    "查",
-    "帮我",
-    "请",
-    "一下",
-    "是什么",
-    "多长",
-    "多少",
-    "的",
-    "和",
-    "与",
-    "及",
+_UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
+_FOLLOWUP_INDEX_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
+_FOLLOWUP_CN_MAP = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
 }
-VARIETY_TOKEN_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]{2,}")
 
 
 class VarietyMatchDecision(BaseModel):
@@ -93,12 +77,10 @@ def _get_variety_db_path() -> Optional[Path]:
 def _normalize_variety_prompt(prompt: str) -> str:
     if not prompt:
         return ""
-    try:
-        payload = json.loads(prompt)
-    except json.JSONDecodeError:
-        return prompt
+    text = prompt.strip()
+    payload = _load_prompt_payload(text)
     if not isinstance(payload, dict):
-        return prompt
+        return _decode_unicode_escapes(text)
     candidates = []
     for key in ("variety", "query", "prompt"):
         value = payload.get(key)
@@ -106,9 +88,13 @@ def _normalize_variety_prompt(prompt: str) -> str:
             candidates.append(value.strip())
     followup = payload.get("followup")
     if isinstance(followup, dict):
-        value = followup.get("prompt")
-        if isinstance(value, str) and value.strip():
-            candidates.append(value.strip())
+        selected = _resolve_followup_candidate(payload)
+        if selected:
+            candidates.append(selected)
+        else:
+            value = followup.get("prompt")
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
         draft = followup.get("draft")
         if isinstance(draft, dict):
             for key in ("variety", "crop"):
@@ -121,31 +107,82 @@ def _normalize_variety_prompt(prompt: str) -> str:
             value = planting.get(key)
             if isinstance(value, str) and value.strip():
                 candidates.append(value.strip())
-    return " ".join(candidates) if candidates else prompt
+    if candidates:
+        return " ".join(candidates)
+    return _decode_unicode_escapes(text)
 
 
-def _extract_variety_tokens(prompt: str) -> List[str]:
-    if not prompt:
-        return []
-    text = prompt
-    for word in VARIETY_QUERY_STOPWORDS:
-        text = text.replace(word, " ")
-    candidates = VARIETY_TOKEN_RE.findall(text)
-    tokens: List[str] = []
-    seen = set()
-    for token in candidates:
-        token = token.strip()
-        if not token or token in VARIETY_QUERY_STOPWORDS:
+def _decode_unicode_escapes(text: str) -> str:
+    if "\\u" not in text:
+        return text
+
+    def repl(match: re.Match[str]) -> str:
+        try:
+            return chr(int(match.group(1), 16))
+        except ValueError:
+            return match.group(0)
+
+    return _UNICODE_ESCAPE_RE.sub(repl, text)
+
+
+def _load_prompt_payload(prompt: str) -> Optional[dict]:
+    candidate = prompt
+    for _ in range(2):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, str):
+            candidate = parsed
             continue
-        if token.isdigit():
+        return None
+    return None
+
+
+def _parse_followup_index(text: str) -> Optional[int]:
+    if not text:
+        return None
+    value = text.strip()
+    match = _FOLLOWUP_INDEX_RE.match(value)
+    if match:
+        return int(match.group(1))
+    cn_match = re.match(r"^第?\s*([一二三四五六七八九十])", value)
+    if cn_match:
+        return _FOLLOWUP_CN_MAP.get(cn_match.group(1))
+    return None
+
+
+def _resolve_followup_candidate(payload: dict) -> Optional[str]:
+    followup = payload.get("followup")
+    if not isinstance(followup, dict):
+        return None
+    answer = followup.get("prompt")
+    if not isinstance(answer, str):
+        return None
+    draft = followup.get("draft")
+    if not isinstance(draft, dict):
+        return None
+    candidates = draft.get("candidates") or draft.get("variety_candidates")
+    if not isinstance(candidates, list):
+        return None
+    answer = answer.strip()
+    if not answer:
+        return None
+    index = _parse_followup_index(answer)
+    if index is not None and 1 <= index <= len(candidates):
+        chosen = candidates[index - 1]
+        return str(chosen).strip() if chosen else None
+    for cand in candidates:
+        if isinstance(cand, str) and cand == answer:
+            return cand
+    for cand in candidates:
+        if not isinstance(cand, str):
             continue
-        if len(token) > 20:
-            continue
-        if token not in seen:
-            seen.add(token)
-            tokens.append(token)
-    tokens.sort(key=len, reverse=True)
-    return tokens
+        if answer in cand or cand in answer:
+            return cand
+    return None
 
 
 def _query_variety_db_by_name(
@@ -232,11 +269,34 @@ def _lookup_variety_records(
             if not rows and normalized_prompt:
                 rows = _query_variety_db_by_prompt(conn, normalized_prompt, limit)
             if not rows and normalized_prompt:
-                tokens = _extract_variety_tokens(normalized_prompt)
+                tokens = extract_variety_tokens(normalized_prompt)
                 rows = _query_variety_db_by_fuzzy_tokens(conn, tokens, limit)
     except Exception:
         return [], []
     return _rows_to_variety_records(rows), _rows_to_variety_raw_records(rows)
+
+
+def _extract_confirmed_candidate(prompt: str) -> Optional[str]:
+    payload = _load_prompt_payload(prompt.strip())
+    if not isinstance(payload, dict):
+        return None
+    return _resolve_followup_candidate(payload)
+
+
+def _is_exact_variety_match(variety: str, prompt: str) -> bool:
+    if not variety or not prompt:
+        return False
+    normalized_prompt = _normalize_variety_prompt(prompt) or prompt
+    return variety in normalized_prompt
+
+
+def _format_variety_record(record: Dict[str, object]) -> str:
+    lines: List[str] = []
+    for key, value in record.items():
+        if value is None or value == "":
+            continue
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines)
 
 
 def _normalize_region_token(value: str) -> str:
@@ -414,12 +474,20 @@ def lookup_variety(prompt: str) -> ToolInvocation:
     )
     if intranet:
         return intranet
+    confirmed_candidate = _extract_confirmed_candidate(prompt)
     records, raw_records = _lookup_variety_records(prompt)
     if records:
         selected, reason, selected_index = _select_best_variety_record(
             prompt, records
         )
         variety = selected.get("品种名称") or _extract_variety(prompt) or "未知"
+        if (
+            confirmed_candidate is None
+            and not _is_exact_variety_match(variety, prompt)
+        ):
+            followup = _build_variety_followup(prompt)
+            if followup:
+                return followup
         approval_regions = sorted(
             {r.get("审定区域") for r in records if r.get("审定区域")}
         )
@@ -429,6 +497,7 @@ def lookup_variety(prompt: str) -> ToolInvocation:
             if 0 <= selected_index < len(raw_records)
             else None
         )
+        detail = _format_variety_record(selected)
         payload = {
             "query": prompt,
             "crop": DEFAULT_CROP,
@@ -440,12 +509,20 @@ def lookup_variety(prompt: str) -> ToolInvocation:
             "raw_matches": raw_records,
             "source": "sqlite",
         }
-        message = f"已返回品种 {variety} 的审定信息{region_note}。"
+        if detail:
+            message = (
+                f"已返回品种 {variety} 的审定信息{region_note}。\n{detail}"
+            )
+        else:
+            message = f"已返回品种 {variety} 的审定信息{region_note}。"
         return ToolInvocation(
             name="variety_lookup",
             message=message,
             data=payload,
         )
+    followup = _build_variety_followup(prompt)
+    if followup:
+        return followup
     crop, variety = _infer_crop_and_variety(prompt)
     payload = {
         "query": prompt,
@@ -463,4 +540,33 @@ def lookup_variety(prompt: str) -> ToolInvocation:
         name="variety_lookup",
         message=f"已返回 {crop} 品种 {variety} 的模拟信息。",
         data=payload,
+    )
+
+
+def _build_variety_followup(prompt: str) -> Optional[ToolInvocation]:
+    normalized_prompt = _normalize_variety_prompt(prompt) or prompt
+    candidates = retrieve_variety_candidates(
+        normalized_prompt, limit=5, threshold=0.5, semantic=True
+    )
+    if not candidates:
+        return None
+    options = "\n".join(
+        f"{idx + 1}. {name}" for idx, name in enumerate(candidates)
+    )
+    message = (
+        "未找到完全匹配的品种。你是不是想查询以下品种：\n"
+        f"{options}\n"
+        "请回复序号或品种名称。"
+    )
+    return ToolInvocation(
+        name="variety_lookup",
+        message=message,
+        data={
+            "query": normalized_prompt,
+            "candidates": candidates,
+            "missing_fields": ["variety"],
+            "draft": {"candidates": candidates},
+            "followup_count": 0,
+            "source": "candidate",
+        },
     )
