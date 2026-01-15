@@ -26,10 +26,10 @@ class PlannerRouterTests(unittest.TestCase):
     def setUp(self) -> None:
         self._env_backup = {
             "PENDING_STORE": os.environ.get("PENDING_STORE"),
-            "PREFERENCE_STORE": os.environ.get("PREFERENCE_STORE"),
+            "MEMORY_STORE": os.environ.get("MEMORY_STORE"),
         }
         os.environ["PENDING_STORE"] = "memory"
-        os.environ["PREFERENCE_STORE"] = "memory"
+        os.environ["MEMORY_STORE"] = "memory"
         from src.infra.config import get_config
 
         get_config.cache_clear()
@@ -66,28 +66,21 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertIsNotNone(result.plan)
         self.assertEqual(result.plan.message, "ok")
 
-    def test_none_action_falls_back_to_rule_tool(self) -> None:
+    def test_none_action_does_not_fallback_to_rule_tool(self) -> None:
         from src.agent.planner import ActionPlan
-        from src.schemas.models import ToolInvocation, UserRequest
+        from src.schemas.models import UserRequest
 
         plan = ActionPlan(action="none")
-        tool_payload = ToolInvocation(
-            name="variety_lookup",
-            message="ok",
-            data={},
-        )
         with patch.object(self.router._planner, "plan", return_value=plan):
-            with patch(
-                "src.agent.router.execute_tool", return_value=tool_payload
-            ) as mocked_execute:
+            with patch("src.agent.router.execute_tool") as mocked_execute:
                 result = self.router.handle(
                     UserRequest(prompt="水稻品种美香占2号", session_id="s6")
                 )
 
-        self.assertEqual(result.mode, "tool")
-        self.assertIsNotNone(result.tool)
-        self.assertEqual(result.tool.name, "variety_lookup")
-        mocked_execute.assert_called_once()
+        self.assertEqual(result.mode, "none")
+        self.assertIsNotNone(result.plan)
+        self.assertEqual(result.plan.message, "未识别到与农事相关的需求。")
+        mocked_execute.assert_not_called()
 
     def test_tool_action_sets_pending(self) -> None:
         from src.agent.planner import ActionPlan
@@ -122,11 +115,41 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertEqual(pending.get("mode"), "tool")
         self.assertEqual(pending.get("tool_name"), "weather_lookup")
 
+    def test_memory_clear_tool_clears_user_memory(self) -> None:
+        from datetime import date
+
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import PlantingDetails, UserRequest
+
+        planting = PlantingDetails(
+            crop="水稻",
+            planting_method="direct_seeding",
+            sowing_date=date(2025, 1, 1),
+            region="test",
+        )
+        self.router._memory_store.set("u7", planting)
+        plan = ActionPlan(action="tool", name="memory_clear", input={})
+        with patch.object(self.router._planner, "plan", return_value=plan):
+            with patch("src.agent.router.execute_tool") as mocked_execute:
+                result = self.router.handle(
+                    UserRequest(prompt="清除记忆", session_id="s7", user_id="u7")
+                )
+
+        mocked_execute.assert_not_called()
+        self.assertEqual(result.mode, "tool")
+        self.assertIsNotNone(result.tool)
+        self.assertEqual(result.tool.name, "memory_clear")
+        self.assertIsNone(self.router._memory_store.get("u7"))
+
     def test_workflow_action_invokes_runner(self) -> None:
         from src.agent.planner import ActionPlan
         from src.schemas.models import UserRequest, WorkflowResponse
 
-        plan = ActionPlan(action="workflow", name="crop_calendar_workflow")
+        plan = ActionPlan(
+            action="workflow",
+            name="crop_calendar_workflow",
+            input={"prompt": "种水稻"},
+        )
         plan_payload = WorkflowResponse(message="done")
         with patch.object(self.router._planner, "plan", return_value=plan):
             with patch.object(
@@ -143,7 +166,8 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertEqual(result.plan.message, "done")
         mocked_run.assert_called_once()
 
-    def test_cancel_only_clears_pending(self) -> None:
+    def test_none_action_clears_pending(self) -> None:
+        from src.agent.planner import ActionPlan
         from src.schemas.models import UserRequest
 
         self.router._pending_store.set(
@@ -156,45 +180,16 @@ class PlannerRouterTests(unittest.TestCase):
                 "followup_count": 0,
             },
         )
-        with patch.object(self.router._planner, "plan") as mocked_plan:
+        plan = ActionPlan(action="none", response="ok")
+        with patch.object(self.router._planner, "plan", return_value=plan) as mocked_plan:
             result = self.router.handle(
                 UserRequest(prompt="取消追问", session_id="s4")
             )
 
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         self.assertEqual(result.mode, "none")
         self.assertIsNone(self.router._pending_store.get("s4"))
-        self.assertEqual(
-            result.plan.message, "已取消追问，如需继续请描述新的问题。"
-        )
-
-    def test_memory_clear_resets_pending_flags(self) -> None:
-        from src.schemas.models import UserRequest
-
-        self.router._pending_store.set(
-            "s5",
-            {
-                "mode": "workflow",
-                "workflow_name": "crop_calendar_workflow",
-                "planting_draft": {},
-                "missing_fields": ["crop"],
-                "followup_count": 0,
-                "memory_decision": True,
-                "memory_prompted": True,
-            },
-        )
-        with patch.object(self.router._planner, "plan") as mocked_plan:
-            result = self.router.handle(
-                UserRequest(prompt="清除记忆", session_id="s5")
-            )
-
-        mocked_plan.assert_not_called()
-        pending = self.router._pending_store.get("s5")
-        self.assertIsNotNone(pending)
-        self.assertIsNone(pending.get("memory_decision"))
-        self.assertFalse(pending.get("memory_prompted"))
-        self.assertEqual(result.mode, "none")
-        self.assertEqual(result.plan.message, "已清除记忆。")
+        self.assertEqual(result.plan.message, "ok")
 
 
 if __name__ == "__main__":

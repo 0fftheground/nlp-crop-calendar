@@ -114,14 +114,12 @@ class AppConfig(BaseSettings):
     interaction_store_max_items: int = Field(
         default=2000, validation_alias="INTERACTION_STORE_MAX_ITEMS"
     )
-    preference_store: str = Field(
-        default="sqlite", validation_alias="PREFERENCE_STORE"
+    memory_store: str = Field(default="sqlite", validation_alias="MEMORY_STORE")
+    memory_store_ttl_days: int = Field(
+        default=30, validation_alias="MEMORY_STORE_TTL_DAYS"
     )
-    preference_store_ttl_days: int = Field(
-        default=30, validation_alias="PREFERENCE_STORE_TTL_DAYS"
-    )
-    preference_store_path: Optional[str] = Field(
-        default=None, validation_alias="PREFERENCE_STORE_PATH"
+    memory_store_path: Optional[str] = Field(
+        default=None, validation_alias="MEMORY_STORE_PATH"
     )
 
     @field_validator("llm_provider", mode="after")
@@ -150,7 +148,7 @@ class AppConfig(BaseSettings):
         "weather_cache_store",
         "tool_cache_store",
         "interaction_store",
-        "preference_store",
+        "memory_store",
         mode="after",
     )
     @classmethod

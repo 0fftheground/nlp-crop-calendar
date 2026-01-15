@@ -22,7 +22,7 @@ TOOL_CACHEABLE = {
     "farming_recommendation",
     "growth_stage_prediction",
 }
-_TOOL_MODULES = ("variety", "weather", "growth_stage", "recommendation")
+_TOOL_MODULES = ("variety", "weather", "growth_stage", "recommendation", "memory")
 _TOOLS_INITIALIZED = False
 
 

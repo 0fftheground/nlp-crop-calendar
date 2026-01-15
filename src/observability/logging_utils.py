@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from contextvars import ContextVar
@@ -11,6 +12,11 @@ from typing import Any, Dict, Optional
 _TRACE_ID_CTX: ContextVar[str] = ContextVar("trace_id", default="unknown")
 _LOGGER = logging.getLogger("observability")
 _INITIALIZED = False
+_BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _beijing_time(timestamp: float):
+    return datetime.fromtimestamp(timestamp, _BEIJING_TZ).timetuple()
 
 
 def init_logging(*, log_path: Optional[str] = None) -> None:
@@ -28,6 +34,7 @@ def init_logging(*, log_path: Optional[str] = None) -> None:
         )
     else:
         handlers.append(logging.StreamHandler())
+    logging.Formatter.converter = _beijing_time
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",

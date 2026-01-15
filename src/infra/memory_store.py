@@ -1,4 +1,4 @@
-"""Persistence for session-level planting preference memory with TTL support."""
+"""Persistence for per-identity planting memory with TTL support."""
 
 from __future__ import annotations
 
@@ -15,13 +15,13 @@ from .config import get_config
 
 
 @dataclass(frozen=True)
-class PreferenceMemory:
+class SessionMemory:
     planting: PlantingDetails
     updated_at: int
 
 
-class PreferenceStore:
-    def get(self, session_id: str) -> Optional[PreferenceMemory]:
+class SessionMemoryStore:
+    def get(self, session_id: str) -> Optional[SessionMemory]:
         raise NotImplementedError
 
     def set(self, session_id: str, planting: PlantingDetails) -> None:
@@ -31,7 +31,7 @@ class PreferenceStore:
         raise NotImplementedError
 
 
-def _coerce_preference_memory(payload: dict) -> Optional[PreferenceMemory]:
+def _coerce_session_memory(payload: dict) -> Optional[SessionMemory]:
     if not isinstance(payload, dict):
         return None
     planting_payload = payload.get("planting")
@@ -46,16 +46,16 @@ def _coerce_preference_memory(payload: dict) -> Optional[PreferenceMemory]:
         updated_at = int(updated_at)
     except (TypeError, ValueError):
         updated_at = int(time.time())
-    return PreferenceMemory(planting=planting, updated_at=updated_at)
+    return SessionMemory(planting=planting, updated_at=updated_at)
 
 
-class MemoryPreferenceStore(PreferenceStore):
+class InMemorySessionMemoryStore(SessionMemoryStore):
     def __init__(self, ttl_seconds: int) -> None:
         self._ttl_seconds = max(1, int(ttl_seconds))
         self._items: dict[str, Tuple[dict, int]] = {}
         self._lock = Lock()
 
-    def get(self, session_id: str) -> Optional[PreferenceMemory]:
+    def get(self, session_id: str) -> Optional[SessionMemory]:
         now = int(time.time())
         with self._lock:
             item = self._items.get(session_id)
@@ -65,7 +65,7 @@ class MemoryPreferenceStore(PreferenceStore):
             if expires_at <= now:
                 self._items.pop(session_id, None)
                 return None
-        return _coerce_preference_memory(payload)
+        return _coerce_session_memory(payload)
 
     def set(self, session_id: str, planting: PlantingDetails) -> None:
         payload = {
@@ -81,7 +81,7 @@ class MemoryPreferenceStore(PreferenceStore):
             self._items.pop(session_id, None)
 
 
-class SqlitePreferenceStore(PreferenceStore):
+class SqliteSessionMemoryStore(SessionMemoryStore):
     def __init__(self, path: Path, ttl_seconds: int) -> None:
         self._path = path
         self._ttl_seconds = max(1, int(ttl_seconds))
@@ -95,21 +95,21 @@ class SqlitePreferenceStore(PreferenceStore):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS preference_memory ("
+                "CREATE TABLE IF NOT EXISTS session_memory ("
                 "session_id TEXT PRIMARY KEY, "
                 "payload TEXT NOT NULL, "
                 "expires_at INTEGER NOT NULL)"
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_preference_expires "
-                "ON preference_memory (expires_at)"
+                "CREATE INDEX IF NOT EXISTS idx_session_memory_expires "
+                "ON session_memory (expires_at)"
             )
 
-    def get(self, session_id: str) -> Optional[PreferenceMemory]:
+    def get(self, session_id: str) -> Optional[SessionMemory]:
         now = int(time.time())
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT payload, expires_at FROM preference_memory WHERE session_id = ?",
+                "SELECT payload, expires_at FROM session_memory WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
             if not row:
@@ -117,7 +117,7 @@ class SqlitePreferenceStore(PreferenceStore):
             payload_json, expires_at = row
             if expires_at <= now:
                 conn.execute(
-                    "DELETE FROM preference_memory WHERE session_id = ?",
+                    "DELETE FROM session_memory WHERE session_id = ?",
                     (session_id,),
                 )
                 return None
@@ -125,7 +125,7 @@ class SqlitePreferenceStore(PreferenceStore):
             payload = json.loads(payload_json)
         except json.JSONDecodeError:
             return None
-        return _coerce_preference_memory(payload)
+        return _coerce_session_memory(payload)
 
     def set(self, session_id: str, planting: PlantingDetails) -> None:
         payload = {
@@ -136,7 +136,7 @@ class SqlitePreferenceStore(PreferenceStore):
         expires_at = int(time.time()) + self._ttl_seconds
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO preference_memory (session_id, payload, expires_at) "
+                "INSERT INTO session_memory (session_id, payload, expires_at) "
                 "VALUES (?, ?, ?) "
                 "ON CONFLICT(session_id) DO UPDATE SET "
                 "payload = excluded.payload, "
@@ -147,20 +147,20 @@ class SqlitePreferenceStore(PreferenceStore):
     def delete(self, session_id: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
-                "DELETE FROM preference_memory WHERE session_id = ?",
+                "DELETE FROM session_memory WHERE session_id = ?",
                 (session_id,),
             )
 
 
-def build_preference_store() -> PreferenceStore:
+def build_memory_store() -> SessionMemoryStore:
     cfg = get_config()
-    store = (cfg.preference_store or "sqlite").lower()
-    ttl_seconds = int(cfg.preference_store_ttl_days) * 86400
+    store = (cfg.memory_store or "sqlite").lower()
+    ttl_seconds = int(cfg.memory_store_ttl_days) * 86400
     if store == "sqlite":
-        if cfg.preference_store_path:
-            path = Path(cfg.preference_store_path)
+        if cfg.memory_store_path:
+            path = Path(cfg.memory_store_path)
         else:
             root = Path(__file__).resolve().parents[2]
-            path = root / ".cache" / "preference_memory.sqlite3"
-        return SqlitePreferenceStore(path=path, ttl_seconds=ttl_seconds)
-    return MemoryPreferenceStore(ttl_seconds=ttl_seconds)
+            path = root / ".cache" / "session_memory.sqlite3"
+        return SqliteSessionMemoryStore(path=path, ttl_seconds=ttl_seconds)
+    return InMemorySessionMemoryStore(ttl_seconds=ttl_seconds)

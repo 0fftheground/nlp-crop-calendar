@@ -26,6 +26,10 @@ class UserRequest(BaseModel):
 
     prompt: str
     region: Optional[str] = None
+    user_id: Optional[str] = Field(
+        default=None,
+        description="稳定用户标识（如前端生成的 client_id），用于跨会话记忆。",
+    )
     session_id: Optional[str] = Field(
         default=None, description="客户端会话标识，用于多用户状态隔离。"
     )
@@ -212,10 +216,10 @@ class WeatherQueryInput(BaseModel):
         description="市级行政区或站点名称。",
     )
     year: int = Field(
-        ...,
+        default_factory=lambda: date.today().year,
         ge=1900,
         le=2100,
-        description="查询年份（按自然年返回气象序列）。",
+        description="查询年份（按自然年返回气象序列）。未提供时使用当前年。",
     )
     granularity: Literal["hourly", "daily"] = "daily"
     include_advice: bool = False
@@ -327,6 +331,35 @@ class WeatherSeriesDraft(BaseModel):
         allowed = {"region", "year", "granularity", "include_advice"}
         filtered = {k: v for k, v in merged.items() if k in allowed}
         return WeatherQueryInput(**filtered)
+
+
+class QueryInput(BaseModel):
+    """Generic query wrapper for tool invocation."""
+
+    query: str = Field(
+        ...,
+        min_length=1,
+        description="用户查询内容或原始问题。",
+    )
+
+
+class PromptInput(BaseModel):
+    """Workflow prompt wrapper."""
+
+    prompt: str = Field(
+        ...,
+        min_length=1,
+        description="用户原始问题或补充信息。",
+    )
+
+
+class MemoryClearInput(BaseModel):
+    """Input payload for clearing stored memory."""
+
+    reason: Optional[str] = Field(
+        default=None,
+        description="清除记忆的原因或备注。",
+    )
 
 
 class FarmWorkRecommendInput(BaseModel):

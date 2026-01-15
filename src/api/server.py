@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import traceback
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -61,10 +61,10 @@ _OBS_LOG_PATH = _PROJECT_ROOT / "observability.log"
 
 
 def _append_error_log(message: str, tb: str = "") -> None:
-    timestamp = datetime.utcnow().isoformat()
+    timestamp = datetime.now(timezone(timedelta(hours=8))).isoformat()
     try:
         with _LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(f"[{timestamp}Z] {message}\n{tb}\n")
+            handle.write(f"[{timestamp}] {message}\n{tb}\n")
     except Exception:
         pass
 
@@ -114,12 +114,14 @@ async def handle_request(request: UserRequest):
         message = response.tool.message
     elif response.plan:
         message = response.plan.message
+    session_id = request.session_id or request.user_id
     log_event(
         "response_ready",
         mode=response.mode,
         message_summary=summarize_text(message),
         latency_ms=latency_ms,
-        session_id=request.session_id,
+        session_id=session_id,
+        user_id=request.user_id,
     )
     reset_trace_id(token)
     return response

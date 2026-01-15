@@ -1,79 +1,75 @@
-## 系统概览
+## System Overview
 
 ```
-Chainlit UI --> FastAPI 后端 --> Planner（LLM）+ Executor（工具 + LangGraph）
+Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 ```
 
-1. **Chainlit (`chainlit_app.py`)** 向 `POST /api/v1/handle` 提交用户输入，并携带 `session_id` 做多会话隔离。响应会告知是否执行了工具或产出了 LangGraph 计划，trace 会单独展示。
-2. **FastAPI (`src/api/server.py`)** 暴露 `/health` 与 `/api/v1/handle`，所有请求/响应使用统一的 Pydantic 模型。
-3. **Planner Router (`src/agent/router.py`)** 调用 LLM planner 选择 tool/workflow/none，然后执行并持久化 follow-up 状态（按 `session_id`）。
+1. **Chainlit (`chainlit_app.py`)** sends user input to `POST /api/v1/handle` with `session_id` for multi-session isolation (optionally `user_id` for cross-session memory). The response indicates whether a tool or a LangGraph plan ran, and traces are shown separately.
+2. **FastAPI (`src/api/server.py`)** exposes `/health` and `/api/v1/handle`; all requests/responses use unified Pydantic models.
+3. **Planner Router (`src/agent/router.py`)** calls the LLM planner to choose tool/workflow/none, then executes and persists follow-up state by `session_id`.
 4. **LangGraph (`src/agent/workflows/crop_calendar_graph.py`/`src/agent/workflows/growth_stage_graph.py`)**
-   - 作物日历工作流实现抽取 -> 追问 -> 工具并行 -> 农事推荐输出。
-   - 抽取使用 LLM（结构化输出）并提供启发式兜底；缺失字段最多追问 2 次，仍缺失则使用默认值补齐。
-   - 气象、品种与农事推荐通过工具调用完成（`weather_lookup`/`variety_lookup`/`farming_recommendation`）。
+   - The crop calendar workflow implements extraction -> follow-up -> parallel tools -> recommendation output.
+   - Extraction uses an LLM (structured output) with heuristic fallback; missing fields are asked up to 2 times, and any remaining fields are filled with defaults.
+   - Weather, variety, and recommendations are fetched via tools (`weather_lookup`/`variety_lookup`/`farming_recommendation`).
 
-## 核心模块
-- `src/infra/config.py` – 读取 `.env` 并暴露 `AppConfig`。
-- `src/infra/llm.py` – 创建 Planner 与抽取模型使用的 `ChatOpenAI`。
-- `src/infra/llm_extract.py` – 结构化抽取的通用封装。
-- `src/infra/cache_keys.py` – 基于 `PlantingDetails` 生成缓存 key 的工具。
-- `src/infra/tool_provider.py` – provider 切换与内网 HTTP 调用封装。
-- `src/infra/variety_store.py` – 轻量品种检索（`resources/rice_variety_approvals.sqlite3`）。
-- `src/infra/pending_store.py` – 追问状态持久化与 TTL（memory/sqlite）。
-- `src/infra/tool_cache.py` – 工具结果缓存（memory/sqlite）。
-- `src/infra/weather_cache.py` – 气象序列缓存（可持久化）。
-- `src/infra/interaction_store.py` – 请求/响应审计记录（memory/sqlite）。
-- `src/infra/preference_store.py` – 会话级偏好记忆（标准化 PlantingDetails）与 TTL。
-- `src/prompts/*` – LLM 提示词与 workflow/tool 的用户文案（planner/extract/兜底提示）。
-- 品种检索采用候选名称 + 模糊 token，不使用 embedding/Qdrant。
-- `src/schemas/models.py` – 共享 schema（`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`），`UserRequest` 支持 `session_id`。
-- `src/agent/planner.py` – LLM planner，输出 `ActionPlan`（tool/workflow/none），综合工具/工作流清单与 pending 上下文（提示词见 `src/prompts/planner.py`）。
-- `src/agent/tools/registry.py` – 工具注册与执行（品种/气象/生育期/农事推荐），支持 `mock`/`intranet` provider。
-- `src/agent/intent_rules.py` – 规则意图与取消/清除记忆关键词辅助。
-- `src/agent/router.py` – 执行 planner 决策、分发工具/工作流，并更新追问状态。
-- `src/application/services/*` – 应用层业务服务（品种/气象/推荐/作物日历/种植抽取），供工具与工作流调用。
-- `src/domain/planting.py` – 种植信息抽取/校验的领域逻辑与启发式规则。
-- `src/agent/workflows/state.py` / `crop_calendar_graph.py` / `growth_stage_graph.py` – LangGraph 状态定义与工作流实现。
-- `src/api/server.py` – FastAPI 路由与依赖缓存。
-- `chainlit_app.py` – UI 客户端。
-- `resources/rice_variety_approvals.sqlite3` – 水稻品种审定数据库（可用 `VARIETY_DB_PATH` 覆盖路径）。
+## Core Modules
+- `src/infra/config.py` - Reads `.env` and exposes `AppConfig`.
+- `src/infra/llm.py` - Creates `ChatOpenAI` for the planner and extractor models.
+- `src/infra/llm_extract.py` - Common wrapper for structured extraction.
+- `src/infra/cache_keys.py` - Utility for generating cache keys from `PlantingDetails`.
+- `src/infra/tool_provider.py` - Provider switching and intranet HTTP invocation.
+- `src/infra/variety_store.py` - Lightweight variety lookup (`resources/rice_variety_approvals.sqlite3`).
+- `src/infra/pending_store.py` - Follow-up state persistence with TTL (memory/sqlite).
+- `src/infra/tool_cache.py` - Tool result cache (memory/sqlite).
+- `src/infra/weather_cache.py` - Weather series cache (persistable).
+- `src/infra/interaction_store.py` - Request/response audit records (memory/sqlite).
+- `src/infra/memory_store.py` - Per-identity memory (user_id or session_id) for normalized PlantingDetails with TTL.
+- `src/prompts/*` - LLM prompts and workflow/tool user copy (planner/extract/fallback prompts).
+- Variety retrieval uses candidate-name matching + fuzzy tokens, no embedding/Qdrant.
+- `src/schemas/models.py` - Shared schemas (`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`), `UserRequest` supports `session_id` and optional `user_id`.
+- `src/agent/planner.py` - LLM planner that outputs `ActionPlan` (tool/workflow/none) using tool/workflow lists and pending context (prompt in `src/prompts/planner.py`).
+- `src/agent/tools/registry.py` - Tool registration and execution (variety/weather/growth-stage/recommendation), supports `mock`/`intranet` providers.
+- `src/agent/router.py` - Executes planner decisions, dispatches tools/workflows, and updates follow-up state.
+- `src/application/services/*` - Application-layer services (variety/weather/recommendation/crop calendar/planting extraction) used by tools and workflows.
+- `src/domain/planting.py` - Domain logic for planting extraction/validation and heuristic rules.
+- `src/agent/workflows/state.py` / `crop_calendar_graph.py` / `growth_stage_graph.py` - LangGraph state definition and workflow implementation.
+- `src/api/server.py` - FastAPI routes and dependency cache.
+- `chainlit_app.py` - UI client.
+- `resources/rice_variety_approvals.sqlite3` - Rice variety approvals database (override with `VARIETY_DB_PATH`).
 
-## LangGraph 说明
-- `StateGraph` 作为调度骨架，目前包含 `extract`、`ask`、`context`、`recommend` 四个节点。
-- `GraphState` 关键字段：`planting_draft`, `missing_fields`, `followup_count`, `weather_info`, `variety_info`, `recommendation_info`。
-- 追问逻辑：若缺失字段存在则进入 `ask`；用户回复后与已有 draft 合并，最多追问两次，仍缺失则用默认值补齐进入 `context`。
-- 作物日历与生育期 workflow 会将结果按 `PlantingDetails` 缓存，命中则短路直接返回。
+## LangGraph Details
+- `StateGraph` is the orchestration skeleton and currently includes `extract`, `ask`, `context`, and `recommend` nodes.
+- `GraphState` key fields: `planting_draft`, `missing_fields`, `followup_count`, `weather_info`, `variety_info`, `recommendation_info`.
+- Follow-up logic: if missing fields exist, go to `ask`; user replies are merged with the existing draft, up to two rounds; remaining missing fields are filled with defaults before entering `context`.
+- Crop calendar and growth-stage workflows cache results by `PlantingDetails`; cache hits short-circuit and return immediately.
 
-## 路由逻辑
-- `src/agent/router.RequestRouter` 使用 `PlannerRunner` 输出 `ActionPlan`（tool/workflow/none），并执行对应动作。
-- 工具调用直接执行 `execute_tool`；工作流执行对应 LangGraph。`HandleResponse.mode` 告知前端 “tool / workflow / none”，`tool.data` 或 `plan.recommendations` 承载结果。
-- 工具处理函数在 `src/agent/tools/registry.py` 返回 `ToolInvocation`（结构化 `name/message/data`），便于 UI 渲染。
-- 追问状态通过 pending store 持久化（memory/sqlite 可选）并带 TTL；pending 摘要会注入 planner 用于判断继续追问或切换新问题。
-- “取消追问” 类关键词会清理 pending；planner 允许按上下文切换工具或工作流。
-- 如果存在偏好记忆，会在 workflow 追问时提示是否沿用；“清除记忆” 可清空偏好。
+## Routing Logic
+- `src/agent/router.RequestRouter` uses `PlannerRunner` to output `ActionPlan` (tool/workflow/none) and executes the action.
+- Tools are invoked via `execute_tool`; workflows execute the corresponding LangGraph. `HandleResponse.mode` tells the frontend "tool / workflow / none"; `tool.data` or `plan.recommendations` carry results.
+- Tool handlers in `src/agent/tools/registry.py` return `ToolInvocation` (structured `name/message/data`) for UI rendering.
+- Pending state is persisted in the pending store (memory/sqlite optional) with TTL; pending summaries are injected into the planner to decide follow-up or switch to new questions.
+- If stored memory exists, workflow follow-ups ask whether to reuse; memory can be cleared by the LLM selecting the `memory_clear` tool.
 
-## 作物日历工作流（当前）
-`src/agent/workflows/crop_calendar_graph.py` 是运行中的主流程，取代早期单体 pipeline：
+## Crop Calendar Workflow (Current)
+`src/agent/workflows/crop_calendar_graph.py` is the active main flow, replacing the earlier monolithic pipeline:
 
-1. **LLM 抽取**：`extract_planting_details(prompt, llm_extract=...)` 输出 `PlantingDetailsDraft`。
-2. **缺失字段检查/追问**：`list_missing_required_fields(draft)` 判断必填项；若缺失则进入追问节点。用户回复后合并答案，最多追问两次。
-3. **默认补齐**：若超出追问次数仍缺失，则用默认值补齐并记录在 `assumptions`。
-4. **工具并行上下文**：`weather_lookup` 与 `variety_lookup` 并行执行，形成 `weather_info`/`variety_info`。
-5. **农事推荐**：调用 `farming_recommendation`，输入为包含 `planting`、`weather`、`variety` 的 JSON 字符串，结果写入 `recommendation_info`；最终消息由 workflow 统一组织。
+1. **LLM extraction**: `extract_planting_details(prompt, llm_extract=...)` outputs `PlantingDetailsDraft`.
+2. **Missing field check/follow-up**: `list_missing_required_fields(draft)` checks required fields; missing fields enter the follow-up node. User replies are merged, up to two rounds.
+3. **Default fill**: if fields are still missing after follow-ups, defaults are applied and recorded in `assumptions`.
+4. **Parallel tool context**: `weather_lookup` and `variety_lookup` run in parallel to produce `weather_info`/`variety_info`.
+5. **Farming recommendation**: call `farming_recommendation` with a JSON string containing `planting`, `weather`, and `variety`; output is stored in `recommendation_info`, and the workflow composes the final message.
 
-## 工具说明
-- `growth_stage_prediction` 仅用于读取历史缓存结果；生育期预测必须走 workflow，由工作流完成抽取/追问/内网调用。
-- 命中生育期缓存需要传入 `PlantingDetails` JSON（或包含 `planting` 字段的 JSON），缓存 key 由 `cache_keys.py` 生成。
-- 工具/领域服务支持 `mock`/`intranet` provider；品种查询默认走本地 SQLite（`VARIETY_PROVIDER=local`），设置 `*_PROVIDER=intranet` 并配置 `*_API_URL`/`*_API_KEY` 可切换到内网接口。
-- `variety_lookup` / `weather_lookup` / `farming_recommendation` 结果使用 TTL 缓存以减少重复调用。
-- 品种匹配策略：先按品种名称召回全部审定记录，基于用户地点与“审定区域/适种地区”规则评分；若存在多条高分记录则交由 LLM 进行择优。
+## Tool Notes
+- `growth_stage_prediction` only reads cached results; growth-stage prediction must go through the workflow for extraction/follow-up/intranet calls.
+- To hit the growth-stage cache, pass `PlantingDetails` JSON (or JSON containing a `planting` field); the cache key is generated by `cache_keys.py`.
+- Tools/services support `mock`/`intranet` providers; variety lookup defaults to local SQLite (`VARIETY_PROVIDER=local`); set `*_PROVIDER=intranet` and configure `*_API_URL`/`*_API_KEY` for intranet APIs.
+- `variety_lookup` / `weather_lookup` / `farming_recommendation` results are cached with TTL to reduce repeated calls.
+- Variety matching strategy: first recall all approval records by variety name, score using user location and "approval region/suitable region" rules; if multiple high-score records exist, an LLM chooses the best.
 
-## 部署建议
-- 使用 `uvicorn`/`gunicorn` 部署 FastAPI 并接入 HTTPS；Chainlit 可反向代理或独立部署。
-- 如需流式输出，可提供 WebSocket/SSE，将 LangGraph 流事件转发给前端。
-- 建议在 `router.handle` 与工具处理处加入结构化日志，便于分析路由准确性。
+## Deployment Notes
+- Deploy FastAPI with `uvicorn`/`gunicorn` and HTTPS; Chainlit can be reverse-proxied or deployed separately.
+- For streaming output, provide WebSocket/SSE and forward LangGraph stream events to the frontend.
+- Add structured logging around `router.handle` and tool handlers to analyze routing accuracy.
 
-## 测试
-- `python -m unittest` 运行基础测试集。
-- `tests/test_intent_routing.py` 读取 `tests/intent_routing_cases.jsonl`，使用规则路由校验意图。
-- `scripts/intent_routing_test.py --strategy rule|llm` 用于手动路由检查。
+## Tests
+- `python -m unittest` runs the basic test suite.

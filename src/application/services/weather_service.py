@@ -41,9 +41,9 @@ def _build_weather_query_from_payload(
     year = _parse_year(payload.get("year"))
     if year is None:
         year = _parse_year(payload.get("start_date")) or _parse_year(payload.get("end_date"))
-    if year is None:
-        return None
-    data: Dict[str, object] = {"region": region, "year": year}
+    data: Dict[str, object] = {"region": region}
+    if year is not None:
+        data["year"] = year
     granularity = payload.get("granularity")
     if granularity in {"hourly", "daily"}:
         data["granularity"] = granularity

@@ -1,0 +1,8 @@
+[project]
+name = "NLP Crop Calendar"
+
+[features]
+data_persistence = true
+
+[auth]
+enabled = true

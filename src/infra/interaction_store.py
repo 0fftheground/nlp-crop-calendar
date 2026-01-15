@@ -31,9 +31,10 @@ class MemoryInteractionStore(InteractionStore):
         self._lock = Lock()
 
     def record(self, request: UserRequest, response: HandleResponse, latency_ms: int) -> None:
+        session_id = request.session_id or request.user_id or "default"
         item = {
             "created_at": int(time.time()),
-            "session_id": request.session_id or "default",
+            "session_id": session_id,
             "prompt": request.prompt,
             "region": request.region,
             "mode": response.mode,
@@ -89,7 +90,7 @@ class SqliteInteractionStore(InteractionStore):
         response_json = json.dumps(
             response.model_dump(mode="json"), ensure_ascii=True, default=str
         )
-        session_id = request.session_id or "default"
+        session_id = request.session_id or request.user_id or "default"
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO interactions (created_at, session_id, prompt, region, mode, latency_ms, "

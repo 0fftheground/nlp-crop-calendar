@@ -1,13 +1,24 @@
-# 农事助手
+# Agronomy Assistant
 
-本界面会连接 FastAPI 后端，并将你的问题路由到工具或工作流。
+This UI connects to the FastAPI backend and routes your questions to tools or workflows.
 
-你可以咨询：
-- 作物品种特性
-- 指定地区的气象与时间范围
-- 生育期预测
-- 完整种植方案
+You can ask about:
+- Crop variety traits
+- Weather and time ranges for a specific region
+- Growth stage prediction
+- Full planting plans
 
-如果信息不完整，助手会追问补充；如需结束追问，可回复“取消/开始新问题”；如需清除记忆，可回复“清除记忆”。
+If information is incomplete, the assistant will ask follow-up questions. To switch to a new question, just ask a new request. To clear memory, simply say so.
 
-提示：如需切换后端地址，请设置 `BACKEND_URL`。
+Tip: to change the backend address, set `BACKEND_URL`.
+
+## Chat history & authentication
+Chat history is enabled via Chainlit data persistence (`chainlit.toml`). Authentication is enabled using the password callback in `chainlit_app.py`. The username is used as the stable identity (`user_id`) for backend memory, and the Chainlit thread id is reused as `session_id` so a resumed chat can continue pending follow-ups.
+
+Authentication modes:
+- If you set credentials in `.env`, only those users can log in:
+  - `CHAINLIT_AUTH_USERS` as `user:pass,user2:pass2`
+  - or `CHAINLIT_AUTH_USERNAME` / `CHAINLIT_AUTH_PASSWORD` for a single user
+- If no credentials are configured, any non-empty username/password will be accepted (open mode).
+
+Once configured, your chat threads will persist across page reloads for the same login.
