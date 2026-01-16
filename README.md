@@ -48,6 +48,7 @@ RECOMMENDATION_API_KEY=
 ```
 If `EXTRACTOR_API_KEY` is empty, the extractor falls back to `OPENAI_API_KEY`.
 Tools default to `mock`. Variety lookup reads local SQLite by default (`VARIETY_PROVIDER=local`); set `VARIETY_PROVIDER=intranet` to switch to intranet APIs. Other tools can set `*_PROVIDER=intranet` and configure `*_API_URL`/`*_API_KEY` to use intranet APIs; growth stage prediction must use `GROWTH_STAGE_PROVIDER=intranet`.
+To use the external 15-day weather API, set `WEATHER_PROVIDER=91weather` and ensure the request includes `lat`/`lon` (the tool accepts `WeatherQueryInput` JSON with `lat`/`lon`).
 
 ## Development Notes
 - `src/agent/router.py` + `src/agent/planner.py` implement Planner+Executor logic; you can adjust the planner prompt or add tools to extend capability (prompt lives in `src/prompts/planner.py`).

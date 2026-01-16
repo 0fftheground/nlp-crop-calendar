@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import time
 from collections import OrderedDict
+from datetime import date
 from pathlib import Path
 from threading import Lock
 from typing import Optional, Tuple
@@ -137,6 +139,19 @@ def _build_store() -> WeatherCacheStore:
 
 _STORE = _build_store()
 
+GRID_RESOLUTION_DEGREES = 0.25
+
+
+def _snap_to_grid(value: float, *, resolution: float) -> float:
+    if resolution <= 0:
+        raise ValueError("resolution must be positive")
+    scaled = value / resolution
+    if scaled >= 0:
+        snapped = math.floor(scaled + 0.5)
+    else:
+        snapped = math.ceil(scaled - 0.5)
+    return snapped * resolution
+
 
 def make_weather_cache_key(query: WeatherQueryInput) -> str:
     payload = query.model_dump(mode="json")
@@ -144,6 +159,24 @@ def make_weather_cache_key(query: WeatherQueryInput) -> str:
         payload, ensure_ascii=True, sort_keys=True, default=str
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def make_weather_grid_cache_key(
+    lat: float,
+    lon: float,
+    *,
+    day: date,
+    provider: str = "91weather",
+    resolution: float = GRID_RESOLUTION_DEGREES,
+) -> str:
+    lat_snap = _snap_to_grid(lat, resolution=resolution)
+    lon_snap = _snap_to_grid(lon, resolution=resolution)
+    token = (
+        f"{provider}:{day.isoformat()}:"
+        f"{lat_snap:.2f}:{lon_snap:.2f}:"
+        f"{resolution:.2f}"
+    )
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def store_weather_series(

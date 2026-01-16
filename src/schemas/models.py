@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional
 from ..domain.enums import PlantingMethod
 from ..domain.normalizers import EnumNormalizer
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class FarmerQuery(BaseModel):
@@ -215,6 +215,18 @@ class WeatherQueryInput(BaseModel):
         max_length=64,
         description="市级行政区或站点名称。",
     )
+    lat: Optional[float] = Field(
+        default=None,
+        ge=-90,
+        le=90,
+        description="纬度（用于外部气象 API）。",
+    )
+    lon: Optional[float] = Field(
+        default=None,
+        ge=-180,
+        le=180,
+        description="经度（用于外部气象 API）。",
+    )
     year: int = Field(
         default_factory=lambda: date.today().year,
         ge=1900,
@@ -240,6 +252,19 @@ class WeatherQueryInput(BaseModel):
         if match:
             return _strip_admin_prefix(match.group(0))
         return _strip_admin_prefix(text)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_region_from_coords(cls, values: object) -> object:
+        if not isinstance(values, dict):
+            return values
+        region = values.get("region")
+        lat = values.get("lat")
+        lon = values.get("lon")
+        if (region is None or str(region).strip() == "") and lat is not None and lon is not None:
+            values = dict(values)
+            values["region"] = f"{lat},{lon}"
+        return values
 
 
 class WeatherDataPoint(BaseModel):
@@ -271,6 +296,15 @@ class WeatherSeries(BaseModel):
     points: List[WeatherDataPoint] = Field(default_factory=list)
     source: Optional[str] = Field(
         default=None, description="数据来源，例如自动站或模式。"
+    )
+    summary: Optional[str] = Field(
+        default=None, description="气象摘要（可缓存）。"
+    )
+    export_file_id: Optional[str] = Field(
+        default=None, description="导出的 CSV 文件标识。"
+    )
+    export_path: Optional[str] = Field(
+        default=None, description="导出的 CSV 本地路径。"
     )
 
 
@@ -322,13 +356,24 @@ class WeatherSeriesDraft(BaseModel):
             else:
                 year = date.today().year
         merged["year"] = year
+        lat = merged.get("lat")
+        lon = merged.get("lon")
+        if merged.get("region") is None and lat is not None and lon is not None:
+            merged["region"] = f"{lat},{lon}"
         required = ["region", "year"]
         missing = [f for f in required if merged.get(f) is None]
         if missing:
             raise ValueError(f"Missing required fields for WeatherQueryInput: {missing}")
         merged.setdefault("granularity", "daily")
         merged.setdefault("include_advice", False)
-        allowed = {"region", "year", "granularity", "include_advice"}
+        allowed = {
+            "region",
+            "lat",
+            "lon",
+            "year",
+            "granularity",
+            "include_advice",
+        }
         filtered = {k: v for k, v in merged.items() if k in allowed}
         return WeatherQueryInput(**filtered)
 

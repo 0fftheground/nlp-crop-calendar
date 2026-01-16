@@ -30,6 +30,8 @@ def _to_json_payload(model: BaseModel) -> str:
 
 WEATHER_FIELD_LABELS = {
     "region": "地区(省/市/区/县/站点)",
+    "lat": "纬度",
+    "lon": "经度",
     "year": "年份(默认当前年)",
     "granularity": "粒度(hourly/daily)",
     "include_advice": "是否包含建议",

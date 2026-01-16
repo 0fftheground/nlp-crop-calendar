@@ -8,11 +8,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from ..agent.router import RequestRouter
 from ..infra.config import get_config
+from ..infra.export_store import resolve_export_path
 from ..infra.interaction_store import get_interaction_store
 from ..observability.logging_utils import (
     init_logging,
@@ -125,3 +126,18 @@ async def handle_request(request: UserRequest):
     )
     reset_trace_id(token)
     return response
+
+
+@app.get("/api/v1/download/{file_id}")
+async def download_export(file_id: str):
+    try:
+        path = resolve_export_path(file_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="invalid download id")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(
+        path,
+        media_type="text/csv",
+        filename=f"{file_id}.csv",
+    )
