@@ -18,13 +18,11 @@ from ...schemas import (
 class GraphState(TypedDict, total=False):
     """State shared across crop calendar workflow nodes."""
 
+    user_id: str
     user_prompt: str
     trace: List[str]
     planting_draft: PlantingDetailsDraft
     planting: PlantingDetails
-    memory_planting: PlantingDetails
-    memory_decision: Optional[bool]
-    memory_prompted: bool
     missing_fields: List[str]
     followup_count: int
     assumptions: List[str]
@@ -37,6 +35,10 @@ class GraphState(TypedDict, total=False):
     recommendations: List[Recommendation]
     message: str
     data: Dict[str, object]
+    experience_key: Optional[str]
+    experience_applied: List[str]
+    experience_skip_fields: List[str]
+    experience_notice: Optional[str]
 
 
 def add_trace(state: GraphState, message: str) -> GraphState:

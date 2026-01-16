@@ -6,12 +6,12 @@ from .registry import auto_register_tool
 
 @auto_register_tool(
     "memory_clear",
-    description="清除种植记忆（user_id 优先，回退到 session_id）。",
+    description="清除历史经验记录（user_id 优先，回退到 session_id）。",
 )
 def memory_clear(prompt: str) -> ToolInvocation:
     _ = prompt
     return ToolInvocation(
         name="memory_clear",
-        message="已清除记忆。",
+        message="已清除历史经验记录。",
         data={},
     )

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from typing import Dict, List, Optional, Type
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Type
 
 from pydantic import BaseModel, Field
 
@@ -18,26 +18,46 @@ from ...schemas import PlantingDetails, PlantingDetailsDraft, WeatherSeries
 
 
 UNKNOWN_MARKERS = ["不知道", "不清楚", "不确定", "记不清", "不记得", "忘了"]
-MEMORY_ACCEPT_MARKERS = [
-    "沿用",
-    "同上",
-    "用上次",
-    "还是上次",
-    "按上次",
-    "继续用",
-    "用之前的",
+EXPERIENCE_FIELDS = [
+    "crop",
+    "variety",
+    "planting_method",
+    "sowing_date",
+    "transplant_date",
+    "region",
+    "planting_location",
 ]
-MEMORY_DENY_MARKERS = [
-    "不用",
-    "不沿用",
-    "不用上次",
-    "不要用",
-    "不用之前的",
-    "不用了",
+EXPERIENCE_FIELD_LABELS = {
+    "crop": "作物",
+    "variety": "品种",
+    "planting_method": "种植方式",
+    "sowing_date": "播种日期",
+    "transplant_date": "移栽日期",
+    "region": "地区",
+    "planting_location": "地块",
+}
+EXPERIENCE_CHANGE_MARKERS = [
+    "更换",
+    "换个",
+    "换一个",
+    "换成",
+    "改成",
+    "改一下",
     "重新",
+    "不用",
+    "不要",
+    "不沿用",
 ]
-MEMORY_YES_MARKERS = ["是", "好", "好的", "可以", "行"]
-MEMORY_NO_MARKERS = ["否", "不是", "不可以", "不需要"]
+EXPERIENCE_FIELD_MARKERS = {
+    "crop": ["作物"],
+    "variety": ["品种"],
+    "planting_method": ["种植方式", "方式", "播种方式"],
+    "sowing_date": ["播种日期", "播期", "播种时间", "播种"],
+    "transplant_date": ["移栽日期", "插秧日期", "移栽时间", "插秧时间"],
+    "region": ["地区", "区域", "地方"],
+    "planting_location": ["地块", "位置", "地址"],
+}
+EXPERIENCE_ASSUMPTION_PREFIX = "沿用历史记录"
 
 
 class PlantingExtract(BaseModel):
@@ -153,44 +173,95 @@ def build_fallback_planting(draft: PlantingDetailsDraft) -> PlantingDetails:
     )
 
 
-def classify_memory_confirmation(
-    prompt: str, *, prompted: bool = False
-) -> Optional[bool]:
+def detect_experience_change_fields(prompt: str) -> List[str]:
     if not prompt:
-        return None
-    if any(marker in prompt for marker in MEMORY_ACCEPT_MARKERS):
-        return True
-    if any(marker in prompt for marker in MEMORY_DENY_MARKERS):
-        return False
-    if prompted:
-        cleaned = prompt.strip()
-        if cleaned in MEMORY_YES_MARKERS:
+        return []
+    text = prompt.strip()
+    if not any(marker in text for marker in EXPERIENCE_CHANGE_MARKERS):
+        return []
+    fields: Set[str] = set()
+    for field, markers in EXPERIENCE_FIELD_MARKERS.items():
+        if any(marker in text for marker in markers):
+            fields.add(field)
+    if not fields:
+        return list(EXPERIENCE_FIELDS)
+    return list(fields)
+
+
+def _format_experience_assumption(field: str, value: object) -> str:
+    return f"{field}: {EXPERIENCE_ASSUMPTION_PREFIX} {value}"
+
+
+def _is_experience_assumption(
+    assumption: str, fields: Sequence[str]
+) -> bool:
+    for field in fields:
+        prefix = f"{field}: {EXPERIENCE_ASSUMPTION_PREFIX}"
+        if assumption.startswith(prefix):
             return True
-        if cleaned in MEMORY_NO_MARKERS:
-            return False
-    return None
+    return False
 
 
-def apply_memory_to_draft(
-    draft: PlantingDetailsDraft, memory: PlantingDetails
+def clear_experience_fields(
+    draft: PlantingDetailsDraft, fields: Iterable[str]
 ) -> PlantingDetailsDraft:
     data = draft.model_dump()
+    field_list = [field for field in fields if field in data]
+    for field in field_list:
+        data[field] = None
     assumptions = list(data.get("assumptions") or [])
-    for field in (
-        "crop",
-        "variety",
-        "planting_method",
-        "sowing_date",
-        "transplant_date",
-        "region",
-        "planting_location",
-    ):
-        if data.get(field) is None:
-            value = getattr(memory, field, None)
-            if field == "planting_method" and hasattr(value, "value"):
-                value = value.value
-            if value is not None:
-                data[field] = value
-                assumptions.append(f"{field}: 沿用上次记忆 {value}")
+    if field_list:
+        assumptions = [
+            item
+            for item in assumptions
+            if not _is_experience_assumption(item, field_list)
+        ]
     data["assumptions"] = assumptions
     return PlantingDetailsDraft(**data)
+
+
+def apply_experience_choice_to_draft(
+    draft: PlantingDetailsDraft,
+    planting: PlantingDetails,
+    *,
+    skip_fields: Optional[Set[str]] = None,
+) -> tuple[PlantingDetailsDraft, List[str]]:
+    data = draft.model_dump()
+    assumptions = list(data.get("assumptions") or [])
+    applied: List[str] = []
+    skip = set(skip_fields or set())
+    for field in EXPERIENCE_FIELDS:
+        if field in skip:
+            continue
+        if data.get(field) is not None:
+            continue
+        value = getattr(planting, field, None)
+        if value is None:
+            continue
+        if field == "planting_method" and hasattr(value, "value"):
+            value = value.value
+        data[field] = value
+        applied.append(field)
+        assumption = _format_experience_assumption(field, value)
+        if assumption not in assumptions:
+            assumptions.append(assumption)
+    data["assumptions"] = assumptions
+    return PlantingDetailsDraft(**data), applied
+
+
+def build_experience_notice(
+    planting: PlantingDetails, applied_fields: Sequence[str]
+) -> Optional[str]:
+    if not applied_fields:
+        return None
+    labels = [
+        EXPERIENCE_FIELD_LABELS.get(field, field) for field in applied_fields
+    ]
+    joined = "、".join(labels)
+    note = f"已默认沿用上次{joined}"
+    if "sowing_date" in applied_fields and planting.sowing_date:
+        note = (
+            f"{note}（播种日期: {planting.sowing_date.isoformat()}）"
+        )
+    note = f"{note}。如需更换请回复“更换”或“更换+字段”。"
+    return note

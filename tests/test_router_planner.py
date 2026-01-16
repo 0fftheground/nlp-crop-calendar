@@ -26,13 +26,16 @@ class PlannerRouterTests(unittest.TestCase):
     def setUp(self) -> None:
         self._env_backup = {
             "PENDING_STORE": os.environ.get("PENDING_STORE"),
-            "MEMORY_STORE": os.environ.get("MEMORY_STORE"),
         }
         os.environ["PENDING_STORE"] = "memory"
-        os.environ["MEMORY_STORE"] = "memory"
         from src.infra.config import get_config
 
         get_config.cache_clear()
+        from src.infra.planting_choice_store import get_planting_choice_store
+        from src.infra.variety_choice_store import get_variety_choice_store
+
+        get_planting_choice_store.cache_clear()
+        get_variety_choice_store.cache_clear()
         self._llm_patch = patch(
             "src.agent.planner.get_chat_model", return_value=_DummyLLM()
         )
@@ -119,27 +122,34 @@ class PlannerRouterTests(unittest.TestCase):
         from datetime import date
 
         from src.agent.planner import ActionPlan
+        from src.infra.planting_choice_store import get_planting_choice_store
+        from src.infra.variety_choice_store import get_variety_choice_store
         from src.schemas.models import PlantingDetails, UserRequest
 
         planting = PlantingDetails(
-            crop="水稻",
+            crop="rice",
             planting_method="direct_seeding",
             sowing_date=date(2025, 1, 1),
             region="test",
         )
-        self.router._memory_store.set("u7", planting)
+        planting_store = get_planting_choice_store()
+        variety_store = get_variety_choice_store()
+        planting_store.set("u7", planting.crop, planting.region, planting)
+        variety_store.set("u7", "test-query", "test-variety", None)
+
         plan = ActionPlan(action="tool", name="memory_clear", input={})
         with patch.object(self.router._planner, "plan", return_value=plan):
             with patch("src.agent.router.execute_tool") as mocked_execute:
                 result = self.router.handle(
-                    UserRequest(prompt="清除记忆", session_id="s7", user_id="u7")
+                    UserRequest(prompt="clear memory", session_id="s7", user_id="u7")
                 )
 
         mocked_execute.assert_not_called()
         self.assertEqual(result.mode, "tool")
         self.assertIsNotNone(result.tool)
         self.assertEqual(result.tool.name, "memory_clear")
-        self.assertIsNone(self.router._memory_store.get("u7"))
+        self.assertIsNone(planting_store.get("u7", "rice", "test"))
+        self.assertIsNone(variety_store.get("u7", "test-query"))
 
     def test_workflow_action_invokes_runner(self) -> None:
         from src.agent.planner import ActionPlan

@@ -4,7 +4,7 @@
 Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 ```
 
-1. **Chainlit (`chainlit_app.py`)** sends user input to `POST /api/v1/handle` with `session_id` for multi-session isolation (optionally `user_id` for cross-session memory). The response indicates whether a tool or a LangGraph plan ran, and traces are shown separately.
+1. **Chainlit (`chainlit_app.py`)** sends user input to `POST /api/v1/handle` with `session_id` for multi-session isolation (optionally `user_id` for cross-session experience memory). The response indicates whether a tool or a LangGraph plan ran, and traces are shown separately.
 2. **FastAPI (`src/api/server.py`)** exposes `/health` and `/api/v1/handle`; all requests/responses use unified Pydantic models.
 3. **Planner Router (`src/agent/router.py`)** calls the LLM planner to choose tool/workflow/none, then executes and persists follow-up state by `session_id`.
 4. **LangGraph (`src/agent/workflows/crop_calendar_graph.py`/`src/agent/workflows/growth_stage_graph.py`)**
@@ -23,7 +23,8 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 - `src/infra/tool_cache.py` - Tool result cache (memory/sqlite).
 - `src/infra/weather_cache.py` - Weather series cache (persistable).
 - `src/infra/interaction_store.py` - Request/response audit records (memory/sqlite).
-- `src/infra/memory_store.py` - Per-identity memory (user_id or session_id) for normalized PlantingDetails with TTL.
+- `src/infra/planting_choice_store.py` - Experience memory for planting details (keyed by `user_id + crop + region`, TTL).
+- `src/infra/variety_choice_store.py` - Experience memory for variety choices (keyed by `user_id + query_key`, TTL).
 - `src/prompts/*` - LLM prompts and workflow/tool user copy (planner/extract/fallback prompts).
 - Variety retrieval uses candidate-name matching + fuzzy tokens, no embedding/Qdrant.
 - `src/schemas/models.py` - Shared schemas (`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`), `UserRequest` supports `session_id` and optional `user_id`.
@@ -48,7 +49,7 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 - Tools are invoked via `execute_tool`; workflows execute the corresponding LangGraph. `HandleResponse.mode` tells the frontend "tool / workflow / none"; `tool.data` or `plan.recommendations` carry results.
 - Tool handlers in `src/agent/tools/registry.py` return `ToolInvocation` (structured `name/message/data`) for UI rendering.
 - Pending state is persisted in the pending store (memory/sqlite optional) with TTL; pending summaries are injected into the planner to decide follow-up or switch to new questions.
-- If stored memory exists, workflow follow-ups ask whether to reuse; memory can be cleared by the LLM selecting the `memory_clear` tool.
+- Experience memory can auto-fill missing planting fields for the same `user_id + crop + region`; memory can be cleared by the LLM selecting the `memory_clear` tool.
 
 ## Crop Calendar Workflow (Current)
 `src/agent/workflows/crop_calendar_graph.py` is the active main flow, replacing the earlier monolithic pipeline:

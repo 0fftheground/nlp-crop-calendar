@@ -114,6 +114,4 @@ class PlannerRunner:
             summary["action"] = pending.get("action")
         if "input_attempts" in pending:
             summary["input_attempts"] = pending.get("input_attempts")
-        if "memory_prompted" in pending:
-            summary["memory_prompted"] = pending.get("memory_prompted")
         return summary

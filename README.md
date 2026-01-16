@@ -61,7 +61,7 @@ Tools default to `mock`. Variety lookup reads local SQLite by default (`VARIETY_
 - Crop calendar/growth-stage workflow results build cache keys from normalized `PlantingDetails`; cache hits return immediately.
 - To hit growth-stage cache, pass `PlantingDetails` JSON (or JSON containing a `planting` field).
 - Follow-up control: pending state is passed into the LLM planner; the LLM decides whether to continue follow-up or switch to a new question; when it selects a new tool/workflow or action=none, pending is cleared.
-- Session memory: normalized planting info is cached per user_id (falls back to session_id) with TTL and confirmed before reuse; to clear, ask the assistant to clear memory (LLM selects the `memory_clear` tool).
+- Experience memory: for the same `user_id + crop + region`, missing planting fields are auto-reused with TTL; to clear, ask the assistant to clear memory (LLM selects the `memory_clear` tool).
 - Infrastructure adapters live in `src/infra` (config, LLM client, structured extraction, etc.).
 - Non-agronomy requests return `mode="none"` and skip tools/workflows.
 - Variety extraction uses candidate-name matching + fuzzy tokens; data source is `resources/rice_variety_approvals.sqlite3` (override with `VARIETY_DB_PATH`).

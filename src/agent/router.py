@@ -1,11 +1,13 @@
 import contextvars
 import json
+import re
 from typing import Optional
 
 from pydantic import ValidationError
 
 from ..infra.pending_store import build_pending_followup_store
-from ..infra.memory_store import build_memory_store
+from ..infra.planting_choice_store import get_planting_choice_store
+from ..infra.variety_choice_store import get_variety_choice_store
 from ..observability.logging_utils import log_event
 from ..prompts.input_validation import (
     INPUT_SCHEMA_FALLBACK_MESSAGE,
@@ -17,7 +19,6 @@ from ..prompts.tool_messages import (
 )
 from ..schemas.models import (
     HandleResponse,
-    PlantingDetails,
     PlantingDetailsDraft,
     ToolInvocation,
     UserRequest,
@@ -32,6 +33,44 @@ from .workflows.registry import get_workflow_spec, list_workflow_specs
 DEFAULT_NONE_MESSAGE = "未识别到与农事相关的需求。"
 INPUT_VALIDATION_MODE = "input_validation"
 INPUT_VALIDATION_MAX_ATTEMPTS = 1
+_FOLLOWUP_INDEX_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
+_FOLLOWUP_QUOTED_RE = re.compile(r"[\"“”']([^\"“”']+)[\"“”']")
+_NEW_TOPIC_TOKENS = {
+    "另一个",
+    "另外",
+    "再问",
+    "新问题",
+    "换个",
+    "改问",
+    "顺便",
+    "不相关",
+    "无关",
+    "取消",
+    "不用了",
+    "停止",
+    "结束",
+    "退出",
+    "算了",
+    "先不",
+}
+_QUESTION_HINTS = {
+    "请问",
+    "怎么",
+    "如何",
+    "为什么",
+    "多少",
+    "哪里",
+    "哪个",
+    "是否",
+    "能否",
+    "可以吗",
+    "有无",
+    "有没有",
+    "帮我",
+    "查询",
+    "查一下",
+    "帮忙",
+}
 
 
 class RequestRouter:
@@ -48,7 +87,6 @@ class RequestRouter:
         self._tool_names = {spec["name"] for spec in tool_specs}
         self._planner = PlannerRunner(tool_specs, self._workflow_specs)
         self._pending_store = build_pending_followup_store()
-        self._memory_store = build_memory_store()
 
     def handle(self, request: UserRequest) -> HandleResponse:
         session_id = request.session_id or request.user_id or "default"
@@ -61,6 +99,13 @@ class RequestRouter:
                 plan = WorkflowResponse(message=DEFAULT_NONE_MESSAGE)
                 return HandleResponse(mode="none", plan=plan)
             pending = self._pending_store.get(session_id)
+            if self._should_resume_pending(prompt, pending):
+                log_event(
+                    "pending_resume",
+                    mode=pending.get("mode") if pending else None,
+                    reason="auto",
+                )
+                return self._resume_pending(prompt, pending, session_id)
             plan = self._planner.plan(prompt, pending=pending)
             if not plan:
                 return self._fallback_from_planner(prompt, pending, session_id)
@@ -189,6 +234,13 @@ class RequestRouter:
                 return HandleResponse(mode="tool", tool=tool_payload)
             self._pending_store.delete(session_id)
         tool_input = self._coerce_plan_input(plan.input, prompt)
+        if tool_name == "variety_lookup" and not pending:
+            memory_id = self._memory_id_ctx.get()
+            tool_input = json.dumps(
+                {"prompt": prompt, "user_id": memory_id},
+                ensure_ascii=True,
+                default=str,
+            )
         tool_payload = execute_tool(tool_name, tool_input)
         if not tool_payload:
             tool_payload = ToolInvocation(
@@ -325,10 +377,7 @@ class RequestRouter:
     def _run_graph(self, prompt: str, graph, workflow_name: str) -> WorkflowResponse:
         session_id = self._session_id_ctx.get()
         memory_id = self._memory_id_ctx.get()
-        initial_state = {"user_prompt": prompt, "trace": []}
-        memory = self._memory_store.get(memory_id)
-        if memory:
-            initial_state["memory_planting"] = memory.planting
+        initial_state = {"user_prompt": prompt, "trace": [], "user_id": memory_id}
         pending = self._pending_store.get(session_id)
         if pending and pending.get("workflow_name") == workflow_name:
             initial_state.update(
@@ -336,14 +385,15 @@ class RequestRouter:
                     "planting_draft": pending.get("planting_draft"),
                     "missing_fields": pending.get("missing_fields"),
                     "followup_count": pending.get("followup_count", 0),
-                    "memory_decision": pending.get("memory_decision"),
-                    "memory_prompted": pending.get("memory_prompted", False),
+                    "experience_key": pending.get("experience_key"),
+                    "experience_applied": pending.get("experience_applied", []),
+                    "experience_skip_fields": pending.get(
+                        "experience_skip_fields", []
+                    ),
+                    "experience_notice": pending.get("experience_notice"),
                 }
             )
         state = graph.invoke(initial_state)
-        planting = state.get("planting")
-        if isinstance(planting, PlantingDetails):
-            self._memory_store.set(memory_id, planting)
         self._update_workflow_followup_state(session_id, state, workflow_name)
         return WorkflowResponse(
             query=state.get("query"),
@@ -365,6 +415,8 @@ class RequestRouter:
                 data={},
             )
         followup_payload = {
+            "user_id": self._memory_id_ctx.get(),
+            "query": pending.get("query"),
             "followup": {
                 "prompt": prompt,
                 "draft": pending.get("draft") or {},
@@ -408,9 +460,17 @@ class RequestRouter:
                 "planting_draft": draft_payload,
                 "missing_fields": missing,
                 "followup_count": state.get("followup_count", 0),
-                "memory_decision": state.get("memory_decision"),
-                "memory_prompted": state.get("memory_prompted", False),
+                "pending_message": state.get("message"),
+                "experience_key": state.get("experience_key"),
+                "experience_applied": state.get("experience_applied", []),
+                "experience_skip_fields": state.get("experience_skip_fields", []),
+                "experience_notice": state.get("experience_notice"),
             }
+            options = self._build_pending_options(
+                payload.get("pending_message"), draft_payload
+            )
+            if options:
+                payload["options"] = options
             self._pending_store.set(session_id, payload)
         else:
             pending = self._pending_store.get(session_id)
@@ -427,18 +487,36 @@ class RequestRouter:
         data = tool_payload.data or {}
         missing = data.get("missing_fields") or []
         draft = data.get("draft")
-        if missing and isinstance(draft, dict):
+        choice_hint = bool(data.get("choice_hint"))
+        options = data.get("options")
+        if (missing and isinstance(draft, dict)) or (
+            choice_hint and isinstance(options, list)
+        ):
             followup_count = data.get("followup_count", 0)
-            self._pending_store.set(
-                session_id,
-                {
-                    "mode": "tool",
-                    "tool_name": tool_payload.name,
-                    "draft": draft,
-                    "missing_fields": missing,
-                    "followup_count": followup_count,
-                },
-            )
+            payload = {
+                "mode": "tool",
+                "tool_name": tool_payload.name,
+                "draft": draft if isinstance(draft, dict) else {},
+                "missing_fields": missing,
+                "followup_count": followup_count,
+                "pending_message": tool_payload.message,
+            }
+            query = data.get("query") or data.get("prompt")
+            if isinstance(query, str) and query.strip():
+                payload["query"] = query.strip()
+            if choice_hint and isinstance(options, list):
+                payload["choice_hint"] = True
+                payload["strict_options_only"] = True
+                payload["options"] = [
+                    str(item).strip() for item in options if str(item).strip()
+                ]
+            else:
+                built = self._build_pending_options(
+                    payload.get("pending_message"), payload.get("draft")
+                )
+                if built:
+                    payload["options"] = built
+            self._pending_store.set(session_id, payload)
         else:
             pending = self._pending_store.get(session_id)
             if pending and pending.get("mode") == "tool":
@@ -448,14 +526,148 @@ class RequestRouter:
         self, session_id: str, pending: Optional[dict]
     ) -> ToolInvocation:
         memory_id = self._memory_id_ctx.get()
-        self._memory_store.delete(memory_id)
+        get_planting_choice_store().delete_user(memory_id)
+        get_variety_choice_store().delete_user(memory_id)
         if pending and pending.get("mode") == "workflow":
             pending = dict(pending)
-            pending["memory_decision"] = None
-            pending["memory_prompted"] = False
             self._pending_store.set(session_id, pending)
         return ToolInvocation(
             name="memory_clear",
-            message="已清除记忆。",
+            message="已清除历史经验记录。",
             data={},
         )
+
+    @staticmethod
+    def _parse_followup_index(text: str) -> Optional[int]:
+        if not text:
+            return None
+        match = _FOLLOWUP_INDEX_RE.match(text.strip())
+        if not match:
+            return None
+        return int(match.group(1))
+
+    @staticmethod
+    def _extract_pending_candidates(pending: Optional[dict]) -> list[str]:
+        if not isinstance(pending, dict):
+            return []
+        draft = pending.get("draft")
+        if not isinstance(draft, dict):
+            return []
+        for key in ("candidates", "variety_candidates", "region_candidates"):
+            value = draft.get(key)
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+        return []
+
+    @staticmethod
+    def _extract_pending_options(pending: Optional[dict]) -> list[str]:
+        if not isinstance(pending, dict):
+            return []
+        options = pending.get("options")
+        if isinstance(options, list):
+            return [str(item).strip() for item in options if str(item).strip()]
+        return []
+
+    @staticmethod
+    def _extract_pending_message(pending: Optional[dict]) -> str:
+        if not isinstance(pending, dict):
+            return ""
+        message = pending.get("pending_message") or pending.get("message")
+        return message.strip() if isinstance(message, str) else ""
+
+    @staticmethod
+    def _extract_message_options(message: str) -> list[str]:
+        if not message:
+            return []
+        options: list[str] = []
+        for line in message.splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            if "回复" in text:
+                continue
+            if text.endswith("：") or "请选择" in text:
+                continue
+            match = re.match(r"^(\d+)[\.\、]\s*(.+)$", text)
+            if match:
+                text = match.group(2).strip()
+            if text:
+                options.append(text)
+        if not options:
+            for token in _FOLLOWUP_QUOTED_RE.findall(message):
+                for piece in re.split(r"[、/或]", token):
+                    piece = piece.strip()
+                    if piece:
+                        options.append(piece)
+        return options
+
+    def _build_pending_options(
+        self, message: Optional[str], draft: Optional[dict]
+    ) -> list[str]:
+        options: list[str] = []
+        if isinstance(draft, dict):
+            for key in ("options", "candidates", "variety_candidates", "region_candidates"):
+                value = draft.get(key)
+                if isinstance(value, list):
+                    for item in value:
+                        item = str(item).strip()
+                        if item and item not in options:
+                            options.append(item)
+        if isinstance(message, str) and message.strip():
+            for item in self._extract_message_options(message):
+                if item not in options:
+                    options.append(item)
+        return options
+
+    def _matches_pending_choice(self, prompt: str, pending: Optional[dict]) -> bool:
+        text = (prompt or "").strip()
+        if not text:
+            return False
+        options = self._extract_pending_options(pending)
+        candidates = options or self._extract_pending_candidates(pending)
+        if candidates:
+            index = self._parse_followup_index(text)
+            if index is not None and 1 <= index <= len(candidates):
+                return True
+            for candidate in candidates:
+                if candidate == text:
+                    return True
+                if text in candidate or candidate in text:
+                    return True
+        message = self._extract_pending_message(pending)
+        if message and len(text) <= 10 and text in message:
+            return True
+        if self._parse_followup_index(text) is not None and message and "序号" in message:
+            return True
+        return False
+
+    @staticmethod
+    def _looks_like_new_question(prompt: str) -> bool:
+        text = (prompt or "").strip()
+        if not text:
+            return False
+        for token in _NEW_TOPIC_TOKENS:
+            if token in text:
+                return True
+        if "?" in text or "？" in text:
+            return True
+        if len(text) >= 12:
+            for token in _QUESTION_HINTS:
+                if token in text:
+                    return True
+        return False
+
+    def _should_resume_pending(
+        self, prompt: str, pending: Optional[dict]
+    ) -> bool:
+        if not isinstance(pending, dict):
+            return False
+        if pending.get("mode") not in {"tool", "workflow"}:
+            return False
+        if pending.get("strict_options_only"):
+            return self._matches_pending_choice(prompt, pending)
+        if self._matches_pending_choice(prompt, pending):
+            return True
+        if self._looks_like_new_question(prompt):
+            return False
+        return True

@@ -18,13 +18,16 @@ from ...domain.planting import (
 )
 from ...infra.config import get_config
 from ...infra.cache_keys import build_planting_cache_key
+from ...infra.planting_choice_store import (
+    build_choice_key,
+    get_planting_choice_store,
+)
 from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ...infra.weather_cache import get_weather_series, store_weather_series
 from ...prompts.workflow_messages import (
     GROWTH_STAGE_INTRANET_REQUIRED_MESSAGE,
     build_growth_stage_missing_question,
     format_growth_stage_message,
-    format_memory_confirmation,
     format_planting_validation_error,
 )
 from ...prompts.tool_messages import TOOL_NOT_FOUND_MESSAGE
@@ -35,11 +38,13 @@ from ...schemas import (
 )
 from ..tools.registry import cache_tool_result, execute_tool, get_cached_tool_result
 from .common import (
-    apply_memory_to_draft,
+    apply_experience_choice_to_draft,
+    build_experience_notice,
+    clear_experience_fields,
     coerce_planting_draft,
     coerce_weather_series,
     build_fallback_planting,
-    classify_memory_confirmation,
+    detect_experience_change_fields,
     infer_unknown_fields,
     llm_extract_planting,
     summarize_weather_series,
@@ -96,21 +101,58 @@ def _growth_extract_node(state: GraphState) -> GraphState:
         draft = fresh_draft
 
     missing_fields = list_missing_required_fields(draft)
-    memory_planting = state.get("memory_planting")
-    memory_prompted = bool(state.get("memory_prompted"))
-    memory_decision = state.get("memory_decision")
-    memory_choice = classify_memory_confirmation(prompt, prompted=memory_prompted)
-    if memory_choice is not None:
-        memory_decision = memory_choice
-    if memory_decision and memory_planting:
-        draft = apply_memory_to_draft(draft, memory_planting)
+    experience_applied = list(state.get("experience_applied") or [])
+    experience_skip_fields = set(state.get("experience_skip_fields") or [])
+    experience_key = state.get("experience_key")
+    experience_notice = state.get("experience_notice")
+    change_fields = detect_experience_change_fields(prompt)
+    if change_fields:
+        experience_skip_fields.update(change_fields)
+        to_clear = [
+            field for field in experience_applied if field in experience_skip_fields
+        ]
+        if to_clear:
+            draft = clear_experience_fields(draft, to_clear)
+            experience_applied = [
+                field for field in experience_applied if field not in to_clear
+            ]
+        experience_notice = None
+        state = add_trace(state, f"experience_change_fields={change_fields}")
         missing_fields = list_missing_required_fields(draft)
-        state = add_trace(state, "memory_applied")
+    if experience_skip_fields:
+        experience_skip_fields = {
+            field
+            for field in experience_skip_fields
+            if getattr(draft, field, None) is None
+        }
+    user_id = state.get("user_id")
+    current_key = build_choice_key(draft.crop, draft.region) if user_id else None
+    if current_key and experience_key and current_key != experience_key:
+        experience_applied = []
+        experience_notice = None
+    if user_id and current_key:
+        choice = get_planting_choice_store().get(
+            user_id, draft.crop, draft.region
+        )
+        if choice:
+            draft, applied = apply_experience_choice_to_draft(
+                draft,
+                choice.planting,
+                skip_fields=experience_skip_fields,
+            )
+            if applied:
+                experience_applied = list(
+                    dict.fromkeys(experience_applied + applied)
+                )
+                experience_notice = (
+                    build_experience_notice(choice.planting, applied)
+                    or experience_notice
+                )
+                state = add_trace(state, f"experience_applied={applied}")
+            missing_fields = list_missing_required_fields(draft)
     if not draft.region:
         missing_fields.append("region")
     missing_fields = list(dict.fromkeys(missing_fields))
-    if memory_choice is not None:
-        state = add_trace(state, f"memory_decision={memory_decision}")
     unknown_fields = infer_unknown_fields(prompt, missing_fields, GROWTH_FIELD_LABELS)
     if unknown_fields:
         fallback = build_fallback_planting(draft)
@@ -144,7 +186,10 @@ def _growth_extract_node(state: GraphState) -> GraphState:
             "missing_fields": missing_fields,
             "followup_count": followup_count,
             "assumptions": list(draft.assumptions),
-            "memory_decision": memory_decision,
+            "experience_key": current_key,
+            "experience_applied": experience_applied,
+            "experience_skip_fields": sorted(experience_skip_fields),
+            "experience_notice": experience_notice,
         }
     )
     return state
@@ -156,14 +201,9 @@ def _growth_ask_node(state: GraphState) -> GraphState:
         missing_fields,
         GROWTH_FIELD_LABELS,
     )
-    memory_planting = state.get("memory_planting")
-    memory_decision = state.get("memory_decision")
-    memory_prompted = bool(state.get("memory_prompted"))
-    if memory_planting and memory_decision is None and not memory_prompted:
-        memory_note = format_memory_confirmation(memory_planting)
-        message = f"{memory_note}\n{message}"
-        state["memory_prompted"] = True
-        state = add_trace(state, "memory_prompted")
+    experience_notice = state.get("experience_notice")
+    if experience_notice:
+        message = f"{experience_notice}\n{message}"
     state = add_trace(state, f"ask missing={missing_fields}")
     state.update({"message": message})
     return state
@@ -206,6 +246,13 @@ def _growth_weather_node(state: GraphState) -> GraphState:
         state = add_trace(state, f"weather invalid={exc}")
         state.update({"message": format_planting_validation_error(exc)})
         return state
+
+    user_id = state.get("user_id")
+    if user_id and planting.crop and planting.region:
+        get_planting_choice_store().set(
+            user_id, planting.crop, planting.region, planting
+        )
+        state = add_trace(state, "experience_stored")
 
     cache_key = build_planting_cache_key(planting)
     cached = get_cached_tool_result(
@@ -356,6 +403,9 @@ def _growth_predict_node(state: GraphState) -> GraphState:
         )
     else:
         message = tool_payload.message or "已完成生育期预测。"
+    experience_notice = state.get("experience_notice")
+    if experience_notice and experience_notice not in message:
+        message = f"{experience_notice}\n{message}"
     state = add_trace(state, "predict complete")
     trace = list(state.get("trace") or [])
     workflow_payload.update(

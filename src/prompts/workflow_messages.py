@@ -14,11 +14,6 @@ PLANTING_METHOD_LABELS = {
     "direct_seeding": "直播",
     "transplanting": "移栽",
 }
-MEMORY_METHOD_LABELS = {
-    "direct_seeding": "直播",
-    "transplanting": "移栽",
-}
-
 
 def format_missing_question(
     missing_fields: List[str],
@@ -62,32 +57,6 @@ def build_growth_stage_missing_question(
         field_labels,
         GROWTH_STAGE_MISSING_PREFIX,
         allow_unknown=allow_unknown,
-    )
-
-
-def _format_memory_parts(planting: PlantingDetails) -> List[str]:
-    parts = [f"作物: {planting.crop}"]
-    if planting.variety:
-        parts.append(f"品种: {planting.variety}")
-    method_key = (
-        planting.planting_method.value
-        if hasattr(planting.planting_method, "value")
-        else str(planting.planting_method)
-    )
-    parts.append(f"方式: {MEMORY_METHOD_LABELS.get(method_key, method_key)}")
-    parts.append(f"播种日期: {planting.sowing_date.isoformat()}")
-    if planting.region:
-        parts.append(f"地区: {planting.region}")
-    if planting.planting_location:
-        parts.append(f"地块: {planting.planting_location}")
-    return parts
-
-
-def format_memory_confirmation(planting: PlantingDetails) -> str:
-    info = "，".join(_format_memory_parts(planting))
-    return (
-        f"检测到上次种植信息：{info}。是否沿用？"
-        "回复“是/沿用/同上”继续，回复“否/不用”将重新询问。"
     )
 
 

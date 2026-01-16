@@ -17,7 +17,6 @@ HIDDEN_TOOL_NAMES = {"farming_recommendation", "growth_stage_prediction"}
 
 
 TOOL_CACHEABLE = {
-    "variety_lookup",
     "weather_lookup",
     "farming_recommendation",
     "growth_stage_prediction",
@@ -32,8 +31,24 @@ def register_tool(tool: BaseTool) -> None:
     TOOL_INDEX[tool.name] = tool
 
 
+def _is_followup_payload(data: object) -> bool:
+    if not isinstance(data, dict):
+        return False
+    missing = data.get("missing_fields")
+    if isinstance(missing, list) and missing:
+        return True
+    if data.get("source") == "candidate":
+        return True
+    draft = data.get("draft")
+    if isinstance(draft, dict) and draft.get("candidates"):
+        return True
+    return False
+
+
 def _should_cache_tool_result(result: ToolInvocation) -> bool:
-    return bool(result.data)
+    if not result.data:
+        return False
+    return not _is_followup_payload(result.data)
 
 
 def _get_cached_tool_result(
@@ -46,6 +61,9 @@ def _get_cached_tool_result(
     if not payload:
         return None
     try:
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if _is_followup_payload(data):
+            return None
         return ToolInvocation(**payload)
     except Exception:
         return None
