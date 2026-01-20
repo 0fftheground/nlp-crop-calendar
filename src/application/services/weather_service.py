@@ -5,6 +5,7 @@ import io
 import json
 import re
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
 import httpx
@@ -12,6 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from ...infra.config import get_config
 from ...infra.export_store import resolve_export_path, write_export
+from ...infra.geocode_cache import get_geocode_cached, set_geocode_cached
 from ...infra.llm import get_chat_model
 from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ...infra.weather_cache import (
@@ -72,6 +74,84 @@ def _extract_lat_lon_from_text(text: str) -> Optional[Tuple[float, float]]:
             if lat is not None and lon is not None:
                 return lat, lon
     return None
+
+
+def _parse_geocode_location(location: object) -> Optional[Tuple[float, float]]:
+    if location is None:
+        return None
+    parts = str(location).split(",")
+    if len(parts) != 2:
+        return None
+    lon = _parse_float(parts[0])
+    lat = _parse_float(parts[1])
+    if lat is None or lon is None:
+        return None
+    return lat, lon
+
+
+def _normalize_geocode_city(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        for item in value:
+            text = str(item).strip()
+            if text:
+                return text
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _geocode_with_amap(
+    region: str,
+    *,
+    api_key: Optional[str],
+    geocode_url: Optional[str],
+) -> Optional[dict]:
+    if not region:
+        return None
+    address = region.strip()
+    cached = get_geocode_cached(region)
+    if cached:
+        return cached
+    if not api_key:
+        return None
+    url = geocode_url or "https://restapi.amap.com/v3/geocode/geo"
+    params = {"key": api_key, "address": address}
+    try:
+        with httpx.Client(timeout=10.0, trust_env=False) as client:
+            response = client.get(url, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("status")) != "1":
+        return None
+    geocodes = payload.get("geocodes")
+    if not isinstance(geocodes, list) or not geocodes:
+        return None
+    primary = geocodes[0] if isinstance(geocodes[0], dict) else None
+    if not primary:
+        return None
+    location = _parse_geocode_location(primary.get("location"))
+    if location is None:
+        return None
+    lat, lon = location
+    result = {
+        "address": region,
+        "formatted_address": primary.get("formatted_address"),
+        "lat": lat,
+        "lon": lon,
+        "province": primary.get("province"),
+        "city": _normalize_geocode_city(primary.get("city")),
+        "district": primary.get("district"),
+        "level": primary.get("level"),
+        "adcode": primary.get("adcode"),
+    }
+    set_geocode_cached(region, None, result)
+    return result
 
 
 def _build_weather_query_from_payload(
@@ -322,20 +402,81 @@ def _build_weather_csv(series: WeatherSeries) -> str:
     return output.getvalue()
 
 
+def _resolve_existing_export(
+    series: WeatherSeries,
+) -> Tuple[Optional[str], Optional[Path]]:
+    if series.export_file_id:
+        try:
+            path = resolve_export_path(series.export_file_id)
+        except ValueError:
+            path = None
+        if path and path.exists():
+            return series.export_file_id, path
+    if series.export_path:
+        path = Path(series.export_path)
+        if path.exists():
+            file_id = series.export_file_id or path.stem
+            return file_id, path
+    return None, None
+
+
+def _load_weather_points_from_csv(path: Path) -> List[WeatherDataPoint]:
+    points: List[WeatherDataPoint] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                day = _parse_forecast_date(row.get("date"))
+                if day is None:
+                    continue
+                points.append(
+                    WeatherDataPoint(
+                        timestamp=datetime.combine(day, time.min),
+                        temperature=_parse_float(row.get("temperature_avg")),
+                        temperature_max=_parse_float(row.get("temperature_max")),
+                        temperature_min=_parse_float(row.get("temperature_min")),
+                        humidity=_parse_float(row.get("humidity")),
+                        precipitation=_parse_float(row.get("precipitation")),
+                        wind_speed=_parse_float(row.get("wind_speed")),
+                        condition=row.get("condition") or None,
+                    )
+                )
+    except Exception:
+        return []
+    return points
+
+
+def _hydrate_series_from_export(
+    series: WeatherSeries, path: Path
+) -> Optional[WeatherSeries]:
+    points = _load_weather_points_from_csv(path)
+    if not points:
+        return None
+    start_date = points[0].timestamp.date()
+    end_date = points[-1].timestamp.date()
+    return series.model_copy(
+        update={"points": points, "start_date": start_date, "end_date": end_date}
+    )
+
+
+def _trim_weather_series_for_cache(series: WeatherSeries) -> WeatherSeries:
+    if series.points:
+        return series.model_copy(update={"points": []})
+    return series
+
+
 def _ensure_weather_export(
     series: WeatherSeries,
 ) -> Tuple[str, str, WeatherSeries, bool]:
     updated = False
     file_id = series.export_file_id
     export_path = series.export_path
-    path = None
-    if file_id:
-        try:
-            path = resolve_export_path(file_id)
-        except ValueError:
-            path = None
-    if path and path.exists():
+    file_id, path = _resolve_existing_export(series)
+    if path:
         current_path = str(path)
+        if file_id and series.export_file_id != file_id:
+            series = series.model_copy(update={"export_file_id": file_id})
+            updated = True
         if export_path != current_path:
             series = series.model_copy(update={"export_path": current_path})
             updated = True
@@ -349,6 +490,13 @@ def _ensure_weather_export(
     )
     updated = True
     return file_id, export_path, series, updated
+
+
+def _build_download_url(file_id: str, *, base_url: Optional[str]) -> str:
+    if not base_url:
+        return f"/api/v1/download/{file_id}"
+    base = base_url.rstrip("/")
+    return f"{base}/api/v1/download/{file_id}"
 
 
 def _summarize_weather_series(series: WeatherSeries) -> str:
@@ -396,18 +544,20 @@ def _summarize_weather_series(series: WeatherSeries) -> str:
         )[:3],
     }
 
-    fallback_parts = [f"{stats['region']} 未来{stats['days']}天"]
+    summary_parts = [f"{stats['region']} 未来{stats['days']}天"]
     if stats["temp_min"] is not None and stats["temp_max"] is not None:
-        fallback_parts.append(
-            f"气温 {stats['temp_min']}~{stats['temp_max']}°C"
-        )
+        summary_parts.append(f"气温 {stats['temp_min']}~{stats['temp_max']}°C")
     if stats["precip_total"] is not None:
-        fallback_parts.append(f"累计降水 {stats['precip_total']}mm")
+        summary_parts.append(f"累计降水 {stats['precip_total']}mm")
     if stats["conditions"]:
-        fallback_parts.append(
+        summary_parts.append(
             "主要天气: " + "、".join([item[0] for item in stats["conditions"]])
         )
-    fallback = "；".join(fallback_parts)
+    template_summary = "；".join(summary_parts)
+    cfg = get_config()
+    mode = (cfg.weather_summary_mode or "template").lower()
+    if mode != "llm":
+        return template_summary
 
     try:
         model = get_chat_model()
@@ -425,8 +575,8 @@ def _summarize_weather_series(series: WeatherSeries) -> str:
         if isinstance(content, str) and content.strip():
             return content.strip()
     except Exception:
-        return fallback
-    return fallback
+        return template_summary
+    return template_summary
 
 
 def _lookup_91weather(
@@ -434,8 +584,23 @@ def _lookup_91weather(
     *,
     api_url: Optional[str],
 ) -> ToolInvocation:
+    cfg = get_config()
     if not query or query.lat is None or query.lon is None:
-        return _build_lat_lon_followup(query)
+        if query and query.region:
+            geocode = _geocode_with_amap(
+                query.region,
+                api_key=cfg.amap_api_key,
+                geocode_url=cfg.amap_geocode_url,
+            )
+            if geocode:
+                query = query.model_copy(
+                    update={"lat": geocode["lat"], "lon": geocode["lon"]}
+                )
+                formatted = geocode.get("formatted_address")
+                if formatted and formatted != query.region:
+                    query = query.model_copy(update={"region": formatted})
+        if not query or query.lat is None or query.lon is None:
+            return _build_lat_lon_followup(query)
     cache_key = make_weather_grid_cache_key(
         query.lat,
         query.lon,
@@ -443,33 +608,63 @@ def _lookup_91weather(
     )
     cached_series = get_weather_series(cache_key)
     if cached_series:
-        series = cached_series
-        updated = False
-        if query.region and cached_series.region != query.region:
-            series = cached_series.model_copy(
-                update={"region": query.region, "summary": None}
+        existing_file_id, existing_path = _resolve_existing_export(cached_series)
+        if not existing_path:
+            cached_series = None
+        else:
+            updated = False
+            response_series = cached_series
+            hydrated = _hydrate_series_from_export(
+                cached_series, existing_path
             )
-            updated = True
-        summary = series.summary
-        if not summary:
-            summary = _summarize_weather_series(series)
-            series = series.model_copy(update={"summary": summary})
-            updated = True
-        file_id, _, series, export_updated = _ensure_weather_export(series)
-        if export_updated:
-            updated = True
-        if updated:
-            store_weather_series(series, cache_key=cache_key)
-        download_url = f"/api/v1/download/{file_id}"
-        data_payload = series.model_dump(mode="json")
-        data_payload["summary"] = summary
-        data_payload["download_url"] = download_url
-        message = f"{summary}\n下载链接: {download_url}"
-        return ToolInvocation(
-            name="weather_lookup",
-            message=message,
-            data=data_payload,
-        )
+            if hydrated:
+                response_series = hydrated
+            if query.region and cached_series.region != query.region:
+                cached_series = cached_series.model_copy(
+                    update={"region": query.region, "summary": None}
+                )
+                response_series = response_series.model_copy(
+                    update={"region": query.region, "summary": None}
+                )
+                updated = True
+            summary = cached_series.summary
+            if not summary:
+                summary = _summarize_weather_series(response_series)
+                cached_series = cached_series.model_copy(
+                    update={"summary": summary}
+                )
+                response_series = response_series.model_copy(
+                    update={"summary": summary}
+                )
+                updated = True
+            if cached_series.export_file_id and not response_series.export_file_id:
+                response_series = response_series.model_copy(
+                    update={
+                        "export_file_id": cached_series.export_file_id,
+                        "export_path": cached_series.export_path,
+                    }
+                )
+            file_id, _, export_series, export_updated = _ensure_weather_export(
+                response_series
+            )
+            response_series = export_series
+            if export_updated:
+                updated = True
+            if updated:
+                cache_series = _trim_weather_series_for_cache(export_series)
+                store_weather_series(cache_series, cache_key=cache_key)
+            download_url = _build_download_url(
+                file_id, base_url=cfg.public_base_url
+            )
+            data_payload = response_series.model_dump(mode="json")
+            data_payload["summary"] = summary
+            data_payload["download_url"] = download_url
+            message = f"{summary}\n下载链接: {download_url}"
+            return ToolInvocation(
+                name="weather_lookup",
+                message=message,
+                data=data_payload,
+            )
     url = api_url or "https://data-api.91weather.com/Zoomlion/higf_day_plus"
     params = {"lat": query.lat, "lon": query.lon}
     try:
@@ -488,8 +683,9 @@ def _lookup_91weather(
         summary = _summarize_weather_series(series)
         series = series.model_copy(update={"summary": summary})
         file_id, _, series, _ = _ensure_weather_export(series)
-        store_weather_series(series, cache_key=cache_key)
-        download_url = f"/api/v1/download/{file_id}"
+        cache_series = _trim_weather_series_for_cache(series)
+        store_weather_series(cache_series, cache_key=cache_key)
+        download_url = _build_download_url(file_id, base_url=cfg.public_base_url)
         data_payload = series.model_dump(mode="json")
         data_payload["summary"] = summary
         data_payload["download_url"] = download_url

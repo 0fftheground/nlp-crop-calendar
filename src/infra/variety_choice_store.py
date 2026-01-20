@@ -111,7 +111,7 @@ class SqliteVarietyChoiceStore(VarietyChoiceStore):
             "region_choice": region_choice,
             "updated_at": int(time.time()),
         }
-        payload_json = json.dumps(payload, ensure_ascii=True, default=str)
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         expires_at = int(time.time()) + self._ttl_seconds
         with self._lock, self._connect() as conn:
             conn.execute(

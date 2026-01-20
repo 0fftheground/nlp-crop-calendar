@@ -85,10 +85,10 @@ class SqliteInteractionStore(InteractionStore):
     def record(self, request: UserRequest, response: HandleResponse, latency_ms: int) -> None:
         created_at = int(time.time())
         request_json = json.dumps(
-            request.model_dump(mode="json"), ensure_ascii=True, default=str
+            request.model_dump(mode="json"), ensure_ascii=False, default=str
         )
         response_json = json.dumps(
-            response.model_dump(mode="json"), ensure_ascii=True, default=str
+            response.model_dump(mode="json"), ensure_ascii=False, default=str
         )
         session_id = request.session_id or request.user_id or "default"
         with self._lock, self._connect() as conn:

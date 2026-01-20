@@ -1,4 +1,5 @@
 import os
+import re
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -13,12 +14,26 @@ _AUTH_PASSWORD_ENV = "CHAINLIT_AUTH_PASSWORD"
 _SESSION_ID_KEY = "session_id"
 _CLIENT_ID_KEY = "client_id"
 _USER_ID_KEY = "user_id"
+_DOWNLOAD_PATTERN = re.compile(r"(^|\s)(/api/v1/download/[0-9a-f]{32})")
 
 def _trust_env_for_backend(url: str) -> bool:
     host = urlparse(url).hostname
     if host in {"localhost", "127.0.0.1", "::1"}:
         return False
     return True
+
+
+def _expand_download_links(message: str) -> str:
+    if not message:
+        return message
+    base_url = (BACKEND_URL or "").rstrip("/")
+    if not base_url:
+        return message
+
+    def _replace(match: re.Match) -> str:
+        return f"{match.group(1)}{base_url}{match.group(2)}"
+
+    return _DOWNLOAD_PATTERN.sub(_replace, message)
 
 
 def _load_auth_users() -> dict[str, str]:
@@ -169,7 +184,8 @@ async def on_message(message: cl.Message):
     mode = data.get("mode")
     if mode == "tool" and data.get("tool"):
         tool = data["tool"]
-        content = f"工具 `{tool.get('name')}` 已执行：\n{tool.get('message')}"
+        message_text = _expand_download_links(tool.get("message") or "")
+        content = f"工具 `{tool.get('name')}` 已执行：\n{message_text}"
         await cl.Message(content=content).send()
         return
     if mode == "none":
@@ -179,7 +195,7 @@ async def on_message(message: cl.Message):
         return
 
     plan = data.get("plan") or {}
-    content = plan.get("message", "")
+    content = _expand_download_links(plan.get("message", ""))
     trace = "\n".join(plan.get("trace", []))
     await cl.Message(content=content or "未生成计划。").send()
     if trace and ("还需要补充" in content or "需要补充" in content):

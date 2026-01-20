@@ -55,6 +55,18 @@ class AppConfig(BaseSettings):
     weather_api_key: Optional[str] = Field(
         default=None, validation_alias="WEATHER_API_KEY"
     )
+    weather_summary_mode: str = Field(
+        default="template", validation_alias="WEATHER_SUMMARY_MODE"
+    )
+    public_base_url: Optional[str] = Field(
+        default=None, validation_alias="PUBLIC_BASE_URL"
+    )
+    amap_api_key: Optional[str] = Field(
+        default=None, validation_alias="AMAP_API_KEY"
+    )
+    amap_geocode_url: Optional[str] = Field(
+        default=None, validation_alias="AMAP_GEOCODE_URL"
+    )
     growth_stage_provider: str = Field(
         default="mock", validation_alias="GROWTH_STAGE_PROVIDER"
     )
@@ -117,6 +129,12 @@ class AppConfig(BaseSettings):
     memory_store_ttl_days: int = Field(
         default=30, validation_alias="MEMORY_STORE_TTL_DAYS"
     )
+    geocode_cache_ttl_days: int = Field(
+        default=30, validation_alias="GEOCODE_CACHE_TTL_DAYS"
+    )
+    geocode_cache_path: Optional[str] = Field(
+        default=None, validation_alias="GEOCODE_CACHE_PATH"
+    )
 
     @field_validator("llm_provider", mode="after")
     @classmethod
@@ -133,6 +151,7 @@ class AppConfig(BaseSettings):
         "weather_provider",
         "growth_stage_provider",
         "recommendation_provider",
+        "weather_summary_mode",
         mode="after",
     )
     @classmethod

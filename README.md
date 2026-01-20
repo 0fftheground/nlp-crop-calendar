@@ -33,6 +33,10 @@ EXTRACTOR_API_KEY=
 EXTRACTOR_API_BASE=
 EXTRACTOR_TEMPERATURE=0.0
 DEFAULT_REGION=global
+FASTAPI_PORT=8000
+CHAINLIT_PORT=8001
+HOST=0.0.0.0
+PUBLIC_BASE_URL=http://127.0.0.1:8000
 VARIETY_PROVIDER=local
 VARIETY_API_URL=
 VARIETY_API_KEY=
@@ -49,6 +53,17 @@ RECOMMENDATION_API_KEY=
 If `EXTRACTOR_API_KEY` is empty, the extractor falls back to `OPENAI_API_KEY`.
 Tools default to `mock`. Variety lookup reads local SQLite by default (`VARIETY_PROVIDER=local`); set `VARIETY_PROVIDER=intranet` to switch to intranet APIs. Other tools can set `*_PROVIDER=intranet` and configure `*_API_URL`/`*_API_KEY` to use intranet APIs; growth stage prediction must use `GROWTH_STAGE_PROVIDER=intranet`.
 To use the external 15-day weather API, set `WEATHER_PROVIDER=91weather` and ensure the request includes `lat`/`lon` (the tool accepts `WeatherQueryInput` JSON with `lat`/`lon`).
+
+## External Access
+To allow other machines to access the app and download CSV exports, set:
+- `HOST=0.0.0.0` to listen on all interfaces
+- `PUBLIC_BASE_URL=http://<your-host>:8000` so download links are absolute
+
+Start with:
+```bash
+python run_all.py
+```
+Ensure your firewall/security group allows access to ports `8000` (FastAPI) and `8001` (Chainlit).
 
 ## Development Notes
 - `src/agent/router.py` + `src/agent/planner.py` implement Planner+Executor logic; you can adjust the planner prompt or add tools to extend capability (prompt lives in `src/prompts/planner.py`).

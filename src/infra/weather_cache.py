@@ -108,7 +108,9 @@ class SqliteWeatherCacheStore(WeatherCacheStore):
 
     def set(self, cache_key: str, series: WeatherSeries) -> None:
         expires_at = int(time.time()) + self._ttl_seconds
-        payload_json = json.dumps(series.model_dump(mode="json"), ensure_ascii=True)
+        payload_json = json.dumps(
+            series.model_dump(mode="json"), ensure_ascii=False
+        )
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO weather_cache (cache_key, payload, expires_at) "

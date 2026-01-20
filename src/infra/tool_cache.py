@@ -110,7 +110,7 @@ class SqliteToolResultCache(ToolResultCache):
     def set(self, tool_name: str, provider: str, prompt: str, payload: dict) -> None:
         cache_key = _make_cache_key(tool_name, provider, prompt)
         expires_at = int(time.time()) + self._ttl_seconds
-        payload_json = json.dumps(payload, ensure_ascii=True, default=str)
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO tool_cache (cache_key, tool_name, payload, expires_at) "

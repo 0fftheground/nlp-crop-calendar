@@ -99,7 +99,7 @@ class SqlitePendingFollowupStore(PendingFollowupStore):
 
     def set(self, session_id: str, payload: dict) -> None:
         expires_at = int(time.time()) + self._ttl_seconds
-        payload_json = json.dumps(payload, ensure_ascii=True, default=str)
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO pending_followups (session_id, payload, expires_at) "
