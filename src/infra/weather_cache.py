@@ -158,7 +158,7 @@ def _snap_to_grid(value: float, *, resolution: float) -> float:
 def make_weather_cache_key(query: WeatherQueryInput) -> str:
     payload = query.model_dump(mode="json")
     canonical = json.dumps(
-        payload, ensure_ascii=True, sort_keys=True, default=str
+        payload, ensure_ascii=False, sort_keys=True, default=str
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

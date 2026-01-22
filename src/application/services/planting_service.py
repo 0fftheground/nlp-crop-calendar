@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import Callable, Dict, Optional
 
 from ...domain.planting import extract_planting_details as _extract_planting_details
-from ...infra.variety_store import retrieve_variety_candidates
+from ...infra.variety_store import find_exact_variety_in_text
 from ...schemas import PlantingDetailsDraft
 
 
 def _resolve_variety_candidates(prompt: str) -> list[str]:
-    return retrieve_variety_candidates(prompt, limit=1)
+    exact = find_exact_variety_in_text(prompt)
+    return [exact] if exact else []
 
 
 def extract_planting_details(

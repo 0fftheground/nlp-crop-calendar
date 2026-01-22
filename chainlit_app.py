@@ -104,6 +104,19 @@ def _resolve_thread_id_from_resume(thread: object) -> Optional[str]:
     return None
 
 
+async def _clear_status_message(status_msg: Optional[cl.Message]) -> None:
+    if not status_msg:
+        return
+    try:
+        await status_msg.remove()
+        return
+    except Exception:
+        try:
+            await status_msg.update(content="")
+        except Exception:
+            return
+
+
 def _ensure_session_ids(thread_id: Optional[str] = None) -> tuple[str, str]:
     user_id = cl.user_session.get(_USER_ID_KEY)
     if not user_id:
@@ -159,7 +172,7 @@ async def on_message(message: cl.Message):
         await cl.Message(content="请输入有效的问题。").send()
         return
 
-    await cl.Message(content="正在分析，请稍候...").send()
+    status_msg = await cl.Message(content="正在分析，请稍候...").send()
     try:
         session_id, user_id = _ensure_session_ids()
         async with httpx.AsyncClient(
@@ -178,9 +191,11 @@ async def on_message(message: cl.Message):
             response.raise_for_status()
             data = response.json()
     except Exception as exc:
+        await _clear_status_message(status_msg)
         await cl.Message(content=f"请求失败: {exc}").send()
         return
 
+    await _clear_status_message(status_msg)
     mode = data.get("mode")
     if mode == "tool" and data.get("tool"):
         tool = data["tool"]

@@ -68,13 +68,19 @@ class AppConfig(BaseSettings):
         default=None, validation_alias="AMAP_GEOCODE_URL"
     )
     growth_stage_provider: str = Field(
-        default="mock", validation_alias="GROWTH_STAGE_PROVIDER"
+        default="local", validation_alias="GROWTH_STAGE_PROVIDER"
     )
     growth_stage_api_url: Optional[str] = Field(
         default=None, validation_alias="GROWTH_STAGE_API_URL"
     )
     growth_stage_api_key: Optional[str] = Field(
         default=None, validation_alias="GROWTH_STAGE_API_KEY"
+    )
+    growth_stage_gdd_path: Optional[str] = Field(
+        default=None, validation_alias="GROWTH_STAGE_GDD_PATH"
+    )
+    growth_stage_db_path: Optional[str] = Field(
+        default=None, validation_alias="GROWTH_STAGE_DB_PATH"
     )
     recommendation_provider: str = Field(
         default="mock", validation_alias="RECOMMENDATION_PROVIDER"
@@ -100,6 +106,12 @@ class AppConfig(BaseSettings):
     )
     weather_cache_path: Optional[str] = Field(
         default=None, validation_alias="WEATHER_CACHE_PATH"
+    )
+    weather_archive_path: Optional[str] = Field(
+        default=None, validation_alias="WEATHER_ARCHIVE_PATH"
+    )
+    weather_archive_dir: Optional[str] = Field(
+        default=None, validation_alias="WEATHER_ARCHIVE_DIR"
     )
     weather_cache_max_items: int = Field(
         default=128, validation_alias="WEATHER_CACHE_MAX_ITEMS"

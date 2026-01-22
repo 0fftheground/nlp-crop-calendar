@@ -22,7 +22,12 @@ METHOD_KEYWORDS = {
     "机插": "transplanting",
 }
 DATE_PATTERN = re.compile(r"(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})")
-REGION_PATTERN = re.compile(r"(\w+[省市区县])")
+_REGION_SUFFIX_RE = re.compile(
+    r"[\u4e00-\u9fff]{2,8}(?:省|市|州|盟|地区|区|县)"
+)
+_REGION_INFIX_RE = re.compile(
+    r"(?:在|于|位于)([\u4e00-\u9fff]{2,8})(?:种植|种|播种|直播|栽培)"
+)
 
 VarietyResolver = Callable[[str], List[str]]
 
@@ -88,6 +93,20 @@ def _infer_variety_from_prompt(
     return candidates[0] if candidates else None
 
 
+def _infer_region_from_prompt(prompt: str) -> Optional[str]:
+    if not prompt:
+        return None
+    match = _REGION_SUFFIX_RE.search(prompt)
+    if match:
+        return match.group(0)
+    match = _REGION_INFIX_RE.search(prompt)
+    if match:
+        candidate = match.group(1)
+        if candidate and candidate not in CROP_KEYWORDS:
+            return candidate
+    return None
+
+
 def _is_known_variety(
     candidate: str, variety_resolver: Optional[VarietyResolver]
 ) -> bool:
@@ -124,14 +143,32 @@ def _apply_heuristics(
             data["sowing_date"] = date.fromisoformat(iso_string)
 
     if "region" not in data:
-        region_match = REGION_PATTERN.search(prompt)
-        if region_match:
-            data["region"] = region_match.group(1)
+        region = _infer_region_from_prompt(prompt)
+        if region:
+            data["region"] = region
 
     if "variety" not in data:
         variety = _infer_variety_from_prompt(prompt, variety_resolver)
         if variety:
             data["variety"] = variety
+
+
+def _normalize_variety_field(
+    data: Dict[str, object],
+    prompt: str,
+    variety_resolver: Optional[VarietyResolver],
+) -> None:
+    if not variety_resolver or not prompt:
+        return
+    candidate = _infer_variety_from_prompt(prompt, variety_resolver)
+    if not candidate:
+        return
+    current = data.get("variety")
+    if not isinstance(current, str) or not current.strip():
+        return
+    current = current.strip()
+    if candidate != current and candidate in prompt and current not in prompt:
+        data["variety"] = candidate
 
 
 def _sanitize_crop_field(
@@ -161,6 +198,26 @@ def _sanitize_crop_field(
         data.pop("crop", None)
 
 
+def _normalize_region_field(data: Dict[str, object]) -> None:
+    region = data.get("region")
+    if not isinstance(region, str):
+        return
+    text = region.strip()
+    if not text:
+        data.pop("region", None)
+        return
+    text = re.sub(r"^(?:我要在|我在|在|于|位于)", "", text)
+    match = _REGION_SUFFIX_RE.search(text)
+    if match:
+        data["region"] = match.group(0)
+        return
+    match = _REGION_INFIX_RE.search(text)
+    if match:
+        candidate = match.group(1)
+        if candidate and candidate not in CROP_KEYWORDS:
+            data["region"] = candidate
+
+
 def _apply_rice_default(data: Dict[str, object]) -> None:
     if data.get("crop"):
         return
@@ -184,14 +241,19 @@ def extract_planting_details(
             raise TypeError("llm_extract 必须返回包含字段的 dict。")
         data.update(raw_payload)
         _apply_heuristics(data, prompt, variety_resolver)
+        _normalize_variety_field(data, prompt, variety_resolver)
         _sanitize_crop_field(data, prompt, variety_resolver)
+        _normalize_region_field(data)
         _apply_rice_default(data)
+        data.pop("variety", None)
         data.setdefault("confidence", 0.9)
         return PlantingDetailsDraft(**data)
 
     _apply_heuristics(data, prompt, variety_resolver)
     _sanitize_crop_field(data, prompt, variety_resolver)
+    _normalize_region_field(data)
     _apply_rice_default(data)
+    data.pop("variety", None)
     data["confidence"] = 0.4 if len(data) == 1 else 0.75
     return PlantingDetailsDraft(**data)
 

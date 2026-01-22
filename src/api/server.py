@@ -22,6 +22,11 @@ from ..observability.logging_utils import (
     set_trace_id,
     summarize_text,
 )
+from ..observability.otel import (
+    init_otel,
+    instrument_fastapi,
+    instrument_httpx,
+)
 from ..schemas.models import HandleResponse, UserRequest
 
 
@@ -34,6 +39,7 @@ def get_router():
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_logging(log_path=str(_OBS_LOG_PATH))
+    init_otel()
     try:
         _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         _LOG_PATH.touch(exist_ok=True)
@@ -45,6 +51,8 @@ async def lifespan(_: FastAPI):
         log_path=str(_LOG_PATH),
         observability_log=str(_OBS_LOG_PATH),
     )
+    instrument_fastapi(app)
+    instrument_httpx()
     yield
 
 

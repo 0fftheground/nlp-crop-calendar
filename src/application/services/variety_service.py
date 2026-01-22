@@ -11,13 +11,11 @@ from pydantic import BaseModel
 from ...domain.planting import DEFAULT_CROP
 from ...infra.config import get_config
 from ...infra.llm import get_chat_model
-from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ...infra.variety_choice_store import VarietyChoice, get_variety_choice_store
 from ...infra.variety_store import extract_variety_tokens, retrieve_variety_candidates
 from ...observability.logging_utils import log_event
 from ...prompts.variety_match import (
     VARIETY_MATCH_SYSTEM_PROMPT,
-    VARIETY_NAME_PICKER_SYSTEM_PROMPT,
 )
 from ...schemas.models import ToolInvocation
 
@@ -36,6 +34,9 @@ VARIETY_DB_FIELD_LABELS = {
 }
 _UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _FOLLOWUP_INDEX_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
+_VARIETY_HINT_RE = re.compile(
+    r"(?:种植|种|播种|品种)([A-Za-z0-9\u4e00-\u9fff]{2,10})"
+)
 _FOLLOWUP_CN_MAP = {
     "一": 1,
     "二": 2,
@@ -73,12 +74,6 @@ class VarietyMatchDecision(BaseModel):
     reason: Optional[str] = None
 
 
-class VarietyNameDecision(BaseModel):
-    index: int
-    reason: Optional[str] = None
-    confidence: Optional[float] = None
-
-
 def _extract_user_id(prompt: str) -> Optional[str]:
     payload = _load_prompt_payload(prompt.strip())
     if not isinstance(payload, dict):
@@ -106,6 +101,22 @@ def _extract_query_source(prompt: str) -> str:
                     if isinstance(value, str) and value.strip():
                         return value.strip()
     return prompt
+
+
+def _extract_variety_hint(prompt: str) -> Optional[str]:
+    if not prompt:
+        return None
+    normalized = _normalize_variety_prompt(prompt) or prompt
+    match = _VARIETY_HINT_RE.search(normalized)
+    if match:
+        hint = match.group(1)
+        return hint.strip() if hint else None
+    return None
+
+
+def _is_workflow_prompt(prompt: str) -> bool:
+    payload = _load_prompt_payload(prompt.strip())
+    return isinstance(payload, dict) and isinstance(payload.get("planting"), dict)
 
 
 def _extract_followup_answer(prompt: str) -> str:
@@ -190,36 +201,6 @@ def _is_cancel_choice(prompt: str) -> bool:
     return False
 
 
-def _llm_choose_variety_name(
-    prompt: str, candidates: List[str]
-) -> Optional[VarietyNameDecision]:
-    if not prompt or not candidates:
-        return None
-    try:
-        llm = get_chat_model()
-    except Exception:
-        return None
-    payload = {"prompt": prompt, "candidates": candidates}
-    try:
-        chooser = llm.with_structured_output(VarietyNameDecision)
-        result = chooser.invoke(
-            [
-                ("system", VARIETY_NAME_PICKER_SYSTEM_PROMPT),
-                ("human", json.dumps(payload, ensure_ascii=True, default=str)),
-            ]
-        )
-        decision = (
-            result
-            if isinstance(result, VarietyNameDecision)
-            else VarietyNameDecision.model_validate(result)
-        )
-    except Exception:
-        return None
-    if decision.index < 0 or decision.index >= len(candidates):
-        return None
-    return decision
-
-
 def _extract_variety(prompt: str) -> Optional[str]:
     if not prompt:
         return None
@@ -229,19 +210,12 @@ def _extract_variety(prompt: str) -> Optional[str]:
     )
     if not candidates:
         return None
+    exact_matches = [name for name in candidates if name in normalized_prompt]
+    if exact_matches:
+        return max(exact_matches, key=len)
     if len(candidates) == 1:
         return candidates[0]
-    decision = _llm_choose_variety_name(normalized_prompt, candidates)
-    if decision:
-        selected = candidates[decision.index]
-        log_event(
-            "variety_name_llm_choice",
-            selected=selected,
-            reason=decision.reason,
-            confidence=decision.confidence,
-        )
-        return selected
-    return candidates[0]
+    return None
 
 
 def _infer_crop_and_variety(prompt: str) -> Tuple[str, str]:
@@ -397,6 +371,57 @@ def _resolve_followup_region(
     return None
 
 
+def _extract_region_hint(prompt: str) -> Optional[str]:
+    payload = _load_prompt_payload(prompt.strip())
+    if not isinstance(payload, dict):
+        return None
+    for key in ("region", "planting_region"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    planting = payload.get("planting")
+    if isinstance(planting, dict):
+        value = planting.get("region")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    followup = payload.get("followup")
+    if isinstance(followup, dict):
+        draft = followup.get("draft")
+        if isinstance(draft, dict):
+            value = draft.get("region")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _resolve_followup_record(payload: dict) -> Optional[int]:
+    followup = payload.get("followup")
+    if not isinstance(followup, dict):
+        return None
+    answer = followup.get("prompt")
+    if not isinstance(answer, str):
+        return None
+    answer = answer.strip()
+    if not answer:
+        return None
+    draft = followup.get("draft")
+    if not isinstance(draft, dict):
+        return None
+    record_candidates = draft.get("record_candidates")
+    if not isinstance(record_candidates, list) or not record_candidates:
+        return None
+    index = _parse_followup_index(answer)
+    if index is not None and 1 <= index <= len(record_candidates):
+        return index - 1
+    for idx, candidate in enumerate(record_candidates):
+        if candidate == answer:
+            return idx
+    for idx, candidate in enumerate(record_candidates):
+        if answer in candidate or candidate in answer:
+            return idx
+    return None
+
+
 def _extract_region_candidates(records: List[Dict[str, object]]) -> List[str]:
     regions: List[str] = []
     seen = set()
@@ -441,6 +466,61 @@ def _build_region_followup(
             },
             "followup_count": 0,
             "source": "candidate",
+        },
+    )
+
+
+def _build_record_candidate_label(record: Dict[str, object]) -> str:
+    fields = [
+        ("审定区域", record.get("审定区域")),
+        ("审定年份", record.get("审定年份")),
+        ("稻作类型", record.get("稻作类型")),
+        ("亚种类型", record.get("亚种类型")),
+        ("熟期", record.get("熟期")),
+        ("对照品种", record.get("对照品种")),
+    ]
+    parts = [f"{label}:{value}" for label, value in fields if value not in (None, "")]
+    return " | ".join(parts) if parts else "审定记录"
+
+
+def _build_record_followup(
+    prompt: str,
+    *,
+    variety: str,
+    records: List[Dict[str, object]],
+    raw_records: List[Dict[str, object]],
+) -> ToolInvocation:
+    record_candidates = [
+        _build_record_candidate_label(record) for record in records
+    ]
+    options = "\n".join(
+        f"{idx + 1}. {label}" for idx, label in enumerate(record_candidates)
+    )
+    message = (
+        f"品种 {variety} 未找到与种植地区匹配的审定记录，"
+        "请从以下记录中选择一条：\n"
+        f"{options}\n"
+        "回复序号确认要使用的审定记录。"
+    )
+    return ToolInvocation(
+        name="variety_lookup",
+        message=message,
+        data={
+            "query": prompt,
+            "variety": variety,
+            "record_candidates": record_candidates,
+            "matches": records,
+            "raw_matches": raw_records,
+            "missing_fields": ["approval_record"],
+            "draft": {
+                "variety": variety,
+                "record_candidates": record_candidates,
+                "records": records,
+                "raw_records": raw_records,
+                "query": prompt,
+            },
+            "followup_count": 0,
+            "source": "record_selection",
         },
     )
 
@@ -577,6 +657,18 @@ def _is_region_followup(payload: Optional[dict]) -> bool:
     return bool(draft.get("region_candidates"))
 
 
+def _is_record_followup(payload: Optional[dict]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    followup = payload.get("followup")
+    if not isinstance(followup, dict):
+        return False
+    draft = followup.get("draft")
+    if not isinstance(draft, dict):
+        return False
+    return bool(draft.get("record_candidates"))
+
+
 def _is_exact_variety_match(variety: str, prompt: str) -> bool:
     if not variety or not prompt:
         return False
@@ -625,9 +717,12 @@ def _extract_region_tokens(
 ) -> List[str]:
     tokens: List[str] = []
     if prompt:
-        tokens.extend(
-            re.findall(r"[\u4e00-\u9fff]{2,8}(?:省|市|州|盟|地区|区|县)", prompt)
-        )
+        region_hint = _extract_region_hint(prompt)
+        if region_hint:
+            for token in re.split(r"[，,、/\\s]+", region_hint):
+                token = token.strip()
+                if token:
+                    tokens.append(token)
     approval_regions = {
         str(record.get("审定区域") or "").strip()
         for record in records
@@ -698,6 +793,29 @@ def _pick_latest_year_record(
     return best_index
 
 
+def _build_llm_record_candidates(
+    records: List[Dict[str, object]],
+    indices: Optional[List[int]] = None,
+) -> List[Dict[str, object]]:
+    candidates: List[Dict[str, object]] = []
+    for idx, record in enumerate(records):
+        if indices and idx not in indices:
+            continue
+        candidates.append(
+            {
+                "index": idx,
+                "审定区域": record.get("审定区域"),
+                "适种地区": record.get("适种地区"),
+                "审定年份": record.get("审定年份"),
+                "稻作类型": record.get("稻作类型"),
+                "亚种类型": record.get("亚种类型"),
+                "熟期": record.get("熟期"),
+                "对照品种": record.get("对照品种"),
+            }
+        )
+    return candidates
+
+
 def _llm_choose_variety_record(
     prompt: str,
     candidates: List[Dict[str, object]],
@@ -718,7 +836,7 @@ def _llm_choose_variety_record(
         result = chooser.invoke(
             [
                 ("system", system_prompt),
-                ("human", json.dumps(payload, ensure_ascii=True, default=str)),
+                ("human", json.dumps(payload, ensure_ascii=False, default=str)),
             ]
         )
         decision = (
@@ -728,7 +846,15 @@ def _llm_choose_variety_record(
         )
     except Exception:
         return None
-    if decision.index < 0 or decision.index >= len(candidates):
+    if decision.index < 0:
+        return None
+    candidate_indices = {
+        candidate.get("index")
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and isinstance(candidate.get("index"), int)
+    }
+    if decision.index not in candidate_indices:
         return None
     return decision
 
@@ -748,19 +874,7 @@ def _select_best_variety_record(
             idx = best_indices[0]
             return records[idx], "规则匹配", idx
         if max_score > 0 and len(best_indices) > 1:
-            candidates = [
-                {
-                    "index": i,
-                    "审定区域": records[i].get("审定区域"),
-                    "适种地区": records[i].get("适种地区"),
-                    "审定年份": records[i].get("审定年份"),
-                    "稻作类型": records[i].get("稻作类型"),
-                    "亚种类型": records[i].get("亚种类型"),
-                    "熟期": records[i].get("熟期"),
-                    "对照品种": records[i].get("对照品种"),
-                }
-                for i in best_indices
-            ]
+            candidates = _build_llm_record_candidates(records, best_indices)
             decision = _llm_choose_variety_record(
                 prompt, candidates, region_tokens
             )
@@ -780,18 +894,9 @@ def _select_best_variety_record(
 
 
 def lookup_variety(prompt: str) -> ToolInvocation:
-    cfg = get_config()
-    provider = normalize_provider(cfg.variety_provider)
-    intranet = maybe_intranet_tool(
-        "variety_lookup",
-        prompt,
-        provider,
-        cfg.variety_api_url,
-        cfg.variety_api_key,
-    )
-    if intranet:
-        return intranet
     query_source = _extract_query_source(prompt)
+    prompt_is_workflow = _is_workflow_prompt(prompt)
+    # Allow user to reset stored choice and re-select.
     cancel_choice = _is_cancel_choice(prompt)
     if cancel_choice:
         _clear_choice(prompt)
@@ -799,30 +904,133 @@ def lookup_variety(prompt: str) -> ToolInvocation:
         if followup:
             return followup
     stored_choice = None if cancel_choice else _get_choice_from_store(prompt)
-    confirmed_candidate = _extract_confirmed_candidate(prompt)
+    explicit_candidate = _extract_confirmed_candidate(prompt)
+    confirmed_candidate = explicit_candidate
     used_stored_choice = False
+    # Use stored choice only when user hasn't confirmed a new one.
     if confirmed_candidate is None and stored_choice:
-        confirmed_candidate = stored_choice.variety
-        used_stored_choice = True
+        if not prompt_is_workflow or _is_exact_variety_match(
+            stored_choice.variety, prompt
+        ):
+            confirmed_candidate = stored_choice.variety
+            used_stored_choice = True
     records, raw_records = _lookup_variety_records(
         prompt, confirmed_candidate=confirmed_candidate
     )
     if records:
         payload_data = _load_prompt_payload(prompt.strip())
         is_region_followup = _is_region_followup(payload_data)
+        is_record_followup = _is_record_followup(payload_data)
         variety = (
             records[0].get("品种名称")
             or _extract_variety(prompt)
             or "未知"
         )
+        if is_record_followup and isinstance(payload_data, dict):
+            followup = payload_data.get("followup")
+            draft = followup.get("draft") if isinstance(followup, dict) else {}
+            if not isinstance(draft, dict):
+                draft = {}
+            record_index = _resolve_followup_record(payload_data)
+            records_from_draft = (
+                draft.get("records")
+                if isinstance(draft.get("records"), list)
+                else records
+            )
+            raw_from_draft = (
+                draft.get("raw_records")
+                if isinstance(draft.get("raw_records"), list)
+                else raw_records
+            )
+            if record_index is None or record_index >= len(records_from_draft):
+                return _build_record_followup(
+                    query_source,
+                    variety=variety,
+                    records=records_from_draft,
+                    raw_records=raw_from_draft,
+                )
+            selected = records_from_draft[record_index]
+            raw_selected = (
+                raw_from_draft[record_index]
+                if record_index < len(raw_from_draft)
+                else None
+            )
+            approval_regions = sorted(
+                {
+                    r.get("审定区域")
+                    for r in records_from_draft
+                    if r.get("审定区域")
+                }
+            )
+            region_note = (
+                f"（{len(approval_regions)}个区域）" if approval_regions else ""
+            )
+            detail = _format_variety_record(selected)
+            payload = {
+                "query": query_source,
+                "crop": DEFAULT_CROP,
+                "variety": variety,
+                "selected": selected,
+                "raw_selected": raw_selected,
+                "selection_reason": "用户选择",
+                "matches": records_from_draft,
+                "raw_matches": raw_from_draft,
+                "region_candidates": _extract_region_candidates(records_from_draft),
+                "region_choice": None,
+                "source": "sqlite",
+            }
+            if detail:
+                message = (
+                    f"已返回品种 {variety} 的审定信息{region_note}。\n{detail}"
+                )
+            else:
+                message = f"已返回品种 {variety} 的审定信息{region_note}。"
+            if used_stored_choice:
+                message = (
+                    f"{message}\n已默认使用上次选择：{variety}。"
+                    "如需更换，请回复“更换”。"
+                )
+                payload["choice_hint"] = True
+                payload["options"] = ["更换", "重新选择"]
+            if variety and variety != "未知":
+                _store_choice(prompt, variety, None)
+            return ToolInvocation(
+                name="variety_lookup",
+                message=message,
+                data=payload,
+            )
         if (
-            confirmed_candidate is None
+            explicit_candidate is None
             and not is_region_followup
             and not _is_exact_variety_match(variety, prompt)
         ):
-            followup = _build_variety_followup(prompt)
+            record_candidates = sorted(
+                {
+                    r.get("品种名称")
+                    for r in records
+                    if r.get("品种名称")
+                }
+            )
+            followup = (
+                _build_variety_followup_with_candidates(
+                    query_source, record_candidates
+                )
+                or _build_variety_followup(prompt)
+            )
             if followup:
                 return followup
+            if _is_workflow_prompt(prompt):
+                hint = _extract_variety_hint(query_source)
+                if hint:
+                    candidates = retrieve_variety_candidates(
+                        hint, limit=5, threshold=0.45, semantic=True
+                    )
+                    followup = _build_variety_followup_with_candidates(
+                        query_source, candidates
+                    )
+                    if followup:
+                        return followup
+                return _build_variety_open_followup(prompt)
         region_candidates = _extract_region_candidates(records)
         region_choice = None
         region_confirmed = False
@@ -840,6 +1048,22 @@ def lookup_variety(prompt: str) -> ToolInvocation:
                 region_choice = stored_region
                 region_confirmed = True
         region_tokens = _extract_region_tokens(prompt, records)
+        llm_selected_index: Optional[int] = None
+        llm_selected_reason: Optional[str] = None
+        if region_choice is None and region_tokens and len(records) > 1:
+            llm_candidates = _build_llm_record_candidates(records)
+            decision = _llm_choose_variety_record(
+                prompt, llm_candidates, region_tokens
+            )
+            if decision:
+                llm_selected_index = decision.index
+                llm_selected_reason = decision.reason or "LLM 匹配"
+                log_event(
+                    "variety_match_llm_choice",
+                    selected_index=llm_selected_index,
+                    reason=llm_selected_reason,
+                )
+        # If multiple approval regions and no hint, ask user to choose.
         if (
             region_choice is None
             and not region_tokens
@@ -848,6 +1072,19 @@ def lookup_variety(prompt: str) -> ToolInvocation:
             return _build_region_followup(
                 prompt, variety=variety, region_candidates=region_candidates
             )
+        if region_choice is None and region_tokens and llm_selected_index is None:
+            scored = [
+                (_score_record_by_region(record, region_tokens), idx)
+                for idx, record in enumerate(records)
+            ]
+            max_score = max(score for score, _ in scored) if scored else 0
+            if max_score == 0:
+                return _build_record_followup(
+                    query_source,
+                    variety=variety,
+                    records=records,
+                    raw_records=raw_records,
+                )
         selected_records = records
         selected_raw_records = raw_records
         selection_prompt = prompt
@@ -865,17 +1102,46 @@ def lookup_variety(prompt: str) -> ToolInvocation:
                     )
             else:
                 region_choice = None
-        selected, reason, selected_index = _select_best_variety_record(
-            selection_prompt, selected_records
-        )
+        if llm_selected_index is not None:
+            selected_index = llm_selected_index
+            selected = selected_records[selected_index]
+            reason = llm_selected_reason or "LLM 匹配"
+        else:
+            selected, reason, selected_index = _select_best_variety_record(
+                selection_prompt, selected_records
+            )
         variety = selected.get("品种名称") or _extract_variety(prompt) or "未知"
         if (
-            confirmed_candidate is None
+            explicit_candidate is None
             and not _is_exact_variety_match(variety, prompt)
         ):
-            followup = _build_variety_followup(prompt)
+            record_candidates = sorted(
+                {
+                    r.get("品种名称")
+                    for r in selected_records
+                    if r.get("品种名称")
+                }
+            )
+            followup = (
+                _build_variety_followup_with_candidates(
+                    query_source, record_candidates
+                )
+                or _build_variety_followup(prompt)
+            )
             if followup:
                 return followup
+            if _is_workflow_prompt(prompt):
+                hint = _extract_variety_hint(query_source)
+                if hint:
+                    candidates = retrieve_variety_candidates(
+                        hint, limit=5, threshold=0.45, semantic=True
+                    )
+                    followup = _build_variety_followup_with_candidates(
+                        query_source, candidates
+                    )
+                    if followup:
+                        return followup
+                return _build_variety_open_followup(prompt)
         approval_regions = sorted(
             {
                 r.get("审定区域")
@@ -924,6 +1190,7 @@ def lookup_variety(prompt: str) -> ToolInvocation:
             )
             payload["choice_hint"] = True
             payload["options"] = ["更换", "重新选择"]
+        # Persist confirmed choice for later reuse.
         if variety and variety != "未知":
             _store_choice(
                 prompt,
@@ -938,6 +1205,18 @@ def lookup_variety(prompt: str) -> ToolInvocation:
     followup = _build_variety_followup(prompt)
     if followup:
         return followup
+    if _is_workflow_prompt(prompt):
+        hint = _extract_variety_hint(query_source)
+        if hint:
+            candidates = retrieve_variety_candidates(
+                hint, limit=5, threshold=0.45, semantic=True
+            )
+            followup = _build_variety_followup_with_candidates(
+                query_source, candidates
+            )
+            if followup:
+                return followup
+        return _build_variety_open_followup(prompt)
     crop, variety = _infer_crop_and_variety(prompt)
     payload = {
         "query": prompt,
@@ -981,6 +1260,50 @@ def _build_variety_followup(prompt: str) -> Optional[ToolInvocation]:
             "candidates": candidates,
             "missing_fields": ["variety"],
             "draft": {"candidates": candidates},
+            "followup_count": 0,
+            "source": "candidate",
+        },
+    )
+
+
+def _build_variety_followup_with_candidates(
+    query: str, candidates: List[str]
+) -> Optional[ToolInvocation]:
+    cleaned = [str(item).strip() for item in candidates if str(item).strip()]
+    if not cleaned:
+        return None
+    options = "\n".join(
+        f"{idx + 1}. {name}" for idx, name in enumerate(cleaned)
+    )
+    message = (
+        "未找到完全匹配的品种。你是不是想查询以下品种：\n"
+        f"{options}\n"
+        "请回复序号或品种名称。"
+    )
+    return ToolInvocation(
+        name="variety_lookup",
+        message=message,
+        data={
+            "query": query,
+            "candidates": cleaned,
+            "missing_fields": ["variety"],
+            "draft": {"candidates": cleaned},
+            "followup_count": 0,
+            "source": "candidate",
+        },
+    )
+
+
+def _build_variety_open_followup(prompt: str) -> ToolInvocation:
+    normalized_prompt = _normalize_variety_prompt(prompt) or prompt
+    message = "未找到完全匹配的品种，请补充完整品种名称。"
+    return ToolInvocation(
+        name="variety_lookup",
+        message=message,
+        data={
+            "query": normalized_prompt,
+            "missing_fields": ["variety"],
+            "draft": {"query": normalized_prompt},
             "followup_count": 0,
             "source": "candidate",
         },

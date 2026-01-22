@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import date
 from typing import Dict, List, Optional
 
 from ..schemas import PlantingDetails, Recommendation
@@ -7,9 +9,24 @@ from ..schemas import PlantingDetails, Recommendation
 
 CROP_CALENDAR_MISSING_PREFIX = "为了给出农事推荐，还需要补充："
 GROWTH_STAGE_MISSING_PREFIX = "生育期预测还需要补充："
-GROWTH_STAGE_INTRANET_REQUIRED_MESSAGE = (
-    "生育期预测需要内网接口，请配置 GROWTH_STAGE_PROVIDER=intranet。"
-)
+HISTORICAL_WEATHER_NOTE = "说明: 当前仅使用历史气象数据，结果仅适用于历史期。"
+FUTURE_WEATHER_WARNING = "提示: 暂不支持未来气象数据，无法获取未来日期对应气象。"
+GROWTH_STAGE_ORDER = [
+    "三叶一心",
+    "返青",
+    "分蘖期",
+    "有效分蘖终止期",
+    "拔节期",
+    "幼穗分化1期",
+    "幼穗分化2期",
+    "幼穗分化4期",
+    "孕穗期",
+    "破口期",
+    "始穗期",
+    "抽穗期",
+    "齐穗期",
+    "成熟期",
+]
 PLANTING_METHOD_LABELS = {
     "direct_seeding": "直播",
     "transplanting": "移栽",
@@ -60,6 +77,16 @@ def build_growth_stage_missing_question(
     )
 
 
+def build_future_weather_warning(
+    sowing_date: Optional[date],
+    *,
+    threshold_year: int = 2026,
+) -> Optional[str]:
+    if sowing_date and sowing_date.year >= threshold_year:
+        return FUTURE_WEATHER_WARNING
+    return None
+
+
 def format_crop_calendar_plan_message(
     planting: PlantingDetails,
     recommendations: List[Recommendation],
@@ -82,7 +109,11 @@ def format_crop_calendar_plan_message(
     info_parts.append(f"方式: {method_label}")
     info_parts.append(f"播种日期: {planting.sowing_date.isoformat()}")
 
-    lines = ["已生成农事推荐。", "种植信息: " + "，".join(info_parts)]
+    lines = ["已生成农事推荐。", HISTORICAL_WEATHER_NOTE]
+    warning = build_future_weather_warning(planting.sowing_date)
+    if warning:
+        lines.append(warning)
+    lines.append("种植信息: " + "，".join(info_parts))
     if weather_note:
         lines.append(f"气象信息: {weather_note}")
     if variety_note:
@@ -108,27 +139,42 @@ def format_growth_stage_message(
     weather_note: str = "",
     variety_note: str = "",
 ) -> str:
-    lines = [
-        "已完成生育期预测。",
-        (
-            f"作物: {planting.crop}，品种: {planting.variety or '未知'}，"
-            f"地区: {planting.region or '未知'}"
-        ),
-        f"播种日期: {planting.sowing_date.isoformat()}",
-    ]
+    info_parts = [f"作物: {planting.crop}"]
+    if planting.variety:
+        info_parts.append(f"品种: {planting.variety}")
+    if planting.region:
+        info_parts.append(f"地区: {planting.region}")
+    info_parts.append(f"播种日期: {planting.sowing_date.isoformat()}")
+    lines = ["种植信息: " + "，".join(info_parts)]
     predicted = stages.get("predicted_stage")
     next_stage = stages.get("estimated_next_stage")
-    if predicted or next_stage:
-        lines.append(f"当前阶段: {predicted}，预计下一阶段: {next_stage}")
     gdd = stages.get("gdd_accumulated")
     gdd_required = stages.get("gdd_required_maturity")
     base_temp = stages.get("base_temperature")
-    if gdd and gdd_required and base_temp:
-        lines.append(f"积温: {gdd}/{gdd_required} (基温 {base_temp})")
-    if weather_note:
-        lines.append(f"气象信息: {weather_note}")
-    if variety_note:
-        lines.append(f"品种信息: {variety_note}")
+    stage_dates = stages.get("stage_dates")
+    if stage_dates:
+        try:
+            payload = json.loads(stage_dates)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            ordered = []
+            seen = set()
+            for name in GROWTH_STAGE_ORDER:
+                value = payload.get(name)
+                if isinstance(value, str) and value:
+                    ordered.append((name, value))
+                    seen.add(name)
+            for name, value in payload.items():
+                if name in seen:
+                    continue
+                if isinstance(value, str) and value:
+                    ordered.append((name, value))
+            entries = ordered
+            if entries:
+                lines.append("生育期阶段日期:")
+                for name, value in entries:
+                    lines.append(f"{name}: {value}")
     return "\n".join(lines)
 
 

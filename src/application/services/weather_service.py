@@ -15,7 +15,11 @@ from ...infra.config import get_config
 from ...infra.export_store import resolve_export_path, write_export
 from ...infra.geocode_cache import get_geocode_cached, set_geocode_cached
 from ...infra.llm import get_chat_model
-from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
+from ...infra.tool_provider import normalize_provider
+from ...infra.weather_archive_store import (
+    build_weather_archive_path,
+    get_weather_archive_store,
+)
 from ...infra.weather_cache import (
     get_weather_series,
     make_weather_grid_cache_key,
@@ -54,6 +58,22 @@ def _parse_float(value: object) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_payload_date(value: object) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _extract_lat_lon_from_text(text: str) -> Optional[Tuple[float, float]]:
@@ -160,6 +180,10 @@ def _build_weather_query_from_payload(
     region = payload.get("region")
     lat = _parse_float(payload.get("lat") or payload.get("latitude") or payload.get("纬度"))
     lon = _parse_float(payload.get("lon") or payload.get("longitude") or payload.get("lng") or payload.get("经度"))
+    start_date = _parse_payload_date(
+        payload.get("start_date") or payload.get("start")
+    )
+    end_date = _parse_payload_date(payload.get("end_date") or payload.get("end"))
     if not region:
         if lat is not None and lon is not None:
             region = f"{lat},{lon}"
@@ -167,12 +191,20 @@ def _build_weather_query_from_payload(
             return None
     year = _parse_year(payload.get("year"))
     if year is None:
-        year = _parse_year(payload.get("start_date")) or _parse_year(payload.get("end_date"))
+        year = _parse_year(start_date) or _parse_year(end_date)
+    if start_date is not None:
+        year = start_date.year
+    elif end_date is not None:
+        year = end_date.year
     data: Dict[str, object] = {"region": region}
     if lat is not None:
         data["lat"] = lat
     if lon is not None:
         data["lon"] = lon
+    if start_date is not None:
+        data["start_date"] = start_date
+    if end_date is not None:
+        data["end_date"] = end_date
     if year is not None:
         data["year"] = year
     granularity = payload.get("granularity")
@@ -216,7 +248,7 @@ def normalize_weather_prompt(
                 return text, None
         canonical = json.dumps(
             query.model_dump(mode="json"),
-            ensure_ascii=True,
+            ensure_ascii=False,
             sort_keys=True,
             default=str,
         )
@@ -228,7 +260,7 @@ def normalize_weather_prompt(
         return text, None
     canonical = json.dumps(
         query.model_dump(mode="json"),
-        ensure_ascii=True,
+        ensure_ascii=False,
         sort_keys=True,
         default=str,
     )
@@ -264,6 +296,9 @@ def _coerce_forecast_points(payload: object) -> List[WeatherDataPoint]:
             or item.get("day")
             or item.get("forecast_date")
             or item.get("datatime")
+            or item.get("datetime")
+            or item.get("ymd")
+            or item.get("date_time")
         )
         if day is None:
             continue
@@ -273,6 +308,7 @@ def _coerce_forecast_points(payload: object) -> List[WeatherDataPoint]:
             or item.get("temp_max")
             or item.get("tempMax")
             or item.get("t_max")
+            or item.get("tem_max")
             or item.get("max")
             or item.get("high")
         )
@@ -282,6 +318,7 @@ def _coerce_forecast_points(payload: object) -> List[WeatherDataPoint]:
             or item.get("temp_min")
             or item.get("tempMin")
             or item.get("t_min")
+            or item.get("tem_min")
             or item.get("min")
             or item.get("low")
         )
@@ -290,9 +327,17 @@ def _coerce_forecast_points(payload: object) -> List[WeatherDataPoint]:
             or item.get("temp")
             or item.get("temperature")
             or item.get("t_avg")
+            or item.get("tem")
+            or item.get("tmp")
+            or item.get("tem_avg")
             or item.get("avg")
         )
-        humidity = _parse_float(item.get("rh") or item.get("humidity"))
+        humidity = _parse_float(
+            item.get("rh")
+            or item.get("humidity")
+            or item.get("rhu_avg")
+            or item.get("rhu")
+        )
         precipitation = _parse_float(
             item.get("precip")
             or item.get("precipitation")
@@ -304,6 +349,8 @@ def _coerce_forecast_points(payload: object) -> List[WeatherDataPoint]:
             or item.get("wind_speed")
             or item.get("wind")
             or item.get("wins")
+            or item.get("win_s_2mi_avg")
+            or item.get("win_s_max")
         )
         condition = (
             item.get("wp_pm")
@@ -568,7 +615,7 @@ def _summarize_weather_series(series: WeatherSeries) -> str:
         response = model.invoke(
             [
                 SystemMessage(content=system_prompt),
-                HumanMessage(content=json.dumps(stats, ensure_ascii=True)),
+                HumanMessage(content=json.dumps(stats, ensure_ascii=False)),
             ]
         )
         content = getattr(response, "content", None)
@@ -577,6 +624,52 @@ def _summarize_weather_series(series: WeatherSeries) -> str:
     except Exception:
         return template_summary
     return template_summary
+
+
+def _resolve_query_range(query: WeatherQueryInput) -> Tuple[date, date]:
+    base_year = query.year
+    if query.start_date:
+        base_year = query.start_date.year
+    elif query.end_date:
+        base_year = query.end_date.year
+    start = query.start_date or date(base_year, 1, 1)
+    end = query.end_date or date(base_year, 12, 31)
+    return start, end
+
+
+def _build_archive_series(
+    query: WeatherQueryInput, path: Path
+) -> Optional[WeatherSeries]:
+    points = _load_weather_points_from_csv(path)
+    if not points:
+        return None
+    start_date = points[0].timestamp.date()
+    end_date = points[-1].timestamp.date()
+    return WeatherSeries(
+        region=query.region,
+        granularity=query.granularity or "daily",
+        start_date=start_date,
+        end_date=end_date,
+        points=points,
+        source="91weather",
+    )
+
+
+def _persist_weather_archive(
+    series: WeatherSeries,
+    *,
+    region: str,
+    lat: float,
+    lon: float,
+    year: int,
+) -> Optional[str]:
+    try:
+        path = build_weather_archive_path(region, lat, lon, year)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_build_weather_csv(series), encoding="utf-8")
+    except Exception:
+        return None
+    return str(path)
 
 
 def _lookup_91weather(
@@ -704,6 +797,105 @@ def _lookup_91weather(
     )
 
 
+def lookup_goso_weather(
+    query: Optional[WeatherQueryInput],
+    *,
+    api_url: Optional[str] = None,
+) -> ToolInvocation:
+    cfg = get_config()
+    if not query or not query.region:
+        return ToolInvocation(
+            name="growth_weather_lookup",
+            message="缺少地区信息，无法查询历史气象。",
+            data={},
+        )
+    if query.lat is None or query.lon is None:
+        geocode = _geocode_with_amap(
+            query.region,
+            api_key=cfg.amap_api_key,
+            geocode_url=cfg.amap_geocode_url,
+        )
+        if geocode:
+            query = query.model_copy(
+                update={"lat": geocode["lat"], "lon": geocode["lon"]}
+            )
+            formatted = geocode.get("formatted_address")
+            if formatted and formatted != query.region:
+                query = query.model_copy(update={"region": formatted})
+    if query.lat is None or query.lon is None:
+        return ToolInvocation(
+            name="growth_weather_lookup",
+            message="需要经纬度才能查询历史气象数据。",
+            data={},
+        )
+
+    year = query.year
+    archive_store = get_weather_archive_store()
+    archive_path = archive_store.get(
+        region=query.region, lat=query.lat, lon=query.lon, year=year
+    )
+    if archive_path:
+        path = Path(archive_path)
+        if path.exists():
+            series = _build_archive_series(query, path)
+            if series:
+                message = f"已获取{year}年历史气象数据（本地缓存）。"
+                return ToolInvocation(
+                    name="growth_weather_lookup",
+                    message=message,
+                    data=series.model_dump(mode="json"),
+                )
+
+    url = api_url or "https://data-api.91weather.com/Zoomlion/goso_day"
+    start = date(year, 1, 1)
+    end = date(year, 12, 31)
+    params = {
+        "lat": query.lat,
+        "lon": query.lon,
+        "start": start.strftime("%Y%m%d"),
+        "end": end.strftime("%Y%m%d"),
+    }
+    try:
+        with httpx.Client(timeout=10.0, trust_env=False) as client:
+            response = client.get(url, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        return ToolInvocation(
+            name="growth_weather_lookup",
+            message=f"历史气象接口请求失败: {exc}",
+            data={},
+        )
+    series = _build_91weather_series(payload, query)
+    if not series:
+        return ToolInvocation(
+            name="growth_weather_lookup",
+            message="历史气象接口返回格式未识别。",
+            data={"payload": payload},
+        )
+    archive_path = _persist_weather_archive(
+        series,
+        region=query.region,
+        lat=query.lat,
+        lon=query.lon,
+        year=year,
+    )
+    if archive_path:
+        archive_store.set(
+            region=query.region,
+            lat=query.lat,
+            lon=query.lon,
+            year=year,
+            data_path=archive_path,
+        )
+    message = f"已获取{year}年历史气象数据。"
+    return ToolInvocation(
+        name="growth_weather_lookup",
+        message=message,
+        data=series.model_dump(mode="json"),
+    )
+
+
 def lookup_weather(
     prompt: str,
     *,
@@ -717,19 +909,8 @@ def lookup_weather(
         cache_prompt, query = normalize_weather_prompt(text)
     if provider in {"91weather", "external"}:
         return _lookup_91weather(query, api_url=cfg.weather_api_url)
-    intranet_prompt = cache_prompt if query else text
-    intranet = maybe_intranet_tool(
-        "weather_lookup",
-        intranet_prompt,
-        provider,
-        cfg.weather_api_url,
-        cfg.weather_api_key,
-    )
-    if intranet:
-        return intranet
     if query:
-        start = date(query.year, 1, 1)
-        end = date(query.year, 12, 31)
+        start, end = _resolve_query_range(query)
         granularity = query.granularity or "daily"
         region = query.region
         total_days = max(1, (end - start).days + 1)

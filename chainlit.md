@@ -8,6 +8,8 @@ You can ask about:
 - Growth stage prediction
 - Full planting plans
 
+Note: growth-stage prediction and crop calendar workflows currently use historical weather only; future sowing dates will trigger a prompt to provide a valid historical date.
+
 If information is incomplete, the assistant will ask follow-up questions. To switch to a new question, just ask a new request. To clear memory, simply say so.
 
 Tip: to change the backend address, set `BACKEND_URL`.

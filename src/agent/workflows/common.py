@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field
 
 from ...infra.config import get_config
 from ...infra.llm_extract import llm_structured_extract
-from ...infra.variety_store import build_variety_hint
 from ...prompts.planting_extract import build_planting_extract_prompt
 from ...schemas import PlantingDetails, PlantingDetailsDraft, WeatherSeries
 
@@ -150,8 +149,7 @@ def infer_unknown_fields(
 def llm_extract_planting(
     prompt: str, *, schema: Type[BaseModel] = PlantingExtract
 ) -> Dict[str, object]:
-    hint = build_variety_hint(prompt)
-    system_prompt = build_planting_extract_prompt(hint)
+    system_prompt = build_planting_extract_prompt()
     return llm_structured_extract(
         prompt,
         schema=schema,

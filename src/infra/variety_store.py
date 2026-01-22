@@ -43,6 +43,9 @@ _VARIETY_QUERY_STOPWORDS = {
     "及",
 }
 _VARIETY_TOKEN_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]{2,}")
+_FRAGMENT_MIN_LEN = 2
+_FRAGMENT_MAX_LEN = 6
+_FRAGMENT_LIMIT = 200
 
 
 def _default_store_path() -> Path:
@@ -77,6 +80,24 @@ def load_variety_names(path: Path | None = None) -> List[str]:
     return names
 
 
+@lru_cache(maxsize=1)
+def load_variety_name_list(path: Path | None = None) -> List[str]:
+    names = [name for name in load_variety_names(path) if name]
+    names.sort(key=len, reverse=True)
+    return names
+
+
+def find_exact_variety_in_text(
+    text: str, path: Path | None = None
+) -> Optional[str]:
+    if not text:
+        return None
+    for name in load_variety_name_list(path):
+        if name in text:
+            return name
+    return None
+
+
 def retrieve_variety_candidates(
     query: str,
     *,
@@ -97,12 +118,20 @@ def retrieve_variety_candidates(
         token_set = set(tokens)
         matches = [name for name in names if name in token_set]
     if not matches:
+        fragments = _extract_variety_fragments(query_text)
+        if fragments:
+            matches = _get_fragment_contains_matches(
+                names, fragments, limit=limit
+            )
+    if not matches:
         matches = _get_fuzzy_matches(
             query_text, tokens, names, limit=limit, threshold=threshold
         )
         fuzzy_used = True
-    if not fuzzy_used:
-        matches.sort(key=len, reverse=True)
+    if not fuzzy_used and matches:
+        scored = [(_best_similarity_score(name, query_text, tokens), name) for name in matches]
+        scored.sort(key=lambda item: (-item[0], len(item[1])))
+        matches = [name for _, name in scored]
     return matches[:limit]
 
 
@@ -128,6 +157,68 @@ def extract_variety_tokens(prompt: str) -> List[str]:
             tokens.append(token)
     tokens.sort(key=len, reverse=True)
     return tokens
+
+
+def _extract_variety_fragments(query_text: str) -> List[str]:
+    if not query_text:
+        return []
+    fragments: List[str] = []
+    seen = set()
+    for segment in _VARIETY_TOKEN_RE.findall(query_text):
+        token = segment.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            continue
+        if token in _VARIETY_QUERY_STOPWORDS:
+            continue
+        if _FRAGMENT_MIN_LEN <= len(token) <= 20 and token not in seen:
+            seen.add(token)
+            fragments.append(token)
+        max_len = min(_FRAGMENT_MAX_LEN, len(token))
+        for size in range(_FRAGMENT_MIN_LEN, max_len + 1):
+            for start in range(0, len(token) - size + 1):
+                frag = token[start : start + size]
+                if frag in _VARIETY_QUERY_STOPWORDS or frag.isdigit():
+                    continue
+                if frag not in seen:
+                    seen.add(frag)
+                    fragments.append(frag)
+                if len(fragments) >= _FRAGMENT_LIMIT:
+                    break
+            if len(fragments) >= _FRAGMENT_LIMIT:
+                break
+        if len(fragments) >= _FRAGMENT_LIMIT:
+            break
+    fragments.sort(key=len, reverse=True)
+    return fragments
+
+
+def _get_fragment_contains_matches(
+    names: List[str],
+    fragments: List[str],
+    *,
+    limit: int,
+) -> List[str]:
+    if not names or not fragments:
+        return []
+    scores: List[tuple[int, str]] = []
+    for name in names:
+        if not name:
+            continue
+        best = 0
+        for frag in fragments:
+            if frag == name:
+                best = max(best, 100 + len(name))
+                break
+            if frag in name:
+                best = max(best, 50 + len(frag))
+            elif name in frag:
+                best = max(best, 10 + len(name))
+        if best:
+            scores.append((best, name))
+    scores.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
+    return [name for _, name in scores[:limit]]
 
 
 def _get_fuzzy_matches(
@@ -161,6 +252,22 @@ def _get_fuzzy_matches(
                 candidates.append((score, name))
     candidates.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
     return [name for _, name in candidates[:limit]]
+
+
+def _best_similarity_score(
+    name: str, query: str, tokens: List[str]
+) -> float:
+    best = 0.0
+    if tokens:
+        for token in tokens:
+            score = _fuzzy_score(name, token)
+            if score > best:
+                best = score
+            if best >= 1.0:
+                break
+    if query:
+        best = max(best, _fuzzy_score(name, query))
+    return best
 
 
 def _fuzzy_score(left: str, right: str) -> float:

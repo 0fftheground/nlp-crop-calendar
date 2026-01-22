@@ -39,6 +39,16 @@ class GraphState(TypedDict, total=False):
     experience_applied: List[str]
     experience_skip_fields: List[str]
     experience_notice: Optional[str]
+    pending_options: List[str]
+    pending_message: Optional[str]
+    variety_candidates: List[str]
+    variety_record: Optional[Dict[str, object]]
+    variety_tool_query: Optional[str]
+    variety_tool_draft: Optional[Dict[str, object]]
+    variety_tool_missing_fields: List[str]
+    variety_tool_followup_count: int
+    future_sowing_date_warning: bool
+    halt: bool
 
 
 def add_trace(state: GraphState, message: str) -> GraphState:

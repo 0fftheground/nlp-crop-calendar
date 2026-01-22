@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import json
 import math
 from datetime import date, datetime, time, timedelta
 from typing import Callable, Dict, List, Optional, TypedDict
 
-from ...infra.config import get_config
-from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ...infra.weather_cache import (
     get_weather_series_by_query,
     store_weather_series_by_query,
 )
+from .growth_stage_service import predict_growth_stage_local
 from ...schemas import (
     FarmWorkRecommendInput,
     GrowthStageResult,
@@ -63,21 +61,7 @@ def fetch_weather(query: WeatherQueryInput) -> WeatherSeries:
     cached = get_weather_series_by_query(query)
     if cached is not None:
         return cached
-    cfg = get_config()
-    provider = normalize_provider(cfg.weather_provider)
-    prompt = json.dumps(query.model_dump(mode="json"), ensure_ascii=True, default=str)
-    tool_payload = maybe_intranet_tool(
-        "weather_lookup",
-        prompt,
-        provider,
-        cfg.weather_api_url,
-        cfg.weather_api_key,
-    )
-    weather_series = None
-    if tool_payload:
-        weather_series = _coerce_tool_weather_series(tool_payload.data, query)
-    if weather_series is None:
-        weather_series = get_farm_weather(query)
+    weather_series = get_farm_weather(query)
     store_weather_series_by_query(query, weather_series)
     return weather_series
 
@@ -90,23 +74,20 @@ def assemble_weather_series(
     """
     payload = raw.model_dump()
     if query:
-        payload.setdefault("start_date", date(query.year, 1, 1))
-        payload.setdefault("end_date", date(query.year, 12, 31))
+        base_year = query.year
+        if query.start_date:
+            base_year = query.start_date.year
+        elif query.end_date:
+            base_year = query.end_date.year
+        payload.setdefault(
+            "start_date", query.start_date or date(base_year, 1, 1)
+        )
+        payload.setdefault(
+            "end_date", query.end_date or date(base_year, 12, 31)
+        )
     allowed = {"region", "granularity", "start_date", "end_date", "points", "source"}
     payload = {k: v for k, v in payload.items() if k in allowed}
     return WeatherSeries(**payload)
-
-
-def _coerce_tool_weather_series(
-    data: Dict[str, object], query: WeatherQueryInput
-) -> Optional[WeatherSeries]:
-    if not data:
-        return None
-    try:
-        series = WeatherSeries.model_validate(data)
-    except Exception:
-        return None
-    return assemble_weather_series(series, query)
 
 
 def _default_weather_series(planting: PlantingDetails) -> WeatherSeries:
@@ -118,33 +99,6 @@ def _default_weather_series(planting: PlantingDetails) -> WeatherSeries:
         points=[],
         source="synthetic",
     )
-
-
-def _coerce_operation_plan(data: Dict[str, object]) -> Optional[OperationPlanResult]:
-    if not data:
-        return None
-    try:
-        return OperationPlanResult.model_validate(data)
-    except Exception:
-        return None
-
-
-def _coerce_growth_stage_result(
-    data: Dict[str, object],
-) -> Optional[GrowthStageResult]:
-    if not data:
-        return None
-    try:
-        return GrowthStageResult.model_validate(data)
-    except Exception:
-        pass
-    nested = data.get("growth_stage")
-    if isinstance(nested, dict):
-        try:
-            return GrowthStageResult.model_validate(nested)
-        except Exception:
-            return None
-    return None
 
 
 def predict_growth_stage(
@@ -163,24 +117,7 @@ def predict_growth_stage(
             source="synthetic",
         )
     request = PredictGrowthStageInput(planting=planting, weatherSeries=weather_series)
-    cfg = get_config()
-    provider = normalize_provider(cfg.growth_stage_provider)
-    prompt = json.dumps(request.model_dump(mode="json"), ensure_ascii=True, default=str)
-    tool_payload = maybe_intranet_tool(
-        "growth_stage_prediction",
-        prompt,
-        provider,
-        cfg.growth_stage_api_url,
-        cfg.growth_stage_api_key,
-    )
-    if not tool_payload:
-        raise ValueError(
-            "生育期预测需要内网接口，请配置 GROWTH_STAGE_PROVIDER=intranet。"
-        )
-    result = _coerce_growth_stage_result(tool_payload.data)
-    if result is None:
-        raise ValueError(f"生育期接口返回异常: {tool_payload.message}")
-    return result
+    return predict_growth_stage_local(request)
 
 
 def build_operation_plan(
@@ -192,26 +129,6 @@ def build_operation_plan(
     """
     Produce field operation recommendations using the normalized planting details.
     """
-    cfg = get_config()
-    provider = normalize_provider(cfg.recommendation_provider)
-    context = {
-        "user_prompt": user_prompt,
-        "planting": planting.model_dump(mode="json"),
-    }
-    if weather_series:
-        context["weather"] = weather_series.model_dump(mode="json")
-    prompt = json.dumps(context, ensure_ascii=True, default=str)
-    tool_payload = maybe_intranet_tool(
-        "farming_recommendation",
-        prompt,
-        provider,
-        cfg.recommendation_api_url,
-        cfg.recommendation_api_key,
-    )
-    if tool_payload:
-        plan = _coerce_operation_plan(tool_payload.data)
-        if plan is not None:
-            return plan
     if weather_series is None:
         weather_series = _default_weather_series(planting)
     request = FarmWorkRecommendInput(
@@ -276,14 +193,17 @@ def generate_crop_calendar(
 
 
 def predict_growth_stage_gdd(input: PredictGrowthStageInput) -> GrowthStageResult:
-    raise NotImplementedError(
-        "生育期预测已迁移至内网接口，请改用 GROWTH_STAGE_PROVIDER=intranet。"
-    )
+    return predict_growth_stage_local(input)
 
 
 def get_farm_weather(input: WeatherQueryInput) -> WeatherSeries:
-    start = date(input.year, 1, 1)
-    end = date(input.year, 12, 31)
+    base_year = input.year
+    if input.start_date:
+        base_year = input.start_date.year
+    elif input.end_date:
+        base_year = input.end_date.year
+    start = input.start_date or date(base_year, 1, 1)
+    end = input.end_date or date(base_year, 12, 31)
     total_days = (end - start).days + 1
     points: List[WeatherDataPoint] = []
 

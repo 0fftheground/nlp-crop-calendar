@@ -40,7 +40,7 @@ class PlannerRunner:
         messages = [
             SystemMessage(content=self._system_prompt),
             HumanMessage(
-                content=json.dumps(payload, ensure_ascii=True, default=str)
+                content=json.dumps(payload, ensure_ascii=False, default=str)
             ),
         ]
         log_event(

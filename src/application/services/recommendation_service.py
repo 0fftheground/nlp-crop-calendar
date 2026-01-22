@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from ...domain.planting import DEFAULT_CROP
-from ...infra.config import get_config
-from ...infra.tool_provider import maybe_intranet_tool, normalize_provider
 from ...schemas.models import OperationItem, OperationPlanResult, ToolInvocation
 
 
@@ -14,17 +12,6 @@ def _infer_crop(prompt: str) -> str:
 
 
 def recommend_farming(prompt: str) -> ToolInvocation:
-    cfg = get_config()
-    provider = normalize_provider(cfg.recommendation_provider)
-    intranet = maybe_intranet_tool(
-        "farming_recommendation",
-        prompt,
-        provider,
-        cfg.recommendation_api_url,
-        cfg.recommendation_api_key,
-    )
-    if intranet:
-        return intranet
     crop = _infer_crop(prompt)
     ops = [
         OperationItem(

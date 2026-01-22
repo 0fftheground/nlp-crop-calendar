@@ -5,12 +5,18 @@ LangGraph workflow for crop calendar planning.
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from typing import Dict, List, Optional
 
 from langgraph.graph import END, StateGraph
 
 from ...application.services.planting_service import extract_planting_details
+from ...application.services.weather_service import (
+    lookup_goso_weather,
+    normalize_weather_prompt,
+)
 from ...domain.planting import (
     MissingPlantingInfoError,
     list_missing_required_fields,
@@ -23,16 +29,23 @@ from ...infra.planting_choice_store import (
     get_planting_choice_store,
 )
 from ...infra.tool_cache import get_tool_result_cache
+from ...infra.variety_store import (
+    find_exact_variety_in_text,
+    load_variety_names,
+    retrieve_variety_candidates,
+)
 from ...infra.weather_cache import store_weather_series
 from ...observability.logging_utils import get_trace_id, reset_trace_id, set_trace_id
 from ...schemas import (
     OperationPlanResult,
     PlantingDetails,
     Recommendation,
+    WeatherQueryInput,
     WorkflowResponse,
 )
 from ...prompts.workflow_messages import (
     build_crop_calendar_missing_question,
+    build_future_weather_warning,
     format_crop_calendar_plan_message,
 )
 from ...prompts.tool_messages import TOOL_NOT_FOUND_MESSAGE
@@ -60,6 +73,38 @@ CROP_FIELD_LABELS = {
 }
 CROP_CACHE_NAME = "crop_calendar_workflow"
 CROP_CACHE_PROVIDER = "workflow"
+_FOLLOWUP_INDEX_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
+
+
+@lru_cache(maxsize=1)
+def _get_variety_name_set() -> set[str]:
+    return set(load_variety_names())
+
+
+def _is_known_variety(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    return name in _get_variety_name_set()
+
+
+def _resolve_followup_candidate(
+    answer: str, candidates: list[str]
+) -> Optional[str]:
+    if not answer or not candidates:
+        return None
+    text = answer.strip()
+    match = _FOLLOWUP_INDEX_RE.match(text)
+    if match:
+        index = int(match.group(1))
+        if 1 <= index <= len(candidates):
+            return candidates[index - 1]
+    for candidate in candidates:
+        if candidate == text:
+            return candidate
+    for candidate in candidates:
+        if text in candidate or candidate in text:
+            return candidate
+    return None
 
 
 def _coerce_operation_plan(
@@ -129,7 +174,9 @@ def _extract_node(state: GraphState) -> GraphState:
     prompt = state.get("user_prompt", "")
     prior_draft = coerce_planting_draft(state.get("planting_draft"))
     prior_missing = state.get("missing_fields") or []
+    pending_options = list(state.get("pending_options") or [])
     followup_count = state.get("followup_count", 0)
+    prior_future_warning = bool(state.get("future_sowing_date_warning"))
     try:
         fresh_draft = extract_planting_details(
             prompt, llm_extract=llm_extract_planting
@@ -138,18 +185,51 @@ def _extract_node(state: GraphState) -> GraphState:
         state = add_trace(state, f"llm_extract_failed={exc}")
         fresh_draft = extract_planting_details(prompt)
 
+    # Follow-up: merge newly extracted answers into the prior draft.
     if prior_draft and prior_missing:
         answers = fresh_draft.model_dump(exclude_none=True)
         draft = merge_planting_answers(prior_draft, answers=answers)
         followup_count += 1
     else:
         draft = fresh_draft
+    if draft.variety is not None:
+        draft = draft.model_copy(update={"variety": None})
+    if prior_future_warning and (
+        draft.sowing_date is None or draft.sowing_date.year >= 2026
+    ):
+        state = add_trace(state, "extract future_sowing_date_rejected")
+        state.update(
+            {
+                "planting_draft": draft,
+                "missing_fields": ["sowing_date"],
+                "followup_count": followup_count,
+                "pending_message": "播种日期仍为2026年及以后，请直接回复新的播种日期（2025年及以前）。",
+                "future_sowing_date_warning": True,
+                "pending_options": [],
+            }
+        )
+        return state
+    if draft.sowing_date and draft.sowing_date.year >= 2026:
+        state = add_trace(state, "extract future_sowing_date")
+        state.update(
+            {
+                "planting_draft": draft,
+                "missing_fields": ["sowing_date"],
+                "followup_count": followup_count,
+                "pending_message": "暂不支持未来气象数据，请提供新的播种日期（2025年及以前）。",
+                "future_sowing_date_warning": True,
+                "pending_options": [],
+            }
+        )
+        return state
     missing_fields = list_missing_required_fields(draft)
+    is_followup = bool(prior_draft and prior_missing)
     experience_applied = list(state.get("experience_applied") or [])
     experience_skip_fields = set(state.get("experience_skip_fields") or [])
     experience_key = state.get("experience_key")
     experience_notice = state.get("experience_notice")
     change_fields = detect_experience_change_fields(prompt)
+    # User explicitly wants to change fields -> clear any carried experience values.
     if change_fields:
         experience_skip_fields.update(change_fields)
         to_clear = [
@@ -174,6 +254,7 @@ def _extract_node(state: GraphState) -> GraphState:
     if current_key and experience_key and current_key != experience_key:
         experience_applied = []
         experience_notice = None
+    # Apply stored planting defaults for this user+crop+region unless skipped.
     if user_id and current_key:
         choice = get_planting_choice_store().get(
             user_id, draft.crop, draft.region
@@ -194,6 +275,52 @@ def _extract_node(state: GraphState) -> GraphState:
                 )
                 state = add_trace(state, f"experience_applied={applied}")
             missing_fields = list_missing_required_fields(draft)
+    # Resolve variety selection from the previous candidate list.
+    resolved_from_followup = False
+    if prior_missing and "variety" in prior_missing and pending_options:
+        resolved = _resolve_followup_candidate(prompt, pending_options)
+        if resolved:
+            draft = draft.model_copy(update={"variety": resolved})
+            missing_fields = list_missing_required_fields(draft)
+            resolved_from_followup = True
+    variety_candidates: List[str] = []
+    prompt_candidates: List[str] = []
+    exact_variety = None
+    should_check_prompt = (not is_followup) or (
+        prior_missing and "variety" in prior_missing
+    )
+    if resolved_from_followup:
+        should_check_prompt = False
+    # Prefer DB-driven exact match from the raw prompt; else propose candidates.
+    if should_check_prompt:
+        exact_variety = find_exact_variety_in_text(prompt)
+        if exact_variety:
+            if draft.variety != exact_variety:
+                draft = draft.model_copy(update={"variety": exact_variety})
+            missing_fields = list_missing_required_fields(draft)
+        else:
+            prompt_candidates = retrieve_variety_candidates(prompt, limit=5)
+            if prompt_candidates:
+                if draft.variety:
+                    draft = draft.model_copy(update={"variety": None})
+                if "variety" not in missing_fields:
+                    missing_fields.append("variety")
+                variety_candidates = prompt_candidates
+            elif draft.variety and "variety" not in experience_applied:
+                # LLM-only variety without DB evidence -> clear and re-ask.
+                draft = draft.model_copy(update={"variety": None})
+                missing_fields = list_missing_required_fields(draft)
+    if draft.variety:
+        if not _is_known_variety(draft.variety):
+            if not variety_candidates:
+                variety_candidates = retrieve_variety_candidates(
+                    draft.variety, limit=5
+                )
+            if "variety" not in missing_fields:
+                missing_fields.append("variety")
+    elif "variety" in missing_fields and not variety_candidates:
+        variety_candidates = retrieve_variety_candidates(prompt, limit=5)
+    # If user says "不确定/不知道", allow fallback defaults to avoid dead-ends.
     unknown_fields = infer_unknown_fields(prompt, missing_fields, CROP_FIELD_LABELS)
     if unknown_fields:
         fallback = build_fallback_planting(draft)
@@ -225,6 +352,9 @@ def _extract_node(state: GraphState) -> GraphState:
             "experience_applied": experience_applied,
             "experience_skip_fields": sorted(experience_skip_fields),
             "experience_notice": experience_notice,
+            "variety_candidates": variety_candidates,
+            "future_sowing_date_warning": False,
+            "pending_message": None,
         }
     )
     return state
@@ -232,10 +362,30 @@ def _extract_node(state: GraphState) -> GraphState:
 
 def _ask_node(state: GraphState) -> GraphState:
     missing_fields = state.get("missing_fields", [])
-    message = build_crop_calendar_missing_question(
-        missing_fields,
-        CROP_FIELD_LABELS,
-    )
+    candidates = state.get("variety_candidates") or []
+    pending_message = state.get("pending_message")
+    if pending_message:
+        message = pending_message
+    elif "variety" in missing_fields and candidates:
+        options = "\n".join(
+            f"{idx + 1}. {name}" for idx, name in enumerate(candidates)
+        )
+        message = (
+            "未找到完全匹配的品种。你是不是想查询以下品种：\n"
+            f"{options}\n"
+            "请回复序号或品种名称。"
+        )
+    else:
+        message = build_crop_calendar_missing_question(
+            missing_fields,
+            CROP_FIELD_LABELS,
+        )
+        draft = state.get("planting_draft")
+        warning = (
+            build_future_weather_warning(draft.sowing_date) if draft else None
+        )
+        if warning:
+            message = f"{warning}\n{message}"
     experience_notice = state.get("experience_notice")
     if experience_notice:
         message = f"{experience_notice}\n{message}"
@@ -257,15 +407,36 @@ def _fetch_variety_info(planting: PlantingDetails, prompt: str) -> Dict[str, obj
 
 
 def _fetch_weather_info(planting: PlantingDetails, prompt: str) -> Dict[str, object]:
-    query = planting.region or prompt
-    result = execute_tool("weather_lookup", query)
+    weather_query = None
+    if planting.region:
+        try:
+            weather_query = WeatherQueryInput(
+                region=planting.region,
+                year=planting.sowing_date.year,
+                granularity="daily",
+            )
+        except Exception:
+            weather_query = None
+    if weather_query is None and prompt:
+        _, parsed = normalize_weather_prompt(prompt)
+        if parsed:
+            try:
+                weather_query = parsed.model_copy(
+                    update={
+                        "year": planting.sowing_date.year,
+                        "granularity": "daily",
+                    }
+                )
+            except Exception:
+                weather_query = None
+    result = lookup_goso_weather(weather_query)
     if not result:
         weather_series = coerce_weather_series(
             {}, region=planting.region or "unknown"
         )
         weather_series_ref = store_weather_series(weather_series)
         return {
-            "name": "weather_lookup",
+            "name": "growth_weather_lookup",
             "message": TOOL_NOT_FOUND_MESSAGE,
             "data": {
                 "weather_series_ref": weather_series_ref,
@@ -399,7 +570,7 @@ def _recommend_node(state: GraphState) -> GraphState:
         "variety": variety_info,
     }
     recommendation_prompt = json.dumps(
-        recommendation_context, ensure_ascii=True, default=str
+        recommendation_context, ensure_ascii=False, default=str
     )
     recommendation_payload = execute_tool(
         "farming_recommendation",
@@ -457,6 +628,8 @@ def _recommend_node(state: GraphState) -> GraphState:
 
 def _route_after_extract(state: GraphState) -> str:
     missing = state.get("missing_fields") or []
+    if state.get("halt"):
+        return END
     return "ask" if missing else "context"
 
 

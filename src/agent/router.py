@@ -6,6 +6,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from ..infra.pending_store import build_pending_followup_store
+from ..infra.variety_store import find_exact_variety_in_text, retrieve_variety_candidates
 from ..infra.planting_choice_store import get_planting_choice_store
 from ..infra.variety_choice_store import get_variety_choice_store
 from ..observability.logging_utils import log_event
@@ -106,6 +107,10 @@ class RequestRouter:
                     reason="auto",
                 )
                 return self._resume_pending(prompt, pending, session_id)
+            if pending:
+                # New question: clear stale pending to avoid misrouting follow-ups.
+                self._pending_store.delete(session_id)
+                pending = None
             plan = self._planner.plan(prompt, pending=pending)
             if not plan:
                 return self._fallback_from_planner(prompt, pending, session_id)
@@ -238,7 +243,7 @@ class RequestRouter:
             memory_id = self._memory_id_ctx.get()
             tool_input = json.dumps(
                 {"prompt": prompt, "user_id": memory_id},
-                ensure_ascii=True,
+                ensure_ascii=False,
                 default=str,
             )
         tool_payload = execute_tool(tool_name, tool_input)
@@ -335,7 +340,7 @@ class RequestRouter:
         if isinstance(value, str):
             return value
         try:
-            return json.dumps(value, ensure_ascii=True, default=str)
+            return json.dumps(value, ensure_ascii=False, default=str)
         except TypeError:
             return str(value)
 
@@ -391,6 +396,19 @@ class RequestRouter:
                         "experience_skip_fields", []
                     ),
                     "experience_notice": pending.get("experience_notice"),
+                    "pending_options": pending.get("options") or [],
+                    "pending_message": pending.get("pending_message"),
+                    "future_sowing_date_warning": pending.get(
+                        "future_sowing_date_warning", False
+                    ),
+                    "variety_tool_query": pending.get("variety_tool_query"),
+                    "variety_tool_draft": pending.get("variety_tool_draft"),
+                    "variety_tool_missing_fields": pending.get(
+                        "variety_tool_missing_fields"
+                    ),
+                    "variety_tool_followup_count": pending.get(
+                        "variety_tool_followup_count", 0
+                    ),
                 }
             )
         state = graph.invoke(initial_state)
@@ -398,6 +416,7 @@ class RequestRouter:
         return WorkflowResponse(
             query=state.get("query"),
             recommendations=state.get("recommendations", []),
+            growth_stage=state.get("growth_stage"),
             message=state.get("message", ""),
             trace=state.get("trace", []),
             data=state.get("data", {}),
@@ -425,7 +444,7 @@ class RequestRouter:
             }
         }
         followup_prompt = json.dumps(
-            followup_payload, ensure_ascii=True, default=str
+            followup_payload, ensure_ascii=False, default=str
         )
         result = execute_tool(tool_name, followup_prompt)
         if not result:
@@ -465,6 +484,17 @@ class RequestRouter:
                 "experience_applied": state.get("experience_applied", []),
                 "experience_skip_fields": state.get("experience_skip_fields", []),
                 "experience_notice": state.get("experience_notice"),
+                "future_sowing_date_warning": state.get(
+                    "future_sowing_date_warning", False
+                ),
+                "variety_tool_query": state.get("variety_tool_query"),
+                "variety_tool_draft": state.get("variety_tool_draft"),
+                "variety_tool_missing_fields": state.get(
+                    "variety_tool_missing_fields", []
+                ),
+                "variety_tool_followup_count": state.get(
+                    "variety_tool_followup_count", 0
+                ),
             }
             options = self._build_pending_options(
                 payload.get("pending_message"), draft_payload
@@ -664,6 +694,13 @@ class RequestRouter:
             return False
         if pending.get("mode") not in {"tool", "workflow"}:
             return False
+        if pending.get("missing_fields") and "variety" in pending.get(
+            "missing_fields", []
+        ):
+            if find_exact_variety_in_text(prompt):
+                return True
+            if retrieve_variety_candidates(prompt, limit=3):
+                return True
         if pending.get("strict_options_only"):
             return self._matches_pending_choice(prompt, pending)
         if self._matches_pending_choice(prompt, pending):

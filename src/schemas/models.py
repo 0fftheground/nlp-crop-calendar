@@ -52,6 +52,7 @@ class WorkflowResponse(BaseModel):
 
     query: Optional[FarmerQuery] = None
     recommendations: List[Recommendation] = Field(default_factory=list)
+    growth_stage: Optional[GrowthStageResult] = None
     message: str = ""
     trace: List[str] = Field(default_factory=list)
     data: Dict[str, Any] = Field(default_factory=dict)
@@ -169,6 +170,10 @@ class PredictGrowthStageInput(BaseModel):
         ...,
         description="标准化后的种植详情，可被不同工具共享。",
     )
+    variety_record: Optional[Dict[str, object]] = Field(
+        default=None,
+        description="可选的数据库品种记录（含审定区域/稻作类型/对照品种等），用于固定匹配结果。",
+    )
 
     @property
     def crop(self) -> str:
@@ -226,6 +231,12 @@ class WeatherQueryInput(BaseModel):
         ge=-180,
         le=180,
         description="经度（用于外部气象 API）。",
+    )
+    start_date: Optional[date] = Field(
+        default=None, description="查询起始日期（含），格式 YYYY-MM-DD。"
+    )
+    end_date: Optional[date] = Field(
+        default=None, description="查询结束日期（含），格式 YYYY-MM-DD。"
     )
     year: int = Field(
         default_factory=lambda: date.today().year,
@@ -370,6 +381,8 @@ class WeatherSeriesDraft(BaseModel):
             "region",
             "lat",
             "lon",
+            "start_date",
+            "end_date",
             "year",
             "granularity",
             "include_advice",

@@ -43,16 +43,24 @@ VARIETY_API_KEY=
 WEATHER_PROVIDER=mock
 WEATHER_API_URL=
 WEATHER_API_KEY=
-GROWTH_STAGE_PROVIDER=mock
+GROWTH_STAGE_PROVIDER=local
 GROWTH_STAGE_API_URL=
 GROWTH_STAGE_API_KEY=
+GROWTH_STAGE_DB_PATH=
 RECOMMENDATION_PROVIDER=mock
 RECOMMENDATION_API_URL=
 RECOMMENDATION_API_KEY=
 ```
 If `EXTRACTOR_API_KEY` is empty, the extractor falls back to `OPENAI_API_KEY`.
-Tools default to `mock`. Variety lookup reads local SQLite by default (`VARIETY_PROVIDER=local`); set `VARIETY_PROVIDER=intranet` to switch to intranet APIs. Other tools can set `*_PROVIDER=intranet` and configure `*_API_URL`/`*_API_KEY` to use intranet APIs; growth stage prediction must use `GROWTH_STAGE_PROVIDER=intranet`.
+Tools default to `mock`. Variety lookup reads local SQLite by default (`VARIETY_PROVIDER=local`). Growth stage prediction supports:
+- `GROWTH_STAGE_PROVIDER=local`: read GDD parameters from SQLite (`GROWTH_STAGE_DB_PATH`, default `resources/gdd.sqlite3`)
 To use the external 15-day weather API, set `WEATHER_PROVIDER=91weather` and ensure the request includes `lat`/`lon` (the tool accepts `WeatherQueryInput` JSON with `lat`/`lon`).
+Growth-stage prediction and crop calendar workflows use historical weather (`goso_day`) and do not support future dates yet.
+
+To build the local GDD SQLite once:
+```bash
+python scripts/import_gdd_to_sqlite.py --excel "C:\Users\00778807\Downloads\gdd_new_20250710.xlsx" --db "resources\gdd.sqlite3"
+```
 
 ## External Access
 To allow other machines to access the app and download CSV exports, set:
@@ -73,7 +81,7 @@ Ensure your firewall/security group allows access to ports `8000` (FastAPI) and 
 - LLM prompts and workflow user-facing text are centralized in `src/prompts` (planner / extraction / workflow copy / tool fallbacks).
 - `src/api/server.py` binds HTTP requests to router/graph; extend auth, logging, or persistence as needed.
 - An OpenAI API key is required. The system uses `ChatOpenAI` for planning and extraction; extraction can use a lighter model via `EXTRACTOR_*`.
-- `growth_stage_prediction` only reads cached results; growth-stage prediction must go through the workflow for extraction/follow-up/intranet calls.
+- `growth_stage_prediction` only reads cached results; growth-stage prediction must go through the workflow for extraction/follow-up and then calls local SQLite.
 - Crop calendar/growth-stage workflow results build cache keys from normalized `PlantingDetails`; cache hits return immediately.
 - To hit growth-stage cache, pass `PlantingDetails` JSON (or JSON containing a `planting` field).
 - Follow-up control: pending state is passed into the LLM planner; the LLM decides whether to continue follow-up or switch to a new question; when it selects a new tool/workflow or action=none, pending is cleared.
@@ -81,6 +89,13 @@ Ensure your firewall/security group allows access to ports `8000` (FastAPI) and 
 - Infrastructure adapters live in `src/infra` (config, LLM client, structured extraction, etc.).
 - Non-agronomy requests return `mode="none"` and skip tools/workflows.
 - Variety extraction uses candidate-name matching + fuzzy tokens; data source is `resources/rice_variety_approvals.sqlite3` (override with `VARIETY_DB_PATH`).
+- 稻区范围映射用于生育期预测的审定地区匹配，配置文件为 `resources/rice_region_map.json`。
+
+## Recent Updates
+- Growth-stage prediction uses the `variety_lookup` tool flow with follow-ups and can prompt for specific approval records when region matching is ambiguous.
+- Historical weather (`goso_day`) is used for growth-stage and crop calendar workflows; results are archived locally with a 0.05° grid cache.
+- Future sowing dates (>=2026) trigger a re-ask for a valid date before continuing.
+- Growth-stage outputs now include the full ordered stage date list.
 
 ## Frontend client_id (user_id)
 To enable cross-session memory without login, generate a UUID in the browser, store it in `localStorage` (or a long-lived cookie), and send it as `user_id` on each request. Keep `session_id` for per-chat isolation if needed.

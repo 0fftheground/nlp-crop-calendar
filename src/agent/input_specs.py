@@ -25,7 +25,9 @@ class InputSpec:
 
 
 def _to_json_payload(model: BaseModel) -> str:
-    return json.dumps(model.model_dump(mode="json"), ensure_ascii=True, default=str)
+    return json.dumps(
+        model.model_dump(mode="json"), ensure_ascii=False, default=str
+    )
 
 
 WEATHER_FIELD_LABELS = {

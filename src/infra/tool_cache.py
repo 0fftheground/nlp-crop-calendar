@@ -10,7 +10,7 @@ from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 from .config import get_config
 
