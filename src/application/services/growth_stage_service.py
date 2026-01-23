@@ -417,6 +417,33 @@ def _resolve_start_date(input: PredictGrowthStageInput) -> date:
     return planting.sowing_date
 
 
+def _is_direct_seeding(method: object) -> bool:
+    if method is None:
+        return False
+    value = method.value if hasattr(method, "value") else str(method)
+    return value == PlantingMethod.DIRECT_SEEDING.value
+
+
+def _adjust_thresholds_for_direct_seeding(
+    thresholds: Dict[str, float],
+) -> Dict[str, float]:
+    base_stage = "三叶一心"
+    skip_stage = "返青"
+    if base_stage not in thresholds or skip_stage not in thresholds:
+        return thresholds
+    offset = thresholds[skip_stage] - thresholds[base_stage]
+    if offset <= 0:
+        return thresholds
+    adjusted = dict(thresholds)
+    start_index = GDD_STAGE_COLUMNS.index(base_stage)
+    for stage in GDD_STAGE_COLUMNS[start_index + 1 :]:
+        value = adjusted.get(stage)
+        if value is None:
+            continue
+        adjusted[stage] = max(value - offset, 0.0)
+    return adjusted
+
+
 def _resolve_base_temp(subspecies: str) -> float:
     if subspecies == "粳":
         return 10.0
@@ -457,6 +484,9 @@ def predict_growth_stage_local(
     thresholds = _extract_stage_thresholds(record)
     if not thresholds:
         raise ValueError("积温文件缺少生育期阈值。")
+    direct_seeding = _is_direct_seeding(input.planting.planting_method)
+    if direct_seeding:
+        thresholds = _adjust_thresholds_for_direct_seeding(thresholds)
 
     base_temp = _resolve_base_temp(subspecies)
     start_date = _resolve_start_date(input)
@@ -470,8 +500,11 @@ def predict_growth_stage_local(
         cumulative.append((day, running))
 
     gdd_accumulated = cumulative[-1][1] if cumulative else 0.0
+    skip_stages = {"返青"} if direct_seeding else set()
     stage_dates: Dict[str, str] = {}
     for stage in GDD_STAGE_COLUMNS:
+        if stage in skip_stages:
+            continue
         required = thresholds.get(stage)
         if required is None:
             continue
@@ -486,6 +519,8 @@ def predict_growth_stage_local(
     predicted_stage = ""
     estimated_next_stage = ""
     for stage in GDD_STAGE_COLUMNS:
+        if stage in skip_stages:
+            continue
         required = thresholds.get(stage)
         if required is None:
             continue

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import json
+import re
 from typing import Any, Dict, Iterable, Optional, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,6 +13,9 @@ from .input_specs import format_input_schema, get_input_spec
 from ..observability.logging_utils import log_event, summarize_text
 from ..prompts.planner import build_planner_prompt
 from .workflows.registry import WorkflowSpec
+
+
+VALID_ACTIONS = {"tool", "workflow", "none"}
 
 
 class ActionPlan(BaseModel):
@@ -29,6 +34,8 @@ class PlannerRunner:
     ) -> None:
         self._tool_specs = list(tool_specs)
         self._workflow_specs = list(workflow_specs)
+        self._tool_names = {spec["name"] for spec in self._tool_specs}
+        self._workflow_names = {spec.name for spec in self._workflow_specs}
         self._llm = get_chat_model()
         self._system_prompt = self._build_prompt()
 
@@ -49,20 +56,22 @@ class PlannerRunner:
             pending=payload["pending"],
         )
         try:
-            planner = self._llm.with_structured_output(ActionPlan)
-            result = planner.invoke(messages)
+            raw_result = self._llm.invoke(messages)
         except Exception as exc:
             log_event("planner_error", error=str(exc))
             return None
-        try:
-            plan = (
-                result
-                if isinstance(result, ActionPlan)
-                else ActionPlan.model_validate(result)
-            )
-        except Exception as exc:
-            log_event("planner_error", error=f"invalid_plan:{exc}")
-            return None
+        raw_text = self._extract_llm_text(raw_result)
+        log_event(
+            "planner_raw",
+            raw=raw_text,
+            raw_summary=summarize_text(raw_text),
+        )
+        payload_data = self._load_json_payload(raw_text)
+        plan = self._normalize_plan(payload_data)
+        if plan is None:
+            plan = self._recover_plan(raw_text, payload_data)
+        if plan is None:
+            plan = ActionPlan(action="none")
         log_event(
             "planner_response",
             action=plan.action,
@@ -115,3 +124,145 @@ class PlannerRunner:
         if "input_attempts" in pending:
             summary["input_attempts"] = pending.get("input_attempts")
         return summary
+
+    @staticmethod
+    def _extract_llm_text(result: object) -> str:
+        content = getattr(result, "content", result)
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                else:
+                    parts.append(str(item))
+            return "".join(parts).strip()
+        if content is None:
+            return ""
+        return str(content).strip()
+
+    @staticmethod
+    def _strip_code_fence(text: str) -> str:
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3].strip()
+        return cleaned
+
+    @staticmethod
+    def _extract_json_block(text: str) -> Optional[str]:
+        if not text:
+            return None
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        return text[start : end + 1]
+
+    @classmethod
+    def _load_json_payload(cls, text: str) -> Optional[dict]:
+        if not text:
+            return None
+        cleaned = cls._strip_code_fence(text)
+        for candidate in (cleaned, cls._extract_json_block(cleaned)):
+            if not candidate:
+                continue
+            try:
+                data = json.loads(candidate)
+            except json.JSONDecodeError:
+                try:
+                    data = ast.literal_eval(candidate)
+                except Exception:
+                    continue
+            if isinstance(data, dict):
+                return data
+        return None
+
+    def _normalize_plan(self, payload: Optional[dict]) -> Optional[ActionPlan]:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            plan = ActionPlan.model_validate(payload)
+        except Exception as exc:
+            log_event("planner_error", error=f"invalid_plan:{exc}")
+            return None
+        if plan.action not in VALID_ACTIONS:
+            return None
+        if plan.action == "tool":
+            if not plan.name or plan.name not in self._tool_names:
+                log_event("planner_invalid_tool", name=plan.name)
+                return None
+        if plan.action == "workflow":
+            if not plan.name or plan.name not in self._workflow_names:
+                log_event("planner_invalid_workflow", name=plan.name)
+                return None
+        return plan
+
+    def _recover_plan(
+        self, raw_text: str, payload: Optional[dict]
+    ) -> Optional[ActionPlan]:
+        if not raw_text and not payload:
+            return None
+        payload_text = ""
+        if isinstance(payload, dict):
+            payload_text = json.dumps(payload, ensure_ascii=False, default=str)
+        haystack = f"{raw_text}\n{payload_text}".lower()
+        workflow_name = self._find_name(haystack, self._workflow_names)
+        if workflow_name:
+            log_event(
+                "planner_recover",
+                recovered_action="workflow",
+                name=workflow_name,
+                reason="name_match",
+            )
+            return ActionPlan(
+                action="workflow",
+                name=workflow_name,
+                input=self._payload_value(payload, "input"),
+                response=self._payload_value(payload, "response"),
+                reason=self._payload_value(payload, "reason"),
+            )
+        tool_name = self._find_name(haystack, self._tool_names)
+        if tool_name:
+            log_event(
+                "planner_recover",
+                recovered_action="tool",
+                name=tool_name,
+                reason="name_match",
+            )
+            return ActionPlan(
+                action="tool",
+                name=tool_name,
+                input=self._payload_value(payload, "input"),
+                response=self._payload_value(payload, "response"),
+                reason=self._payload_value(payload, "reason"),
+            )
+        action_hint = None
+        if "workflow" in haystack:
+            action_hint = "workflow"
+        elif "tool" in haystack:
+            action_hint = "tool"
+        if action_hint:
+            log_event(
+                "planner_recover",
+                recovered_action=action_hint,
+                reason="keyword_only",
+            )
+        return ActionPlan(
+            action="none",
+            response=self._payload_value(payload, "response"),
+            reason=self._payload_value(payload, "reason"),
+        )
+
+    @staticmethod
+    def _find_name(text: str, names: Iterable[str]) -> Optional[str]:
+        for name in names:
+            if name.lower() in text:
+                return name
+        return None
+
+    @staticmethod
+    def _payload_value(payload: Optional[dict], key: str) -> Optional[object]:
+        if not isinstance(payload, dict):
+            return None
+        return payload.get(key)
