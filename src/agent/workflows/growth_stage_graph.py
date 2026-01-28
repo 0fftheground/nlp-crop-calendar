@@ -24,6 +24,12 @@ from ...infra.planting_choice_store import (
     get_planting_choice_store,
 )
 from ...infra.weather_cache import get_weather_series, store_weather_series
+from ...observability.otel import (
+    build_span_attributes,
+    record_exception,
+    start_span,
+    summarize_state,
+)
 from ...prompts.workflow_messages import (
     build_growth_stage_missing_question,
     build_future_weather_warning,
@@ -61,6 +67,7 @@ GROWTH_FIELD_LABELS = {
     "region": "地区",
 }
 GROWTH_CACHE_PROVIDER = "workflow"
+GROWTH_WORKFLOW_NAME = "growth_stage_workflow"
 
 
 def _coerce_growth_stage_result(
@@ -697,12 +704,37 @@ def build_growth_stage_graph():
     """
     Construct and return the growth stage prediction LangGraph workflow.
     """
+    def _trace_node(node_name: str, func):
+        def _inner(state: GraphState) -> GraphState:
+            attrs = {"workflow.name": GROWTH_WORKFLOW_NAME, "node.name": node_name}
+            attrs.update(build_span_attributes("node.input", summarize_state(state)))
+            with start_span(
+                f"workflow.{GROWTH_WORKFLOW_NAME}.{node_name}", attributes=attrs
+            ) as span:
+                try:
+                    result = func(state)
+                except Exception as exc:
+                    record_exception(span, exc)
+                    raise
+                output_attrs = build_span_attributes(
+                    "node.output", summarize_state(result)
+                )
+                if span:
+                    for key, value in output_attrs.items():
+                        try:
+                            span.set_attribute(key, value)
+                        except Exception:
+                            pass
+                return result
+
+        return _inner
+
     graph = StateGraph(GraphState)
-    graph.add_node("extract", _growth_extract_node)
-    graph.add_node("ask", _growth_ask_node)
-    graph.add_node("variety", _growth_variety_node)
-    graph.add_node("weather", _growth_weather_node)
-    graph.add_node("predict", _growth_predict_node)
+    graph.add_node("extract", _trace_node("extract", _growth_extract_node))
+    graph.add_node("ask", _trace_node("ask", _growth_ask_node))
+    graph.add_node("variety", _trace_node("variety", _growth_variety_node))
+    graph.add_node("weather", _trace_node("weather", _growth_weather_node))
+    graph.add_node("predict", _trace_node("predict", _growth_predict_node))
 
     graph.set_entry_point("extract")
     graph.add_conditional_edges("extract", _growth_route_after_extract)

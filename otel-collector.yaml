@@ -5,10 +5,12 @@ receivers:
       http:
 
 exporters:
-  logging:
-    loglevel: info
+  debug:
+    verbosity: normal
   file:
-    path: ./otel-logs.json
+    path: ${OTEL_LOG_PATH:./otel-logs.json}
+  file/traces:
+    path: ${OTEL_TRACES_PATH:./otel-traces.json}
 
 service:
   pipelines:
@@ -17,4 +19,4 @@ service:
       exporters: [file]
     traces:
       receivers: [otlp]
-      exporters: [logging]
+      exporters: [debug, file/traces]

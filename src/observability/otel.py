@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+from contextlib import contextmanager
 from typing import Dict, Optional
 
 
 _OTEL_INITIALIZED = False
 _OTEL_INSTRUMENTED = False
+_OTEL_ATTR_MAX_LEN = int(os.getenv("OTEL_ATTR_MAX_LEN", "2000"))
+
+
+class _NoopSpan:
+    def set_attribute(self, *args, **kwargs) -> None:
+        return None
+
+    def record_exception(self, *args, **kwargs) -> None:
+        return None
+
+    def set_status(self, *args, **kwargs) -> None:
+        return None
 
 
 def _parse_headers(raw: Optional[str]) -> Dict[str, str]:
@@ -39,6 +53,129 @@ def _parse_resource_attributes(raw: Optional[str]) -> Dict[str, str]:
         if key and value:
             attrs[key] = value
     return attrs
+
+
+def _safe_serialize(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        try:
+            return str(value)
+        except Exception:
+            return ""
+
+
+def _summarize_payload(value: object, limit: Optional[int] = None) -> tuple[str, int, bool]:
+    text = _safe_serialize(value)
+    size = len(text)
+    max_len = _OTEL_ATTR_MAX_LEN if limit is None else limit
+    if max_len and size > max_len:
+        return text[:max_len] + "...", size, True
+    return text, size, False
+
+
+def build_span_attributes(
+    prefix: str, payload: object, limit: Optional[int] = None
+) -> Dict[str, object]:
+    text, size, truncated = _summarize_payload(payload, limit=limit)
+    return {
+        prefix: text,
+        f"{prefix}.size": size,
+        f"{prefix}.truncated": truncated,
+    }
+
+
+def summarize_state(state: object) -> object:
+    if not isinstance(state, dict):
+        return state
+    summary: Dict[str, object] = {"keys": list(state.keys())}
+    for key in ("trace", "missing_fields", "recommendations", "assumptions"):
+        value = state.get(key)
+        if isinstance(value, list):
+            summary[f"{key}_count"] = len(value)
+    if "message" in state:
+        summary["message"] = state.get("message")
+    if "cache_hit" in state:
+        summary["cache_hit"] = state.get("cache_hit")
+    planting = state.get("planting")
+    if hasattr(planting, "model_dump"):
+        summary["planting"] = planting.model_dump(mode="json")
+    elif isinstance(planting, dict):
+        summary["planting"] = planting
+    query = state.get("query")
+    if hasattr(query, "model_dump"):
+        summary["query"] = query.model_dump(mode="json")
+    elif isinstance(query, dict):
+        summary["query"] = query
+    return summary
+
+
+def _set_span_attributes(span: object, attributes: Optional[Dict[str, object]]) -> None:
+    if not span or not attributes:
+        return None
+    for key, value in attributes.items():
+        if value is None:
+            continue
+        try:
+            span.set_attribute(key, value)
+        except Exception:
+            try:
+                span.set_attribute(key, str(value))
+            except Exception:
+                pass
+
+
+@contextmanager
+def start_span(name: str, attributes: Optional[Dict[str, object]] = None):
+    try:
+        from opentelemetry import trace
+    except Exception:
+        span = _NoopSpan()
+        yield span
+        return
+    service = os.getenv("OTEL_SERVICE_NAME") or "nlp-crop-calendar"
+    tracer = trace.get_tracer(service)
+    with tracer.start_as_current_span(name) as span:
+        _set_span_attributes(span, attributes)
+        yield span
+
+
+def record_exception(span: object, exc: Exception) -> None:
+    if not span:
+        return None
+    try:
+        from opentelemetry.trace import Status, StatusCode
+    except Exception:
+        return None
+    try:
+        span.record_exception(exc)
+    except Exception:
+        pass
+    try:
+        span.set_status(Status(StatusCode.ERROR, str(exc)))
+    except Exception:
+        pass
+
+
+def wrap_with_otel_context(func):
+    try:
+        from opentelemetry import context as otel_context
+    except Exception:
+        return func
+    ctx = otel_context.get_current()
+
+    def _inner(*args, **kwargs):
+        token = otel_context.attach(ctx)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            otel_context.detach(token)
+
+    return _inner
 
 
 def _resolve_http_endpoint(

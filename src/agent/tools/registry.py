@@ -8,6 +8,7 @@ from langchain_core.tools import BaseTool, tool as lc_tool
 from ...infra.tool_cache import get_tool_result_cache
 from ...infra.tool_provider import normalize_provider
 from ...observability.logging_utils import log_event
+from ...observability.otel import build_span_attributes, record_exception, start_span
 from ...schemas.models import ToolInvocation
 
 
@@ -183,11 +184,28 @@ def execute_tool(name: str, prompt: str) -> Optional[ToolInvocation]:
     tool = TOOL_INDEX.get(name)
     if not tool:
         return None
-    result = tool.invoke(prompt)
-    if isinstance(result, ToolInvocation):
-        log_event("tool_output", tool=_summarize_tool_output(result))
-        return result
-    raise TypeError(
-        f"Tool '{name}' returned unsupported type {type(result)!r}; "
-        "please return ToolInvocation."
-    )
+    span_attrs = {"tool.name": name}
+    span_attrs.update(build_span_attributes("tool.input", prompt))
+    with start_span(f"tool.{name}", attributes=span_attrs) as span:
+        try:
+            result = tool.invoke(prompt)
+        except Exception as exc:
+            record_exception(span, exc)
+            raise
+        if isinstance(result, ToolInvocation):
+            output_summary = _summarize_tool_output(result)
+            span_attrs = build_span_attributes("tool.output", output_summary)
+            if span:
+                for key, value in span_attrs.items():
+                    try:
+                        span.set_attribute(key, value)
+                    except Exception:
+                        pass
+            log_event("tool_output", tool=output_summary)
+            return result
+        exc = TypeError(
+            f"Tool '{name}' returned unsupported type {type(result)!r}; "
+            "please return ToolInvocation."
+        )
+        record_exception(span, exc)
+        raise exc

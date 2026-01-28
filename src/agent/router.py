@@ -10,6 +10,12 @@ from ..infra.variety_store import find_exact_variety_in_text, retrieve_variety_c
 from ..infra.planting_choice_store import get_planting_choice_store
 from ..infra.variety_choice_store import get_variety_choice_store
 from ..observability.logging_utils import log_event
+from ..observability.otel import (
+    build_span_attributes,
+    record_exception,
+    start_span,
+    summarize_state,
+)
 from ..prompts.input_validation import (
     INPUT_SCHEMA_FALLBACK_MESSAGE,
     format_input_validation_message,
@@ -411,16 +417,36 @@ class RequestRouter:
                     ),
                 }
             )
-        state = graph.invoke(initial_state)
-        self._update_workflow_followup_state(session_id, state, workflow_name)
-        return WorkflowResponse(
-            query=state.get("query"),
-            recommendations=state.get("recommendations", []),
-            growth_stage=state.get("growth_stage"),
-            message=state.get("message", ""),
-            trace=state.get("trace", []),
-            data=state.get("data", {}),
+        span_attrs = {"workflow.name": workflow_name}
+        span_attrs.update(
+            build_span_attributes(
+                "workflow.input",
+                {"prompt": prompt, "workflow": workflow_name},
+            )
         )
+        with start_span(f"workflow.{workflow_name}", attributes=span_attrs) as span:
+            try:
+                state = graph.invoke(initial_state)
+            except Exception as exc:
+                record_exception(span, exc)
+                raise
+            self._update_workflow_followup_state(session_id, state, workflow_name)
+            output_summary = summarize_state(state)
+            output_attrs = build_span_attributes("workflow.output", output_summary)
+            if span:
+                for key, value in output_attrs.items():
+                    try:
+                        span.set_attribute(key, value)
+                    except Exception:
+                        pass
+            return WorkflowResponse(
+                query=state.get("query"),
+                recommendations=state.get("recommendations", []),
+                growth_stage=state.get("growth_stage"),
+                message=state.get("message", ""),
+                trace=state.get("trace", []),
+                data=state.get("data", {}),
+            )
 
     def _run_tool_followup(
         self, prompt: str, pending: dict, session_id: str

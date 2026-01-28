@@ -36,6 +36,13 @@ from ...infra.variety_store import (
 )
 from ...infra.weather_cache import store_weather_series
 from ...observability.logging_utils import get_trace_id, reset_trace_id, set_trace_id
+from ...observability.otel import (
+    build_span_attributes,
+    record_exception,
+    start_span,
+    summarize_state,
+    wrap_with_otel_context,
+)
 from ...schemas import (
     OperationPlanResult,
     PlantingDetails,
@@ -521,7 +528,7 @@ def _context_node(state: GraphState) -> GraphState:
             finally:
                 reset_trace_id(token)
 
-        return _inner
+        return wrap_with_otel_context(_inner)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         weather_future = executor.submit(
@@ -643,11 +650,36 @@ def build_crop_calendar_graph():
     """
     Construct and return the crop calendar LangGraph workflow.
     """
+    def _trace_node(node_name: str, func):
+        def _inner(state: GraphState) -> GraphState:
+            attrs = {"workflow.name": CROP_CACHE_NAME, "node.name": node_name}
+            attrs.update(build_span_attributes("node.input", summarize_state(state)))
+            with start_span(
+                f"workflow.{CROP_CACHE_NAME}.{node_name}", attributes=attrs
+            ) as span:
+                try:
+                    result = func(state)
+                except Exception as exc:
+                    record_exception(span, exc)
+                    raise
+                output_attrs = build_span_attributes(
+                    "node.output", summarize_state(result)
+                )
+                if span:
+                    for key, value in output_attrs.items():
+                        try:
+                            span.set_attribute(key, value)
+                        except Exception:
+                            pass
+                return result
+
+        return _inner
+
     graph = StateGraph(GraphState)
-    graph.add_node("extract", _extract_node)
-    graph.add_node("ask", _ask_node)
-    graph.add_node("context", _context_node)
-    graph.add_node("recommend", _recommend_node)
+    graph.add_node("extract", _trace_node("extract", _extract_node))
+    graph.add_node("ask", _trace_node("ask", _ask_node))
+    graph.add_node("context", _trace_node("context", _context_node))
+    graph.add_node("recommend", _trace_node("recommend", _recommend_node))
 
     graph.set_entry_point("extract")
     graph.add_conditional_edges("extract", _route_after_extract)

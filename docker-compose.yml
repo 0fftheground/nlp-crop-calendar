@@ -1,0 +1,101 @@
+services:
+  api:
+    build: .
+    container_name: nlp-crop-calendar-api
+    env_file: .env.docker
+    command:
+      - python
+      - -m
+      - uvicorn
+      - src.api.server:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  chainlit:
+    build: .
+    container_name: nlp-crop-calendar-chainlit
+    env_file: .env.docker
+    command:
+      - python
+      - -m
+      - chainlit
+      - run
+      - chainlit_app.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+    ports:
+      - "8001:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/', timeout=2)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  db:
+    image: postgres:15
+    container_name: nlp-crop-calendar-db
+    env_file: .env.docker
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    container_name: otel-collector
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml
+      - otel-data:/otel-data
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    environment:
+      OTEL_LOG_PATH: /otel-data/otel-logs.json
+      OTEL_TRACES_PATH: /otel-data/otel-traces.json
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  otel-data:
