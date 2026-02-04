@@ -138,6 +138,12 @@ class AppConfig(BaseSettings):
     interaction_store_max_items: int = Field(
         default=2000, validation_alias="INTERACTION_STORE_MAX_ITEMS"
     )
+    interaction_raw_max_chars: int = Field(
+        default=2000, validation_alias="INTERACTION_RAW_MAX_CHARS"
+    )
+    interaction_raw_dir: Optional[str] = Field(
+        default=None, validation_alias="INTERACTION_RAW_DIR"
+    )
     memory_store_ttl_days: int = Field(
         default=30, validation_alias="MEMORY_STORE_TTL_DAYS"
     )

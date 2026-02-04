@@ -26,6 +26,8 @@ from ..observability.otel import (
     init_otel,
     instrument_fastapi,
     instrument_httpx,
+    record_exception,
+    start_span,
 )
 from ..schemas.models import HandleResponse, UserRequest
 
@@ -101,19 +103,37 @@ async def handle_request(request: UserRequest):
     started_at = time.time()
     trace_id = uuid4().hex
     token = set_trace_id(trace_id)
+    latency_ms = 0
     try:
-        log_event(
-            "request_received",
-            input_schema=request.model_dump(mode="json"),
-        )
-        response = router.handle(request)
+        span_attrs = {
+            "request.session_id": request.session_id,
+            "request.user_id": request.user_id,
+            "request.region": request.region,
+            "request.prompt_len": len(request.prompt or ""),
+        }
+        with start_span("request.handle", attributes=span_attrs) as span:
+            try:
+                log_event(
+                    "request_received",
+                    input_schema=request.model_dump(mode="json"),
+                )
+                response = router.handle(request)
+                latency_ms = int((time.time() - started_at) * 1000)
+                if span:
+                    try:
+                        span.set_attribute("response.mode", response.mode)
+                        span.set_attribute("request.latency_ms", latency_ms)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                record_exception(span, exc)
+                raise
     except Exception as exc:
         tb = traceback.format_exc()
         _append_error_log(str(exc), tb)
         print(f"handle_request failed: {exc}\n{tb}")
         reset_trace_id(token)
         raise HTTPException(status_code=500, detail={"error": str(exc), "traceback": tb})
-    latency_ms = int((time.time() - started_at) * 1000)
     try:
         store.record(request, response, latency_ms)
     except Exception:

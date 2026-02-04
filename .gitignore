@@ -2,6 +2,8 @@
 *.sqlite3
 *.log
 *.log.*
+otel-logs.json
+otel-traces.json
 __pycache__/
 *.pyc
 *.pyo

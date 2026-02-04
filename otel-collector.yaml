@@ -8,9 +8,9 @@ exporters:
   debug:
     verbosity: normal
   file:
-    path: ${OTEL_LOG_PATH:./otel-logs.json}
+    path: ${OTEL_LOG_PATH}
   file/traces:
-    path: ${OTEL_TRACES_PATH:./otel-traces.json}
+    path: ${OTEL_TRACES_PATH}
 
 service:
   pipelines:

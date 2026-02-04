@@ -6,6 +6,12 @@ from pydantic import BaseModel
 
 from .llm import get_extractor_model
 from ..observability.logging_utils import log_event, summarize_text
+from ..observability.llm_usage import (
+    apply_span_attributes,
+    build_llm_input_token_attrs,
+    build_llm_output_token_attrs,
+)
+from ..observability.otel import record_exception, start_span
 
 
 def llm_structured_extract(
@@ -25,12 +31,23 @@ def llm_structured_extract(
             system_prompt=system_prompt,
             schema=schema.__name__,
         )
-        result = extractor.invoke(
-            [
-                ("system", system_prompt),
-                ("human", prompt),
-            ]
+        span_attrs = build_llm_input_token_attrs(
+            llm, system_prompt=system_prompt, user_prompt=prompt
         )
+        with start_span("llm.extract", attributes=span_attrs) as span:
+            try:
+                result = extractor.invoke(
+                    [
+                        ("system", system_prompt),
+                        ("human", prompt),
+                    ]
+                )
+            except Exception as exc:
+                record_exception(span, exc)
+                raise
+            apply_span_attributes(
+                span, build_llm_output_token_attrs(result)
+            )
         payload = result.model_dump(exclude_none=True)
         log_event(
             "llm_extract_response",

@@ -25,6 +25,12 @@ from ...infra.weather_cache import (
     make_weather_grid_cache_key,
     store_weather_series,
 )
+from ...observability.llm_usage import (
+    apply_span_attributes,
+    build_llm_input_token_attrs,
+    build_llm_output_token_attrs,
+)
+from ...observability.otel import record_exception, start_span
 from ...schemas.models import (
     ToolInvocation,
     WeatherDataPoint,
@@ -612,12 +618,24 @@ def _summarize_weather_series(series: WeatherSeries) -> str:
             "你是气象助理，请基于统计信息输出简洁摘要。"
             "要求：2-3 句中文，包含温度范围、降水概况和主要天气。"
         )
-        response = model.invoke(
-            [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=json.dumps(stats, ensure_ascii=False)),
-            ]
+        user_payload = json.dumps(stats, ensure_ascii=False)
+        span_attrs = build_llm_input_token_attrs(
+            model, system_prompt=system_prompt, user_prompt=user_payload
         )
+        with start_span("llm.weather_summary", attributes=span_attrs) as span:
+            try:
+                response = model.invoke(
+                    [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=user_payload),
+                    ]
+                )
+            except Exception as exc:
+                record_exception(span, exc)
+                raise
+            apply_span_attributes(
+                span, build_llm_output_token_attrs(response)
+            )
         content = getattr(response, "content", None)
         if isinstance(content, str) and content.strip():
             return content.strip()

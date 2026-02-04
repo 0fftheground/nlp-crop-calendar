@@ -137,6 +137,17 @@ def start_span(name: str, attributes: Optional[Dict[str, object]] = None):
         span = _NoopSpan()
         yield span
         return
+    if attributes is None:
+        attributes = {}
+    if "app.trace_id" not in attributes:
+        try:
+            from .logging_utils import get_trace_id
+        except Exception:
+            trace_id = None
+        else:
+            trace_id = get_trace_id()
+        if trace_id:
+            attributes["app.trace_id"] = trace_id
     service = os.getenv("OTEL_SERVICE_NAME") or "nlp-crop-calendar"
     tracer = trace.get_tracer(service)
     with tracer.start_as_current_span(name) as span:

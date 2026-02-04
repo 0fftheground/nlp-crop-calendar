@@ -13,6 +13,14 @@ if (-not (Test-Path $ConfigPath)) {
 
 $resolvedConfig = (Resolve-Path $ConfigPath).Path
 $otel = $OtelcolPath
+$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+if (-not $env:OTEL_LOG_PATH) {
+    $env:OTEL_LOG_PATH = (Join-Path $projectRoot "otel-logs.json")
+}
+if (-not $env:OTEL_TRACES_PATH) {
+    $env:OTEL_TRACES_PATH = (Join-Path $projectRoot "otel-traces.json")
+}
 
 if ($OtelcolPath -eq "otelcol") {
     $cmd = Get-Command otelcol -ErrorAction SilentlyContinue

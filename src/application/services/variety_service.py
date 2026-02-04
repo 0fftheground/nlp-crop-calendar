@@ -13,7 +13,13 @@ from ...infra.config import get_config
 from ...infra.llm import get_chat_model
 from ...infra.variety_choice_store import VarietyChoice, get_variety_choice_store
 from ...infra.variety_store import extract_variety_tokens, retrieve_variety_candidates
+from ...observability.llm_usage import (
+    apply_span_attributes,
+    build_llm_input_token_attrs,
+    build_llm_output_token_attrs,
+)
 from ...observability.logging_utils import log_event
+from ...observability.otel import record_exception, start_span
 from ...prompts.variety_match import (
     VARIETY_MATCH_SYSTEM_PROMPT,
 )
@@ -833,12 +839,24 @@ def _llm_choose_variety_record(
     }
     try:
         chooser = llm.with_structured_output(VarietyMatchDecision)
-        result = chooser.invoke(
-            [
-                ("system", system_prompt),
-                ("human", json.dumps(payload, ensure_ascii=False, default=str)),
-            ]
+        user_payload = json.dumps(payload, ensure_ascii=False, default=str)
+        span_attrs = build_llm_input_token_attrs(
+            llm, system_prompt=system_prompt, user_prompt=user_payload
         )
+        with start_span("llm.variety_match", attributes=span_attrs) as span:
+            try:
+                result = chooser.invoke(
+                    [
+                        ("system", system_prompt),
+                        ("human", user_payload),
+                    ]
+                )
+            except Exception as exc:
+                record_exception(span, exc)
+                raise
+            apply_span_attributes(
+                span, build_llm_output_token_attrs(result)
+            )
         decision = (
             result
             if isinstance(result, VarietyMatchDecision)

@@ -11,6 +11,12 @@ from pydantic import BaseModel
 from ..infra.llm import get_chat_model
 from .input_specs import format_input_schema, get_input_spec
 from ..observability.logging_utils import log_event, summarize_text
+from ..observability.llm_usage import (
+    apply_span_attributes,
+    build_llm_input_token_attrs,
+    build_llm_output_token_attrs,
+)
+from ..observability.otel import record_exception, start_span
 from ..prompts.planner import build_planner_prompt
 from .workflows.registry import WorkflowSpec
 
@@ -44,11 +50,10 @@ class PlannerRunner:
             "prompt": prompt,
             "pending": self._summarize_pending(pending),
         }
+        user_payload = json.dumps(payload, ensure_ascii=False, default=str)
         messages = [
             SystemMessage(content=self._system_prompt),
-            HumanMessage(
-                content=json.dumps(payload, ensure_ascii=False, default=str)
-            ),
+            HumanMessage(content=user_payload),
         ]
         log_event(
             "planner_call",
@@ -56,7 +61,20 @@ class PlannerRunner:
             pending=payload["pending"],
         )
         try:
-            raw_result = self._llm.invoke(messages)
+            span_attrs = build_llm_input_token_attrs(
+                self._llm,
+                system_prompt=self._system_prompt,
+                user_prompt=user_payload,
+            )
+            with start_span("llm.planner", attributes=span_attrs) as span:
+                try:
+                    raw_result = self._llm.invoke(messages)
+                except Exception as exc:
+                    record_exception(span, exc)
+                    raise
+                apply_span_attributes(
+                    span, build_llm_output_token_attrs(raw_result)
+                )
         except Exception as exc:
             log_event("planner_error", error=str(exc))
             return None
