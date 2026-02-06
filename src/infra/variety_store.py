@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import difflib
-import json
 import re
-import sqlite3
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
 
 from .config import get_config
+from .postgres import fetch_all, quote_identifier
+from .variety_db_schema import VARIETY_PG_NAME_COLUMN
 
 
 _TOKEN_SPLIT_RE = re.compile(r"[，,。；;、\s]+")
@@ -48,36 +48,50 @@ _FRAGMENT_MAX_LEN = 6
 _FRAGMENT_LIMIT = 200
 
 
-def _default_store_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "resources" / "varieties.json"
-
-
-def _get_variety_db_path() -> Optional[Path]:
+def _get_variety_db_url() -> Optional[str]:
     cfg = get_config()
-    if cfg.variety_db_path:
-        return Path(cfg.variety_db_path)
-    default_path = Path(__file__).resolve().parents[2] / "resources" / "rice_variety_approvals.sqlite3"
-    return default_path if default_path.exists() else None
+    return cfg.agri_db_url
+
+
+def _get_variety_db_table() -> str:
+    cfg = get_config()
+    return cfg.variety_db_table or _VARIETY_DB_TABLE
+
+
+def _require_db_url() -> str:
+    url = _get_variety_db_url()
+    if not url:
+        raise RuntimeError("缺少 AGRI_DB_URL，无法读取品种数据。")
+    return url
+
+
+def _load_variety_names_postgres(url: str) -> List[str]:
+    table = _get_variety_db_table()
+    name_col = VARIETY_PG_NAME_COLUMN
+    try:
+        sql = (
+            f"SELECT DISTINCT {quote_identifier(name_col)} AS variety_name "
+            f"FROM {quote_identifier(table)}"
+        )
+        rows = fetch_all(url, sql)
+    except Exception:
+        return []
+    names = []
+    for row in rows:
+        value = row.get("variety_name")
+        if value is None:
+            continue
+        name = str(value).strip()
+        if name:
+            names.append(name)
+    return names
 
 
 @lru_cache(maxsize=1)
 def load_variety_names(path: Path | None = None) -> List[str]:
-    if path is None:
-        path = _get_variety_db_path()
-    if path and path.suffix == ".sqlite3" and path.exists():
-        with sqlite3.connect(path) as conn:
-            rows = conn.execute(
-                f"SELECT DISTINCT variety_name FROM {_VARIETY_DB_TABLE}"
-            ).fetchall()
-        return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
-    store_path = path or _default_store_path()
-    payload = json.loads(store_path.read_text(encoding="utf-8"))
-    names = []
-    for item in payload.get("varieties", []):
-        name = str(item.get("name", "")).strip()
-        if name:
-            names.append(name)
-    return names
+    del path
+    url = _require_db_url()
+    return _load_variety_names_postgres(url)
 
 
 @lru_cache(maxsize=1)

@@ -34,7 +34,6 @@ from ...infra.variety_store import (
     load_variety_names,
     retrieve_variety_candidates,
 )
-from ...infra.weather_cache import store_weather_series
 from ...observability.logging_utils import get_trace_id, reset_trace_id, set_trace_id
 from ...observability.otel import (
     build_span_attributes,
@@ -441,24 +440,20 @@ def _fetch_weather_info(planting: PlantingDetails, prompt: str) -> Dict[str, obj
         weather_series = coerce_weather_series(
             {}, region=planting.region or "unknown"
         )
-        weather_series_ref = store_weather_series(weather_series)
         return {
             "name": "growth_weather_lookup",
             "message": TOOL_NOT_FOUND_MESSAGE,
             "data": {
-                "weather_series_ref": weather_series_ref,
                 "summary": summarize_weather_series(weather_series),
             },
         }
     weather_series = coerce_weather_series(
         result.data, region=planting.region or "unknown"
     )
-    weather_series_ref = store_weather_series(weather_series)
     return {
         "name": result.name,
         "message": result.message,
         "data": {
-            "weather_series_ref": weather_series_ref,
             "summary": summarize_weather_series(weather_series),
         },
     }

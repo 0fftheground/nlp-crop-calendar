@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
@@ -12,6 +10,11 @@ from ...domain.planting import DEFAULT_CROP
 from ...infra.config import get_config
 from ...infra.llm import get_chat_model
 from ...infra.variety_choice_store import VarietyChoice, get_variety_choice_store
+from ...infra.postgres import fetch_all, quote_identifier
+from ...infra.variety_db_schema import (
+    VARIETY_PG_COLUMN_MAP,
+    VARIETY_PG_NAME_COLUMN,
+)
 from ...infra.variety_store import extract_variety_tokens, retrieve_variety_candidates
 from ...observability.llm_usage import (
     apply_span_attributes,
@@ -30,13 +33,16 @@ VARIETY_DB_TABLE = "variety_approvals"
 VARIETY_DB_FIELD_LABELS = {
     "variety_name": "品种名称",
     "approval_year": "审定年份",
+    "approval_no": "审定编号",
     "approval_region": "审定区域",
     "suitable_region": "适种地区",
     "rice_type": "稻作类型",
     "subspecies_type": "亚种类型",
     "maturity": "熟期",
     "control_variety": "对照品种",
+    "growth_days": "生育期(天)",
     "days_vs_control": "比对照长(天)",
+    "rice_code": "稻种编码",
 }
 _UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _FOLLOWUP_INDEX_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
@@ -233,11 +239,16 @@ def _infer_crop_and_variety(prompt: str) -> Tuple[str, str]:
     return crop, variety
 
 
-def _get_variety_db_path() -> Optional[Path]:
+def _require_db_url() -> str:
     cfg = get_config()
-    if cfg.variety_db_path:
-        return Path(cfg.variety_db_path)
-    return Path(__file__).resolve().parents[3] / "resources" / "rice_variety_approvals.sqlite3"
+    if not cfg.agri_db_url:
+        raise RuntimeError("缺少 AGRI_DB_URL，无法读取品种数据。")
+    return cfg.agri_db_url
+
+
+def _get_variety_db_table() -> str:
+    cfg = get_config()
+    return cfg.variety_db_table or VARIETY_DB_TABLE
 
 
 def _normalize_variety_prompt(prompt: str) -> str:
@@ -548,70 +559,143 @@ def _filter_records_by_region(
     return filtered
 
 
-def _query_variety_db_by_name(
-    conn: sqlite3.Connection, name: str, limit: int
-) -> List[sqlite3.Row]:
-    rows = conn.execute(
-        f"SELECT * FROM {VARIETY_DB_TABLE} WHERE variety_name = ?",
-        (name,),
-    ).fetchall()
-    if rows:
-        return rows
-    like_prefix = f"{name}%"
-    rows = conn.execute(
-        f"SELECT * FROM {VARIETY_DB_TABLE} WHERE variety_name LIKE ? LIMIT ?",
-        (like_prefix, limit),
-    ).fetchall()
-    if rows:
-        return rows
-    like_any = f"%{name}%"
-    return conn.execute(
-        f"SELECT * FROM {VARIETY_DB_TABLE} WHERE variety_name LIKE ? LIMIT ?",
-        (like_any, limit),
-    ).fetchall()
-
-
-def _query_variety_db_by_prompt(
-    conn: sqlite3.Connection, prompt: str, limit: int
-) -> List[sqlite3.Row]:
-    return conn.execute(
-        f"SELECT * FROM {VARIETY_DB_TABLE} "
-        "WHERE ? LIKE '%' || variety_name || '%' "
-        "ORDER BY LENGTH(variety_name) DESC LIMIT ?",
-        (prompt, limit),
-    ).fetchall()
-
-
-def _query_variety_db_by_fuzzy_tokens(
-    conn: sqlite3.Connection, tokens: List[str], limit: int
-) -> List[sqlite3.Row]:
-    if not tokens:
-        return []
-    for token in tokens:
-        rows = conn.execute(
-            f"SELECT * FROM {VARIETY_DB_TABLE} WHERE variety_name LIKE ? LIMIT ?",
-            (f"%{token}%", limit),
-        ).fetchall()
-        if rows:
-            return rows
-    return []
-
-
-def _rows_to_variety_records(rows: List[sqlite3.Row]) -> List[Dict[str, object]]:
+def _rows_to_variety_records(
+    rows: List[Dict[str, object]] | List[object]
+) -> List[Dict[str, object]]:
     records: List[Dict[str, object]] = []
     for row in rows:
         record: Dict[str, object] = {}
-        for field in row.keys():
+        fields = row.keys() if hasattr(row, "keys") else []
+        for field in fields:
             label = VARIETY_DB_FIELD_LABELS.get(field, field)
-            record[label] = row[field]
+            try:
+                record[label] = row[field]
+            except Exception:
+                record[label] = None
         records.append(record)
     return records
 
 
 def _rows_to_variety_raw_records(
-    rows: List[sqlite3.Row],
+    rows: List[Dict[str, object]] | List[object],
 ) -> List[Dict[str, object]]:
     return [dict(row) for row in rows]
+
+
+def _build_pg_select_list() -> str:
+    columns = []
+    for alias, column in VARIETY_PG_COLUMN_MAP.items():
+        columns.append(
+            f"{quote_identifier(column)} AS {quote_identifier(alias)}"
+        )
+    return ", ".join(columns)
+
+
+def _query_variety_db_by_name_pg(
+    url: str,
+    table_ident: str,
+    select_list: str,
+    name: str,
+    limit: int,
+) -> List[Dict[str, object]]:
+    name_col = quote_identifier(VARIETY_PG_NAME_COLUMN)
+    rows = fetch_all(
+        url,
+        f"SELECT {select_list} FROM {table_ident} "
+        f"WHERE {name_col} = %s",
+        (name,),
+    )
+    if rows:
+        return rows
+    rows = fetch_all(
+        url,
+        f"SELECT {select_list} FROM {table_ident} "
+        f"WHERE {name_col} ILIKE %s LIMIT %s",
+        (f"{name}%", limit),
+    )
+    if rows:
+        return rows
+    return fetch_all(
+        url,
+        f"SELECT {select_list} FROM {table_ident} "
+        f"WHERE {name_col} ILIKE %s LIMIT %s",
+        (f"%{name}%", limit),
+    )
+
+
+def _query_variety_db_by_prompt_pg(
+    url: str,
+    table_ident: str,
+    select_list: str,
+    prompt: str,
+    limit: int,
+) -> List[Dict[str, object]]:
+    name_col = quote_identifier(VARIETY_PG_NAME_COLUMN)
+    return fetch_all(
+        url,
+        f"SELECT {select_list} FROM {table_ident} "
+        f"WHERE %s ILIKE '%' || {name_col} || '%' "
+        f"ORDER BY LENGTH({name_col}) DESC LIMIT %s",
+        (prompt, limit),
+    )
+
+
+def _query_variety_db_by_fuzzy_tokens_pg(
+    url: str,
+    table_ident: str,
+    select_list: str,
+    tokens: List[str],
+    limit: int,
+) -> List[Dict[str, object]]:
+    if not tokens:
+        return []
+    name_col = quote_identifier(VARIETY_PG_NAME_COLUMN)
+    for token in tokens:
+        rows = fetch_all(
+            url,
+            f"SELECT {select_list} FROM {table_ident} "
+            f"WHERE {name_col} ILIKE %s LIMIT %s",
+            (f"%{token}%", limit),
+        )
+        if rows:
+            return rows
+    return []
+
+
+def _lookup_variety_records_postgres(
+    prompt: str,
+    *,
+    limit: int = 5,
+    confirmed_candidate: Optional[str] = None,
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    url = _require_db_url()
+    prompt_text = prompt or ""
+    normalized_prompt = _normalize_variety_prompt(prompt_text) or prompt_text
+    if confirmed_candidate is None:
+        confirmed_candidate = _extract_confirmed_candidate(prompt_text)
+    variety_name = confirmed_candidate or _extract_variety(normalized_prompt)
+    table = _get_variety_db_table()
+    try:
+        table_ident = quote_identifier(table)
+        select_list = _build_pg_select_list()
+        rows: List[Dict[str, object]] = []
+        if variety_name:
+            rows = _query_variety_db_by_name_pg(
+                url, table_ident, select_list, variety_name, limit
+            )
+        if not rows:
+            rows = _query_variety_db_by_prompt_pg(
+                url, table_ident, select_list, normalized_prompt, limit
+            )
+        if not rows:
+            tokens = extract_variety_tokens(normalized_prompt)
+            rows = _query_variety_db_by_fuzzy_tokens_pg(
+                url, table_ident, select_list, tokens, limit
+            )
+    except Exception as exc:
+        log_event("variety_db_error", provider="postgres", error=str(exc))
+        return [], []
+    return _rows_to_variety_records(rows), _rows_to_variety_raw_records(rows)
 
 
 def _lookup_variety_records(
@@ -620,28 +704,9 @@ def _lookup_variety_records(
     limit: int = 5,
     confirmed_candidate: Optional[str] = None,
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
-    path = _get_variety_db_path()
-    if not path or not path.exists():
-        return [], []
-    prompt_text = prompt or ""
-    normalized_prompt = _normalize_variety_prompt(prompt_text) or prompt_text
-    if confirmed_candidate is None:
-        confirmed_candidate = _extract_confirmed_candidate(prompt_text)
-    variety_name = confirmed_candidate or _extract_variety(normalized_prompt)
-    try:
-        with sqlite3.connect(path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows: List[sqlite3.Row] = []
-            if variety_name:
-                rows = _query_variety_db_by_name(conn, variety_name, limit)
-            if not rows and normalized_prompt:
-                rows = _query_variety_db_by_prompt(conn, normalized_prompt, limit)
-            if not rows and normalized_prompt:
-                tokens = extract_variety_tokens(normalized_prompt)
-                rows = _query_variety_db_by_fuzzy_tokens(conn, tokens, limit)
-    except Exception:
-        return [], []
-    return _rows_to_variety_records(rows), _rows_to_variety_raw_records(rows)
+    return _lookup_variety_records_postgres(
+        prompt, limit=limit, confirmed_candidate=confirmed_candidate
+    )
 
 
 def _extract_confirmed_candidate(prompt: str) -> Optional[str]:

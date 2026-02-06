@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import re
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from ...domain.enums import PlantingMethod
 from ...infra.config import get_config
-from ...infra.gdd_store import get_gdd_db_path, get_gdd_records
+from ...infra.gdd_store import get_gdd_records, get_gdd_source
 from ...infra.geocode_service import (
     annotate_geocode_gdd_region,
     geocode_with_amap,
 )
+from ...infra.postgres import fetch_all, quote_identifier
 from ...infra.rice_region_matcher import match_gdd_region
+from ...infra.variety_db_schema import (
+    VARIETY_PG_COLUMN_MAP,
+    VARIETY_PG_NAME_COLUMN,
+    VARIETY_PG_YEAR_COLUMN,
+)
 from ...observability.logging_utils import log_event
 from ...schemas import GrowthStageResult, PredictGrowthStageInput, WeatherDataPoint
 
@@ -158,15 +162,11 @@ def _resolve_region_hint(region: Optional[str]) -> Tuple[str, Optional[str]]:
     return text, text if geocode else None
 
 
-def _get_variety_db_path() -> Optional[Path]:
+def _require_db_url() -> str:
     cfg = get_config()
-    if cfg.variety_db_path:
-        return Path(cfg.variety_db_path)
-    return (
-        Path(__file__).resolve().parents[3]
-        / "resources"
-        / "rice_variety_approvals.sqlite3"
-    )
+    if not cfg.agri_db_url:
+        raise RuntimeError("缺少 AGRI_DB_URL，无法读取品种数据。")
+    return cfg.agri_db_url
 
 
 def _parse_approval_year(value: object) -> int:
@@ -215,22 +215,41 @@ def _score_region_match(
 def _lookup_variety_records(variety_name: Optional[str]) -> List[Dict[str, object]]:
     if not variety_name:
         return []
-    path = _get_variety_db_path()
-    if not path or not path.exists():
-        return []
+    cfg = get_config()
+    return _lookup_variety_records_postgres(
+        variety_name, _require_db_url(), cfg.variety_db_table
+    )
+
+
+def _lookup_variety_records_postgres(
+    variety_name: str, url: str, table: str
+) -> List[Dict[str, object]]:
+    name_col = VARIETY_PG_COLUMN_MAP.get("variety_name", VARIETY_PG_NAME_COLUMN)
+    year_col = VARIETY_PG_COLUMN_MAP.get("approval_year", VARIETY_PG_YEAR_COLUMN)
+    columns = {
+        "approval_region": VARIETY_PG_COLUMN_MAP["approval_region"],
+        "rice_type": VARIETY_PG_COLUMN_MAP["rice_type"],
+        "subspecies_type": VARIETY_PG_COLUMN_MAP["subspecies_type"],
+        "maturity": VARIETY_PG_COLUMN_MAP["maturity"],
+        "control_variety": VARIETY_PG_COLUMN_MAP["control_variety"],
+        "days_vs_control": VARIETY_PG_COLUMN_MAP["days_vs_control"],
+        "approval_year": VARIETY_PG_COLUMN_MAP["approval_year"],
+    }
     try:
-        with sqlite3.connect(path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT approval_region, rice_type, subspecies_type, maturity, "
-                "control_variety, days_vs_control, approval_year "
-                "FROM variety_approvals WHERE variety_name = ? "
-                "ORDER BY approval_year DESC",
-                (variety_name,),
-            ).fetchall()
-    except sqlite3.Error:
+        table_ident = quote_identifier(table)
+        select_list = ", ".join(
+            f"{quote_identifier(db)} AS {quote_identifier(alias)}"
+            for alias, db in columns.items()
+        )
+        sql = (
+            f"SELECT {select_list} FROM {table_ident} "
+            f"WHERE {quote_identifier(name_col)} = %s "
+            f"ORDER BY {quote_identifier(year_col)} DESC"
+        )
+        rows = fetch_all(url, sql, (variety_name,))
+    except Exception:
         return []
-    return [dict(row) for row in rows]
+    return rows
 
 
 def _resolve_variety_meta(
@@ -540,7 +559,7 @@ def predict_growth_stage_local(
         maturity=maturity,
         variety_record_source=variety_meta_source,
         rule=rule,
-        gdd_path=str(get_gdd_db_path()),
+        gdd_path=get_gdd_source(),
     )
 
     stages: Dict[str, str] = {

@@ -1,37 +1,44 @@
 from __future__ import annotations
 
-import sqlite3
 from functools import lru_cache
-from pathlib import Path
 from typing import Dict, List
 
 from .config import get_config
+from .postgres import fetch_all, quote_identifier
 
 GDD_TABLE_NAME = "gdd_stages"
 
 
-def get_gdd_db_path() -> Path:
+def _get_gdd_db_url() -> str | None:
     cfg = get_config()
-    if cfg.growth_stage_db_path:
-        return Path(cfg.growth_stage_db_path)
-    return Path(__file__).resolve().parents[2] / "resources" / "gdd.sqlite3"
+    return cfg.agri_db_url
+
+
+def _get_gdd_db_table() -> str:
+    cfg = get_config()
+    return cfg.growth_stage_db_table or GDD_TABLE_NAME
+
+
+def _require_db_url() -> str:
+    url = _get_gdd_db_url()
+    if not url:
+        raise RuntimeError("缺少 AGRI_DB_URL，无法读取积温数据。")
+    return url
+
+
+def get_gdd_source() -> str:
+    table = _get_gdd_db_table()
+    return f"postgres:{table}"
 
 
 def _fetch_gdd_records() -> List[Dict[str, object]]:
-    path = get_gdd_db_path()
-    if not path.exists():
-        raise FileNotFoundError(
-            f"GDD SQLite 不存在: {path}. 请先运行 scripts/import_gdd_to_sqlite.py 导入。"
-        )
+    url = _require_db_url()
+    table = _get_gdd_db_table()
     try:
-        with sqlite3.connect(path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                f"SELECT * FROM {GDD_TABLE_NAME}"
-            ).fetchall()
-    except sqlite3.Error as exc:
-        raise RuntimeError(f"GDD SQLite 读取失败: {exc}") from exc
-    return [dict(row) for row in rows]
+        sql = f"SELECT * FROM {quote_identifier(table)}"
+        return fetch_all(url, sql)
+    except Exception as exc:
+        raise RuntimeError(f"GDD Postgres 读取失败: {exc}") from exc
 
 
 @lru_cache(maxsize=1)

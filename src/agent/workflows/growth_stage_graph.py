@@ -11,7 +11,7 @@ from langgraph.graph import END, StateGraph
 
 from ...application.services.planting_service import extract_planting_details
 from ...application.services.growth_stage_service import predict_growth_stage_local
-from ...application.services.weather_service import lookup_goso_weather
+from ...application.services.weather_service import lookup_farm_weather_by_user
 from ...domain.planting import (
     MissingPlantingInfoError,
     list_missing_required_fields,
@@ -23,7 +23,6 @@ from ...infra.planting_choice_store import (
     build_choice_key,
     get_planting_choice_store,
 )
-from ...infra.weather_cache import get_weather_series, store_weather_series
 from ...observability.otel import (
     build_span_attributes,
     record_exception,
@@ -41,7 +40,6 @@ from ...schemas import (
     GrowthStageResult,
     PredictGrowthStageInput,
     ToolInvocation,
-    WeatherQueryInput,
 )
 from ..tools.registry import cache_tool_result, execute_tool, get_cached_tool_result
 from .common import (
@@ -520,15 +518,14 @@ def _growth_weather_node(state: GraphState) -> GraphState:
         )
         return state
 
-    try:
-        weather_query = WeatherQueryInput(
-            region=planting.region or "unknown",
-            year=planting.sowing_date.year,
-            granularity="daily",
-        )
-    except Exception:
-        weather_query = None
-    result = lookup_goso_weather(weather_query)
+    start_date = planting.sowing_date
+    end_date = date(planting.sowing_date.year, 12, 31)
+    result = lookup_farm_weather_by_user(
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+        region=planting.region or "unknown",
+    )
     if not result:
         weather_series = coerce_weather_series(
             {}, region=planting.region or "unknown"
@@ -547,10 +544,19 @@ def _growth_weather_node(state: GraphState) -> GraphState:
             "message": result.message,
             "data": {},
         }
+        if not result.data:
+            state = add_trace(state, "weather missing farm data")
+            state.update(
+                {
+                    "message": result.message,
+                    "weather_info": weather_info,
+                    "weather_series": weather_series,
+                    "halt": True,
+                }
+            )
+            return state
 
-    weather_series_ref = store_weather_series(weather_series)
     weather_info["data"] = {
-        "weather_series_ref": weather_series_ref,
         "summary": summarize_weather_series(weather_series),
     }
 
@@ -558,7 +564,7 @@ def _growth_weather_node(state: GraphState) -> GraphState:
     state.update(
         {
             "planting": planting,
-            "weather_series_ref": weather_series_ref,
+            "weather_series": weather_series,
             "weather_info": weather_info,
             "assumptions": list(draft.assumptions),
         }
@@ -568,7 +574,7 @@ def _growth_weather_node(state: GraphState) -> GraphState:
 
 def _growth_predict_node(state: GraphState) -> GraphState:
     planting = state.get("planting")
-    weather_series_ref = state.get("weather_series_ref")
+    weather_series = state.get("weather_series")
     weather_info = state.get("weather_info") or {}
     if planting is None:
         state = add_trace(state, "predict missing planting")
@@ -581,7 +587,6 @@ def _growth_predict_node(state: GraphState) -> GraphState:
             }
         )
         return state
-    weather_series = get_weather_series(weather_series_ref)
     if weather_series is None:
         weather_series = coerce_weather_series(
             {}, region=planting.region or "unknown"
@@ -696,6 +701,8 @@ def _growth_route_after_variety(state: GraphState) -> str:
 
 def _growth_route_after_weather(state: GraphState) -> str:
     if state.get("cache_hit"):
+        return END
+    if state.get("halt"):
         return END
     return "predict"
 

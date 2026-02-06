@@ -67,8 +67,9 @@ app.add_middleware(
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_LOG_PATH = _PROJECT_ROOT / "api_errors.log"
-_OBS_LOG_PATH = _PROJECT_ROOT / "observability.log"
+_LOG_DIR = _PROJECT_ROOT / ".cache" / "logs"
+_LOG_PATH = _LOG_DIR / "api_errors.log"
+_OBS_LOG_PATH = _LOG_DIR / "observability.log"
 
 
 def _append_error_log(message: str, tb: str = "") -> None:

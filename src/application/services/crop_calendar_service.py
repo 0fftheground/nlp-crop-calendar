@@ -4,10 +4,6 @@ import math
 from datetime import date, datetime, time, timedelta
 from typing import Callable, Dict, List, Optional, TypedDict
 
-from ...infra.weather_cache import (
-    get_weather_series_by_query,
-    store_weather_series_by_query,
-)
 from .growth_stage_service import predict_growth_stage_local
 from ...schemas import (
     FarmWorkRecommendInput,
@@ -58,12 +54,7 @@ def fetch_weather(query: WeatherQueryInput) -> WeatherSeries:
     """
     Invoke the weather tool/service. This demo returns synthetic data.
     """
-    cached = get_weather_series_by_query(query)
-    if cached is not None:
-        return cached
-    weather_series = get_farm_weather(query)
-    store_weather_series_by_query(query, weather_series)
-    return weather_series
+    return get_farm_weather(query)
 
 
 def assemble_weather_series(

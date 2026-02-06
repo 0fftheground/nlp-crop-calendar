@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +34,12 @@ class AppConfig(BaseSettings):
     )
     default_region: str = Field(default="global", validation_alias="DEFAULT_REGION")
     fastapi_port: int = Field(default=8000, validation_alias="FASTAPI_PORT")
+    agri_db_url: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("AGRI_DB_URL", "DB_URL")
+    )
+    user_farm_table: str = Field(
+        default="user_farm_map", validation_alias="USER_FARM_TABLE"
+    )
     variety_provider: str = Field(
         default="local", validation_alias="VARIETY_PROVIDER"
     )
@@ -43,11 +49,14 @@ class AppConfig(BaseSettings):
     variety_api_key: Optional[str] = Field(
         default=None, validation_alias="VARIETY_API_KEY"
     )
-    variety_db_path: Optional[str] = Field(
-        default=None, validation_alias="VARIETY_DB_PATH"
+    variety_db_table: str = Field(
+        default="variety_approvals", validation_alias="VARIETY_DB_TABLE"
     )
     weather_provider: str = Field(
         default="mock", validation_alias="WEATHER_PROVIDER"
+    )
+    weather_db_table: str = Field(
+        default="agri_weather", validation_alias="WEATHER_DB_TABLE"
     )
     weather_api_url: Optional[str] = Field(
         default=None, validation_alias="WEATHER_API_URL"
@@ -76,11 +85,8 @@ class AppConfig(BaseSettings):
     growth_stage_api_key: Optional[str] = Field(
         default=None, validation_alias="GROWTH_STAGE_API_KEY"
     )
-    growth_stage_gdd_path: Optional[str] = Field(
-        default=None, validation_alias="GROWTH_STAGE_GDD_PATH"
-    )
-    growth_stage_db_path: Optional[str] = Field(
-        default=None, validation_alias="GROWTH_STAGE_DB_PATH"
+    growth_stage_db_table: str = Field(
+        default="gdd_stages", validation_alias="GROWTH_STAGE_DB_TABLE"
     )
     recommendation_provider: str = Field(
         default="mock", validation_alias="RECOMMENDATION_PROVIDER"
@@ -98,23 +104,11 @@ class AppConfig(BaseSettings):
     pending_store_path: Optional[str] = Field(
         default=None, validation_alias="PENDING_STORE_PATH"
     )
-    weather_cache_store: str = Field(
-        default="sqlite", validation_alias="WEATHER_CACHE_STORE"
-    )
-    weather_cache_ttl_seconds: int = Field(
-        default=21600, validation_alias="WEATHER_CACHE_TTL_SECONDS"
-    )
-    weather_cache_path: Optional[str] = Field(
-        default=None, validation_alias="WEATHER_CACHE_PATH"
-    )
     weather_archive_path: Optional[str] = Field(
         default=None, validation_alias="WEATHER_ARCHIVE_PATH"
     )
     weather_archive_dir: Optional[str] = Field(
         default=None, validation_alias="WEATHER_ARCHIVE_DIR"
-    )
-    weather_cache_max_items: int = Field(
-        default=128, validation_alias="WEATHER_CACHE_MAX_ITEMS"
     )
     tool_cache_store: str = Field(default="sqlite", validation_alias="TOOL_CACHE_STORE")
     tool_cache_ttl_seconds: int = Field(
@@ -178,7 +172,6 @@ class AppConfig(BaseSettings):
 
     @field_validator(
         "pending_store",
-        "weather_cache_store",
         "tool_cache_store",
         "interaction_store",
         mode="after",

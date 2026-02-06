@@ -16,14 +16,11 @@ from ...infra.export_store import resolve_export_path, write_export
 from ...infra.geocode_cache import get_geocode_cached, set_geocode_cached
 from ...infra.llm import get_chat_model
 from ...infra.tool_provider import normalize_provider
+from ...infra.user_farm_store import get_farm_id_for_user
+from ...infra.postgres import fetch_all, quote_identifier
 from ...infra.weather_archive_store import (
     build_weather_archive_path,
     get_weather_archive_store,
-)
-from ...infra.weather_cache import (
-    get_weather_series,
-    make_weather_grid_cache_key,
-    store_weather_series,
 )
 from ...observability.llm_usage import (
     apply_span_attributes,
@@ -499,25 +496,6 @@ def _load_weather_points_from_csv(path: Path) -> List[WeatherDataPoint]:
     return points
 
 
-def _hydrate_series_from_export(
-    series: WeatherSeries, path: Path
-) -> Optional[WeatherSeries]:
-    points = _load_weather_points_from_csv(path)
-    if not points:
-        return None
-    start_date = points[0].timestamp.date()
-    end_date = points[-1].timestamp.date()
-    return series.model_copy(
-        update={"points": points, "start_date": start_date, "end_date": end_date}
-    )
-
-
-def _trim_weather_series_for_cache(series: WeatherSeries) -> WeatherSeries:
-    if series.points:
-        return series.model_copy(update={"points": []})
-    return series
-
-
 def _ensure_weather_export(
     series: WeatherSeries,
 ) -> Tuple[str, str, WeatherSeries, bool]:
@@ -712,70 +690,6 @@ def _lookup_91weather(
                     query = query.model_copy(update={"region": formatted})
         if not query or query.lat is None or query.lon is None:
             return _build_lat_lon_followup(query)
-    cache_key = make_weather_grid_cache_key(
-        query.lat,
-        query.lon,
-        day=date.today(),
-    )
-    cached_series = get_weather_series(cache_key)
-    if cached_series:
-        existing_file_id, existing_path = _resolve_existing_export(cached_series)
-        if not existing_path:
-            cached_series = None
-        else:
-            updated = False
-            response_series = cached_series
-            hydrated = _hydrate_series_from_export(
-                cached_series, existing_path
-            )
-            if hydrated:
-                response_series = hydrated
-            if query.region and cached_series.region != query.region:
-                cached_series = cached_series.model_copy(
-                    update={"region": query.region, "summary": None}
-                )
-                response_series = response_series.model_copy(
-                    update={"region": query.region, "summary": None}
-                )
-                updated = True
-            summary = cached_series.summary
-            if not summary:
-                summary = _summarize_weather_series(response_series)
-                cached_series = cached_series.model_copy(
-                    update={"summary": summary}
-                )
-                response_series = response_series.model_copy(
-                    update={"summary": summary}
-                )
-                updated = True
-            if cached_series.export_file_id and not response_series.export_file_id:
-                response_series = response_series.model_copy(
-                    update={
-                        "export_file_id": cached_series.export_file_id,
-                        "export_path": cached_series.export_path,
-                    }
-                )
-            file_id, _, export_series, export_updated = _ensure_weather_export(
-                response_series
-            )
-            response_series = export_series
-            if export_updated:
-                updated = True
-            if updated:
-                cache_series = _trim_weather_series_for_cache(export_series)
-                store_weather_series(cache_series, cache_key=cache_key)
-            download_url = _build_download_url(
-                file_id, base_url=cfg.public_base_url
-            )
-            data_payload = response_series.model_dump(mode="json")
-            data_payload["summary"] = summary
-            data_payload["download_url"] = download_url
-            message = f"{summary}\n下载链接: {download_url}"
-            return ToolInvocation(
-                name="weather_lookup",
-                message=message,
-                data=data_payload,
-            )
     url = api_url or "https://data-api.91weather.com/Zoomlion/higf_day_plus"
     params = {"lat": query.lat, "lon": query.lon}
     try:
@@ -794,8 +708,6 @@ def _lookup_91weather(
         summary = _summarize_weather_series(series)
         series = series.model_copy(update={"summary": summary})
         file_id, _, series, _ = _ensure_weather_export(series)
-        cache_series = _trim_weather_series_for_cache(series)
-        store_weather_series(cache_series, cache_key=cache_key)
         download_url = _build_download_url(file_id, base_url=cfg.public_base_url)
         data_payload = series.model_dump(mode="json")
         data_payload["summary"] = summary
@@ -910,6 +822,127 @@ def lookup_goso_weather(
     return ToolInvocation(
         name="growth_weather_lookup",
         message=message,
+        data=series.model_dump(mode="json"),
+    )
+
+
+def _require_db_url() -> str:
+    cfg = get_config()
+    if not cfg.agri_db_url:
+        raise RuntimeError("缺少 AGRI_DB_URL，无法读取气象数据。")
+    return cfg.agri_db_url
+
+
+def _get_weather_table() -> str:
+    cfg = get_config()
+    return cfg.weather_db_table or "agri_weather"
+
+
+def _normalize_weather_date(value: object) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _query_farm_weather_rows(
+    farm_id: str, start_date: date, end_date: date
+) -> List[Dict[str, object]]:
+    url = _require_db_url()
+    table = quote_identifier(_get_weather_table())
+    col_date = quote_identifier("date")
+    col_farm = quote_identifier("farm_id")
+    sql = (
+        f"SELECT {col_date} AS date, "
+        "tmax, tmin, tavg, wins, pre, rh "
+        f"FROM {table} "
+        f"WHERE {col_farm} = %s AND {col_date} >= %s AND {col_date} <= %s "
+        f"ORDER BY {col_date} ASC"
+    )
+    return fetch_all(url, sql, (farm_id, start_date, end_date))
+
+
+def _build_series_from_rows(
+    farm_id: str,
+    rows: List[Dict[str, object]],
+    *,
+    region: Optional[str] = None,
+) -> Optional[WeatherSeries]:
+    if not rows:
+        return None
+    points: List[WeatherDataPoint] = []
+    for row in rows:
+        day = _normalize_weather_date(row.get("date"))
+        if day is None:
+            continue
+        points.append(
+            WeatherDataPoint(
+                timestamp=datetime.combine(day, time.min),
+                temperature=_parse_float(row.get("tavg")),
+                temperature_max=_parse_float(row.get("tmax")),
+                temperature_min=_parse_float(row.get("tmin")),
+                humidity=_parse_float(row.get("rh")),
+                precipitation=_parse_float(row.get("pre")),
+                wind_speed=_parse_float(row.get("wins")),
+                condition=None,
+            )
+        )
+    if not points:
+        return None
+    start_date = points[0].timestamp.date()
+    end_date = points[-1].timestamp.date()
+    return WeatherSeries(
+        region=region or f"farm:{farm_id}",
+        granularity="daily",
+        start_date=start_date,
+        end_date=end_date,
+        points=points,
+        source="db",
+    )
+
+
+def lookup_farm_weather_by_user(
+    *,
+    user_id: Optional[str],
+    start_date: date,
+    end_date: date,
+    region: Optional[str] = None,
+) -> ToolInvocation:
+    if not user_id:
+        return ToolInvocation(
+            name="growth_weather_lookup",
+            message="缺少 user_id，无法匹配农场气象数据。",
+            data={},
+        )
+    farm_id = get_farm_id_for_user(user_id)
+    if not farm_id:
+        return ToolInvocation(
+            name="growth_weather_lookup",
+            message="当前用户未绑定农场，请先配置用户-农场关联。",
+            data={},
+        )
+    rows = _query_farm_weather_rows(farm_id, start_date, end_date)
+    series = _build_series_from_rows(farm_id, rows, region=region)
+    if not series:
+        return ToolInvocation(
+            name="growth_weather_lookup",
+            message="未找到对应农场的气象数据。",
+            data={},
+        )
+    return ToolInvocation(
+        name="growth_weather_lookup",
+        message="已获取农场气象数据。",
         data=series.model_dump(mode="json"),
     )
 

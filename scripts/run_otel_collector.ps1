@@ -14,12 +14,16 @@ if (-not (Test-Path $ConfigPath)) {
 $resolvedConfig = (Resolve-Path $ConfigPath).Path
 $otel = $OtelcolPath
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$otelDir = Join-Path $projectRoot ".cache\\otel"
+if (-not (Test-Path $otelDir)) {
+    New-Item -ItemType Directory -Force -Path $otelDir | Out-Null
+}
 
 if (-not $env:OTEL_LOG_PATH) {
-    $env:OTEL_LOG_PATH = (Join-Path $projectRoot "otel-logs.json")
+    $env:OTEL_LOG_PATH = (Join-Path $otelDir "otel-logs.json")
 }
 if (-not $env:OTEL_TRACES_PATH) {
-    $env:OTEL_TRACES_PATH = (Join-Path $projectRoot "otel-traces.json")
+    $env:OTEL_TRACES_PATH = (Join-Path $otelDir "otel-traces.json")
 }
 
 if ($OtelcolPath -eq "otelcol") {
