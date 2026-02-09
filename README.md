@@ -42,11 +42,18 @@ CHAINLIT_PORT=8001
 HOST=0.0.0.0
 PUBLIC_BASE_URL=http://127.0.0.1:8000
 AGRI_DB_URL=
-USER_FARM_TABLE=user_farm_map
+AGRI_DB_HOST=
+AGRI_DB_PORT=5432
+AGRI_DB_NAME=
+AGRI_DB_USER=
+AGRI_DB_PASSWORD=
+AGRI_DB_SSLMODE=
+DEFAULT_FARM_ID=1
+DEFAULT_FARM_ID=
 VARIETY_PROVIDER=local
 VARIETY_API_URL=
 VARIETY_API_KEY=
-VARIETY_DB_TABLE=variety_approvals
+VARIETY_DB_TABLE=agri_rice_variety
 WEATHER_PROVIDER=mock
 WEATHER_DB_TABLE=agri_weather
 WEATHER_API_URL=
@@ -54,7 +61,7 @@ WEATHER_API_KEY=
 GROWTH_STAGE_PROVIDER=local
 GROWTH_STAGE_API_URL=
 GROWTH_STAGE_API_KEY=
-GROWTH_STAGE_DB_TABLE=gdd_stages
+GROWTH_STAGE_DB_TABLE=agri_gdd_stages
 RECOMMENDATION_PROVIDER=mock
 RECOMMENDATION_API_URL=
 RECOMMENDATION_API_KEY=
@@ -64,6 +71,7 @@ Tools default to `mock`. Variety lookup and GDD lookup read from Postgres via `A
 To use a single Postgres connection for all data, set:
 - `AGRI_DB_URL`
 SQLite 数据源已移除，未配置 `AGRI_DB_URL` 会导致品种/积温查询失败。
+也可使用拆分字段（`AGRI_DB_HOST/PORT/NAME/USER/PASSWORD/SSLMODE`）自动拼接连接串。
 
 Postgres品种表字段映射（会自动映射为内部字段）：
 - `name` -> 品种名称
@@ -81,16 +89,7 @@ Postgres品种表字段映射（会自动映射为内部字段）：
 
 Postgres积温表字段需与现有列名一致（中文列名），例如“审定地区/稻作类型/亚种/熟制/标准品种/三叶一心/返青/.../成熟期”。
 Growth-stage 工作流的气象数据从 `WEATHER_DB_TABLE`（默认 `agri_weather`）读取，按 `farm_id + date` 查询。
-需要在 `USER_FARM_TABLE`（默认 `user_farm_map`）中维护 `user_id -> farm_id` 关联。
-示例：
-```sql
-CREATE TABLE IF NOT EXISTS user_farm_map (
-  user_id TEXT PRIMARY KEY,
-  farm_id TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-```
+POC 阶段直接设置 `DEFAULT_FARM_ID`（所有用户共用同一农场）。
 To use the external 15-day weather API, set `WEATHER_PROVIDER=91weather` and ensure the request includes `lat`/`lon` (the tool accepts `WeatherQueryInput` JSON with `lat`/`lon`).
 Crop calendar workflow uses historical weather (`goso_day`) and does not support future dates yet. Growth-stage workflow reads weather from `WEATHER_DB_TABLE`.
 
@@ -245,7 +244,7 @@ docker compose --env-file .env.docker up -d --build
 ```
 
 ### Notes
-- `db` stores Chainlit persistence; other caches remain local `.sqlite3` files inside containers.
+- `db` stores Chainlit persistence; pending/tool/geocode caches and interaction logs use Postgres when `*_STORE=postgres` (via `CACHE_DB_URL`).
 - `otel-collector` runs internally (no host ports exposed). Logs/traces are persisted to the `otel-data` volume.
 
 ## External Access
@@ -271,7 +270,6 @@ Ensure your firewall/security group allows access to ports `8000` (FastAPI) and 
 - Crop calendar/growth-stage workflow results build cache keys from normalized `PlantingDetails`; cache hits return immediately.
 - To hit growth-stage cache, pass `PlantingDetails` JSON (or JSON containing a `planting` field).
 - Follow-up control: pending state is passed into the LLM planner; the LLM decides whether to continue follow-up or switch to a new question; when it selects a new tool/workflow or action=none, pending is cleared.
-- Experience memory: for the same `user_id + crop + region`, missing planting fields are auto-reused with TTL; to clear, ask the assistant to clear memory (LLM selects the `memory_clear` tool).
 - Infrastructure adapters live in `src/infra` (config, LLM client, structured extraction, etc.).
 - Non-agronomy requests return `mode="none"` and skip tools/workflows.
 - Variety extraction uses candidate-name matching + fuzzy tokens; data source is Postgres via `AGRI_DB_URL`.
@@ -279,12 +277,12 @@ Ensure your firewall/security group allows access to ports `8000` (FastAPI) and 
 
 ## Recent Updates
 - Growth-stage prediction uses the `variety_lookup` tool flow with follow-ups and can prompt for specific approval records when region matching is ambiguous.
-- Historical weather (`goso_day`) is used for the crop calendar workflow; results are archived locally with a 0.05° grid cache.
+- Historical weather (`goso_day`) is used for the crop calendar workflow.
 - Future sowing dates (>=2026) trigger a re-ask for a valid date before continuing.
 - Growth-stage outputs now include the full ordered stage date list.
 
 ## Frontend client_id (user_id)
-To enable cross-session memory without login, generate a UUID in the browser, store it in `localStorage` (or a long-lived cookie), and send it as `user_id` on each request. Keep `session_id` for per-chat isolation if needed.
+If you want a stable `user_id` (for future user-level context like farm mapping), generate a UUID in the browser, store it in `localStorage` (or a long-lived cookie), and send it as `user_id` on each request. Keep `session_id` for per-chat isolation if needed.
 
 ```html
 <script>

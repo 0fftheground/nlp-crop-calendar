@@ -14,6 +14,7 @@ from typing import List, Optional
 from ..observability.logging_utils import get_trace_id, summarize_text
 from ..schemas.models import HandleResponse, UserRequest
 from .config import get_config
+from .postgres import connect_postgres
 
 
 class InteractionStore:
@@ -156,6 +157,89 @@ class SqliteInteractionStore(InteractionStore):
                 )
 
 
+class PostgresInteractionStore(InteractionStore):
+    def __init__(self, url: str, ttl_days: int) -> None:
+        self._url = url
+        self._ttl_days = max(0, int(ttl_days))
+        self._lock = Lock()
+        self._init_db()
+
+    def _connect(self):
+        return connect_postgres(self._url)
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS interactions ("
+                "id BIGSERIAL PRIMARY KEY, "
+                "created_at BIGINT NOT NULL, "
+                "trace_id TEXT, "
+                "session_id TEXT, "
+                "prompt TEXT, "
+                "region TEXT, "
+                "mode TEXT, "
+                "latency_ms INTEGER, "
+                "request_json JSONB, "
+                "response_json JSONB)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_interactions_created "
+                "ON interactions (created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_interactions_session "
+                "ON interactions (session_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_interactions_trace "
+                "ON interactions (trace_id)"
+            )
+
+    def record(self, request: UserRequest, response: HandleResponse, latency_ms: int) -> None:
+        created_at = int(time.time())
+        trace_id = get_trace_id()
+        request_summary = _summarize_request(request)
+        response_summary = _summarize_response(response)
+        request_summary, response_summary = _attach_raw_payload(
+            request_summary,
+            response_summary,
+            request=request,
+            response=response,
+            latency_ms=latency_ms,
+            trace_id=trace_id,
+            created_at=created_at,
+        )
+        request_json = json.dumps(
+            request_summary, ensure_ascii=False, default=str
+        )
+        response_json = json.dumps(
+            response_summary, ensure_ascii=False, default=str
+        )
+        session_id = request.session_id or request.user_id or "default"
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO interactions (created_at, trace_id, session_id, prompt, region, mode, latency_ms, "
+                "request_json, response_json) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)",
+                (
+                    created_at,
+                    trace_id,
+                    session_id,
+                    request_summary.get("prompt_summary"),
+                    request_summary.get("region"),
+                    response_summary.get("mode"),
+                    latency_ms,
+                    request_json,
+                    response_json,
+                ),
+            )
+            if self._ttl_days > 0:
+                cutoff = created_at - (self._ttl_days * 86400)
+                conn.execute(
+                    "DELETE FROM interactions WHERE created_at < %s",
+                    (cutoff,),
+                )
+
 def _summarize_request(request: UserRequest) -> dict:
     prompt = request.prompt or ""
     return {
@@ -256,6 +340,12 @@ def build_interaction_store() -> InteractionStore:
     store = (cfg.interaction_store or "disabled").lower()
     if store in {"off", "disabled", "none"}:
         return NoopInteractionStore()
+    if store == "postgres":
+        if not cfg.cache_db_url:
+            raise RuntimeError("缺少 CACHE_DB_URL，无法写入外部审计存储。")
+        return PostgresInteractionStore(
+            url=cfg.cache_db_url, ttl_days=cfg.interaction_store_ttl_days
+        )
     if store == "sqlite":
         if cfg.interaction_store_path:
             path = Path(cfg.interaction_store_path)

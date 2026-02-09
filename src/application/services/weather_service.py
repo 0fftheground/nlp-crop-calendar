@@ -16,12 +16,7 @@ from ...infra.export_store import resolve_export_path, write_export
 from ...infra.geocode_cache import get_geocode_cached, set_geocode_cached
 from ...infra.llm import get_chat_model
 from ...infra.tool_provider import normalize_provider
-from ...infra.user_farm_store import get_farm_id_for_user
 from ...infra.postgres import fetch_all, quote_identifier
-from ...infra.weather_archive_store import (
-    build_weather_archive_path,
-    get_weather_archive_store,
-)
 from ...observability.llm_usage import (
     apply_span_attributes,
     build_llm_input_token_attrs,
@@ -470,32 +465,6 @@ def _resolve_existing_export(
     return None, None
 
 
-def _load_weather_points_from_csv(path: Path) -> List[WeatherDataPoint]:
-    points: List[WeatherDataPoint] = []
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
-                day = _parse_forecast_date(row.get("date"))
-                if day is None:
-                    continue
-                points.append(
-                    WeatherDataPoint(
-                        timestamp=datetime.combine(day, time.min),
-                        temperature=_parse_float(row.get("temperature_avg")),
-                        temperature_max=_parse_float(row.get("temperature_max")),
-                        temperature_min=_parse_float(row.get("temperature_min")),
-                        humidity=_parse_float(row.get("humidity")),
-                        precipitation=_parse_float(row.get("precipitation")),
-                        wind_speed=_parse_float(row.get("wind_speed")),
-                        condition=row.get("condition") or None,
-                    )
-                )
-    except Exception:
-        return []
-    return points
-
-
 def _ensure_weather_export(
     series: WeatherSeries,
 ) -> Tuple[str, str, WeatherSeries, bool]:
@@ -633,41 +602,6 @@ def _resolve_query_range(query: WeatherQueryInput) -> Tuple[date, date]:
     return start, end
 
 
-def _build_archive_series(
-    query: WeatherQueryInput, path: Path
-) -> Optional[WeatherSeries]:
-    points = _load_weather_points_from_csv(path)
-    if not points:
-        return None
-    start_date = points[0].timestamp.date()
-    end_date = points[-1].timestamp.date()
-    return WeatherSeries(
-        region=query.region,
-        granularity=query.granularity or "daily",
-        start_date=start_date,
-        end_date=end_date,
-        points=points,
-        source="91weather",
-    )
-
-
-def _persist_weather_archive(
-    series: WeatherSeries,
-    *,
-    region: str,
-    lat: float,
-    lon: float,
-    year: int,
-) -> Optional[str]:
-    try:
-        path = build_weather_archive_path(region, lat, lon, year)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_build_weather_csv(series), encoding="utf-8")
-    except Exception:
-        return None
-    return str(path)
-
-
 def _lookup_91weather(
     query: Optional[WeatherQueryInput],
     *,
@@ -760,22 +694,6 @@ def lookup_goso_weather(
         )
 
     year = query.year
-    archive_store = get_weather_archive_store()
-    archive_path = archive_store.get(
-        region=query.region, lat=query.lat, lon=query.lon, year=year
-    )
-    if archive_path:
-        path = Path(archive_path)
-        if path.exists():
-            series = _build_archive_series(query, path)
-            if series:
-                message = f"已获取{year}年历史气象数据（本地缓存）。"
-                return ToolInvocation(
-                    name="growth_weather_lookup",
-                    message=message,
-                    data=series.model_dump(mode="json"),
-                )
-
     url = api_url or "https://data-api.91weather.com/Zoomlion/goso_day"
     start = date(year, 1, 1)
     end = date(year, 12, 31)
@@ -802,21 +720,6 @@ def lookup_goso_weather(
             name="growth_weather_lookup",
             message="历史气象接口返回格式未识别。",
             data={"payload": payload},
-        )
-    archive_path = _persist_weather_archive(
-        series,
-        region=query.region,
-        lat=query.lat,
-        lon=query.lon,
-        year=year,
-    )
-    if archive_path:
-        archive_store.set(
-            region=query.region,
-            lat=query.lat,
-            lon=query.lon,
-            year=year,
-            data_path=archive_path,
         )
     message = f"已获取{year}年历史气象数据。"
     return ToolInvocation(
@@ -919,17 +822,12 @@ def lookup_farm_weather_by_user(
     end_date: date,
     region: Optional[str] = None,
 ) -> ToolInvocation:
-    if not user_id:
-        return ToolInvocation(
-            name="growth_weather_lookup",
-            message="缺少 user_id，无法匹配农场气象数据。",
-            data={},
-        )
-    farm_id = get_farm_id_for_user(user_id)
+    cfg = get_config()
+    farm_id = cfg.default_farm_id
     if not farm_id:
         return ToolInvocation(
             name="growth_weather_lookup",
-            message="当前用户未绑定农场，请先配置用户-农场关联。",
+            message="未配置 DEFAULT_FARM_ID，无法查询农场气象数据。",
             data={},
         )
     rows = _query_farm_weather_rows(farm_id, start_date, end_date)

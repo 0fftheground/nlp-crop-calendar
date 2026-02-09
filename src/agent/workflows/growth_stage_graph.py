@@ -5,6 +5,7 @@ LangGraph workflow for growth stage prediction.
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Dict, Optional
 
 from langgraph.graph import END, StateGraph
@@ -19,10 +20,6 @@ from ...domain.planting import (
     normalize_and_validate_planting,
 )
 from ...infra.cache_keys import build_planting_cache_key
-from ...infra.planting_choice_store import (
-    build_choice_key,
-    get_planting_choice_store,
-)
 from ...observability.otel import (
     build_span_attributes,
     record_exception,
@@ -43,13 +40,9 @@ from ...schemas import (
 )
 from ..tools.registry import cache_tool_result, execute_tool, get_cached_tool_result
 from .common import (
-    apply_experience_choice_to_draft,
-    build_experience_notice,
-    clear_experience_fields,
     coerce_planting_draft,
     coerce_weather_series,
     build_fallback_planting,
-    detect_experience_change_fields,
     infer_unknown_fields,
     llm_extract_planting,
     summarize_weather_series,
@@ -148,58 +141,6 @@ def _growth_extract_node(state: GraphState) -> GraphState:
         )
         return state
     missing_fields = _drop_variety(list_missing_required_fields(draft))
-    experience_applied = list(state.get("experience_applied") or [])
-    experience_skip_fields = set(state.get("experience_skip_fields") or [])
-    experience_key = state.get("experience_key")
-    experience_notice = state.get("experience_notice")
-    change_fields = detect_experience_change_fields(prompt)
-    # User explicitly wants to change fields -> clear any carried experience values.
-    if change_fields:
-        experience_skip_fields.update(change_fields)
-        to_clear = [
-            field for field in experience_applied if field in experience_skip_fields
-        ]
-        if to_clear:
-            draft = clear_experience_fields(draft, to_clear)
-            experience_applied = [
-                field for field in experience_applied if field not in to_clear
-            ]
-        experience_notice = None
-        state = add_trace(state, f"experience_change_fields={change_fields}")
-        missing_fields = _drop_variety(list_missing_required_fields(draft))
-    if experience_skip_fields:
-        experience_skip_fields = {
-            field
-            for field in experience_skip_fields
-            if getattr(draft, field, None) is None
-        }
-    experience_skip_fields.add("variety")
-    user_id = state.get("user_id")
-    current_key = build_choice_key(draft.crop, draft.region) if user_id else None
-    if current_key and experience_key and current_key != experience_key:
-        experience_applied = []
-        experience_notice = None
-    # Apply stored planting defaults for this user+crop+region unless skipped.
-    if user_id and current_key:
-        choice = get_planting_choice_store().get(
-            user_id, draft.crop, draft.region
-        )
-        if choice:
-            draft, applied = apply_experience_choice_to_draft(
-                draft,
-                choice.planting,
-                skip_fields=experience_skip_fields,
-            )
-            if applied:
-                experience_applied = list(
-                    dict.fromkeys(experience_applied + applied)
-                )
-                experience_notice = (
-                    build_experience_notice(choice.planting, applied)
-                    or experience_notice
-                )
-                state = add_trace(state, f"experience_applied={applied}")
-            missing_fields = _drop_variety(list_missing_required_fields(draft))
     if draft.variety is not None:
         draft = draft.model_copy(update={"variety": None})
     if not draft.region:
@@ -245,8 +186,6 @@ def _growth_extract_node(state: GraphState) -> GraphState:
         pending_message = None
         pending_options = []
     reset_tool_followup = False
-    if change_fields and {"variety", "region", "crop"} & set(change_fields):
-        reset_tool_followup = True
     if any(field in missing_fields for field in GROWTH_FIELD_LABELS):
         reset_tool_followup = True
     if reset_tool_followup:
@@ -266,10 +205,6 @@ def _growth_extract_node(state: GraphState) -> GraphState:
             "missing_fields": missing_fields,
             "followup_count": followup_count,
             "assumptions": list(draft.assumptions),
-            "experience_key": current_key,
-            "experience_applied": experience_applied,
-            "experience_skip_fields": sorted(experience_skip_fields),
-            "experience_notice": experience_notice,
             "variety_tool_query": variety_tool_query,
             "variety_tool_draft": variety_tool_draft,
             "variety_tool_missing_fields": variety_tool_missing_fields,
@@ -298,9 +233,6 @@ def _growth_ask_node(state: GraphState) -> GraphState:
         )
         if warning:
             message = f"{warning}\n{message}"
-    experience_notice = state.get("experience_notice")
-    if experience_notice:
-        message = f"{experience_notice}\n{message}"
     state = add_trace(state, f"ask missing={missing_fields}")
     state.update({"message": message})
     return state
@@ -490,12 +422,6 @@ def _growth_weather_node(state: GraphState) -> GraphState:
         return state
 
     user_id = state.get("user_id")
-    if user_id and planting.crop and planting.region:
-        get_planting_choice_store().set(
-            user_id, planting.crop, planting.region, planting
-        )
-        state = add_trace(state, "experience_stored")
-
     cache_key = build_planting_cache_key(planting)
     cached = get_cached_tool_result(
         "growth_stage_prediction",
@@ -645,9 +571,6 @@ def _growth_predict_node(state: GraphState) -> GraphState:
         )
     else:
         message = provider_message or "已完成生育期预测。"
-    experience_notice = state.get("experience_notice")
-    if experience_notice and experience_notice not in message:
-        message = f"{experience_notice}\n{message}"
     state = add_trace(state, "predict complete")
     trace = list(state.get("trace") or [])
     workflow_payload.update(

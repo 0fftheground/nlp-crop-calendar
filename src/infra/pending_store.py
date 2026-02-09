@@ -10,6 +10,7 @@ from threading import Lock
 from typing import Dict, Optional, Tuple
 
 from .config import get_config
+from .postgres import connect_postgres
 
 
 class PendingFollowupStore:
@@ -118,10 +119,95 @@ class SqlitePendingFollowupStore(PendingFollowupStore):
             )
 
 
+class PostgresPendingFollowupStore(PendingFollowupStore):
+    def __init__(self, url: str, ttl_seconds: int) -> None:
+        self._url = url
+        self._ttl_seconds = max(1, int(ttl_seconds))
+        self._lock = Lock()
+        self._init_db()
+
+    def _connect(self):
+        return connect_postgres(self._url)
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS pending_followups ("
+                "session_id TEXT PRIMARY KEY, "
+                "payload JSONB NOT NULL, "
+                "expires_at BIGINT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pending_expires "
+                "ON pending_followups (expires_at)"
+            )
+
+    def get(self, session_id: str) -> Optional[dict]:
+        now = int(time.time())
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload, expires_at FROM pending_followups WHERE session_id = %s",
+                (session_id,),
+            ).fetchone()
+            if not row:
+                return None
+            if isinstance(row, dict):
+                payload = row.get("payload")
+                expires_at = row.get("expires_at")
+            else:
+                payload, expires_at = row
+            if expires_at <= now:
+                conn.execute(
+                    "DELETE FROM pending_followups WHERE session_id = %s",
+                    (session_id,),
+                )
+                return None
+            if isinstance(payload, dict):
+                return dict(payload)
+            if isinstance(payload, str):
+                try:
+                    parsed = json.loads(payload)
+                except json.JSONDecodeError:
+                    return None
+                return parsed if isinstance(parsed, dict) else None
+            return None
+
+    def set(self, session_id: str, payload: dict) -> None:
+        expires_at = int(time.time()) + self._ttl_seconds
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO pending_followups (session_id, payload, expires_at) "
+                "VALUES (%s, %s::jsonb, %s) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "payload = excluded.payload, "
+                "expires_at = excluded.expires_at",
+                (session_id, payload_json, expires_at),
+            )
+
+    def delete(self, session_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "DELETE FROM pending_followups WHERE session_id = %s",
+                (session_id,),
+            )
+
+
+def _require_cache_db_url() -> str:
+    cfg = get_config()
+    if not cfg.cache_db_url:
+        raise RuntimeError("缺少 CACHE_DB_URL，无法写入外部跟进状态存储。")
+    return cfg.cache_db_url
+
+
 def build_pending_followup_store() -> PendingFollowupStore:
     cfg = get_config()
     store = (cfg.pending_store or "memory").lower()
     ttl_seconds = cfg.pending_store_ttl_seconds
+    if store == "postgres":
+        return PostgresPendingFollowupStore(
+            url=_require_cache_db_url(), ttl_seconds=ttl_seconds
+        )
     if store == "sqlite":
         if cfg.pending_store_path:
             path = Path(cfg.pending_store_path)

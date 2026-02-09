@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from ...domain.planting import DEFAULT_CROP
 from ...infra.config import get_config
 from ...infra.llm import get_chat_model
-from ...infra.variety_choice_store import VarietyChoice, get_variety_choice_store
 from ...infra.postgres import fetch_all, quote_identifier
 from ...infra.variety_db_schema import (
     VARIETY_PG_COLUMN_MAP,
@@ -71,30 +70,11 @@ _FOLLOWUP_ALL_TOKENS = {
     "全部区域",
     "全部信息",
 }
-_CHOICE_CANCEL_TOKENS = {
-    "更换",
-    "重新选择",
-    "换一个",
-    "换个",
-    "取消默认",
-    "不要这个",
-}
 
 
 class VarietyMatchDecision(BaseModel):
     index: int
     reason: Optional[str] = None
-
-
-def _extract_user_id(prompt: str) -> Optional[str]:
-    payload = _load_prompt_payload(prompt.strip())
-    if not isinstance(payload, dict):
-        return None
-    for key in ("user_id", "userId"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
 
 
 def _extract_query_source(prompt: str) -> str:
@@ -129,88 +109,6 @@ def _extract_variety_hint(prompt: str) -> Optional[str]:
 def _is_workflow_prompt(prompt: str) -> bool:
     payload = _load_prompt_payload(prompt.strip())
     return isinstance(payload, dict) and isinstance(payload.get("planting"), dict)
-
-
-def _extract_followup_answer(prompt: str) -> str:
-    payload = _load_prompt_payload(prompt.strip())
-    if isinstance(payload, dict):
-        followup = payload.get("followup")
-        if isinstance(followup, dict):
-            answer = followup.get("prompt")
-            if isinstance(answer, str) and answer.strip():
-                return answer.strip()
-    return prompt.strip()
-
-
-def _make_choice_key(text: str) -> str:
-    normalized = _decode_unicode_escapes(text or "").strip()
-    tokens = extract_variety_tokens(normalized)
-    if tokens:
-        return " ".join(tokens)
-    return normalized
-
-
-def _get_choice_from_store(prompt: str) -> Optional[VarietyChoice]:
-    user_id = _extract_user_id(prompt)
-    if not user_id:
-        return None
-    query_source = _extract_query_source(prompt)
-    if not query_source:
-        return None
-    key = _make_choice_key(query_source)
-    if not key:
-        return None
-    try:
-        store = get_variety_choice_store()
-        return store.get(user_id, key)
-    except Exception:
-        return None
-
-
-def _store_choice(
-    prompt: str, variety: str, region_choice: Optional[str]
-) -> None:
-    user_id = _extract_user_id(prompt)
-    if not user_id:
-        return None
-    query_source = _extract_query_source(prompt)
-    if not query_source:
-        return None
-    key = _make_choice_key(query_source)
-    if not key or not variety:
-        return None
-    try:
-        store = get_variety_choice_store()
-        store.set(user_id, key, variety, region_choice)
-    except Exception:
-        return None
-
-
-def _clear_choice(prompt: str) -> None:
-    user_id = _extract_user_id(prompt)
-    if not user_id:
-        return None
-    query_source = _extract_query_source(prompt)
-    if not query_source:
-        return None
-    key = _make_choice_key(query_source)
-    if not key:
-        return None
-    try:
-        store = get_variety_choice_store()
-        store.delete(user_id, key)
-    except Exception:
-        return None
-
-
-def _is_cancel_choice(prompt: str) -> bool:
-    answer = _extract_followup_answer(prompt)
-    if not answer:
-        return False
-    for token in _CHOICE_CANCEL_TOKENS:
-        if answer == token or answer.startswith(token):
-            return True
-    return False
 
 
 def _extract_variety(prompt: str) -> Optional[str]:
@@ -979,24 +877,8 @@ def _select_best_variety_record(
 def lookup_variety(prompt: str) -> ToolInvocation:
     query_source = _extract_query_source(prompt)
     prompt_is_workflow = _is_workflow_prompt(prompt)
-    # Allow user to reset stored choice and re-select.
-    cancel_choice = _is_cancel_choice(prompt)
-    if cancel_choice:
-        _clear_choice(prompt)
-        followup = _build_variety_followup(prompt)
-        if followup:
-            return followup
-    stored_choice = None if cancel_choice else _get_choice_from_store(prompt)
     explicit_candidate = _extract_confirmed_candidate(prompt)
     confirmed_candidate = explicit_candidate
-    used_stored_choice = False
-    # Use stored choice only when user hasn't confirmed a new one.
-    if confirmed_candidate is None and stored_choice:
-        if not prompt_is_workflow or _is_exact_variety_match(
-            stored_choice.variety, prompt
-        ):
-            confirmed_candidate = stored_choice.variety
-            used_stored_choice = True
     records, raw_records = _lookup_variety_records(
         prompt, confirmed_candidate=confirmed_candidate
     )
@@ -1068,15 +950,6 @@ def lookup_variety(prompt: str) -> ToolInvocation:
                 )
             else:
                 message = f"已返回品种 {variety} 的审定信息{region_note}。"
-            if used_stored_choice:
-                message = (
-                    f"{message}\n已默认使用上次选择：{variety}。"
-                    "如需更换，请回复“更换”。"
-                )
-                payload["choice_hint"] = True
-                payload["options"] = ["更换", "重新选择"]
-            if variety and variety != "未知":
-                _store_choice(prompt, variety, None)
             return ToolInvocation(
                 name="variety_lookup",
                 message=message,
@@ -1102,7 +975,7 @@ def lookup_variety(prompt: str) -> ToolInvocation:
             )
             if followup:
                 return followup
-            if _is_workflow_prompt(prompt):
+            if prompt_is_workflow:
                 hint = _extract_variety_hint(query_source)
                 if hint:
                     candidates = retrieve_variety_candidates(
@@ -1116,20 +989,10 @@ def lookup_variety(prompt: str) -> ToolInvocation:
                 return _build_variety_open_followup(prompt)
         region_candidates = _extract_region_candidates(records)
         region_choice = None
-        region_confirmed = False
         if is_region_followup and isinstance(payload_data, dict):
             region_choice = _resolve_followup_region(
                 payload_data, region_candidates
             )
-            region_confirmed = region_choice is not None
-        if region_choice is None and stored_choice:
-            stored_region = stored_choice.region_choice
-            if stored_region == "__all__":
-                region_choice = stored_region
-                region_confirmed = True
-            elif stored_region in region_candidates:
-                region_choice = stored_region
-                region_confirmed = True
         region_tokens = _extract_region_tokens(prompt, records)
         llm_selected_index: Optional[int] = None
         llm_selected_reason: Optional[str] = None
@@ -1213,7 +1076,7 @@ def lookup_variety(prompt: str) -> ToolInvocation:
             )
             if followup:
                 return followup
-            if _is_workflow_prompt(prompt):
+            if prompt_is_workflow:
                 hint = _extract_variety_hint(query_source)
                 if hint:
                     candidates = retrieve_variety_candidates(
@@ -1266,20 +1129,6 @@ def lookup_variety(prompt: str) -> ToolInvocation:
             )
         else:
             message = f"已返回品种 {variety} 的审定信息{region_note}。"
-        if used_stored_choice:
-            message = (
-                f"{message}\n已默认使用上次选择：{variety}。"
-                "如需更换，请回复“更换”。"
-            )
-            payload["choice_hint"] = True
-            payload["options"] = ["更换", "重新选择"]
-        # Persist confirmed choice for later reuse.
-        if variety and variety != "未知":
-            _store_choice(
-                prompt,
-                variety,
-                region_choice if region_confirmed else None,
-            )
         return ToolInvocation(
             name="variety_lookup",
             message=message,
@@ -1288,7 +1137,7 @@ def lookup_variety(prompt: str) -> ToolInvocation:
     followup = _build_variety_followup(prompt)
     if followup:
         return followup
-    if _is_workflow_prompt(prompt):
+    if prompt_is_workflow:
         hint = _extract_variety_hint(query_source)
         if hint:
             candidates = retrieve_variety_candidates(

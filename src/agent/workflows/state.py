@@ -36,10 +36,6 @@ class GraphState(TypedDict, total=False):
     recommendations: List[Recommendation]
     message: str
     data: Dict[str, object]
-    experience_key: Optional[str]
-    experience_applied: List[str]
-    experience_skip_fields: List[str]
-    experience_notice: Optional[str]
     pending_options: List[str]
     pending_message: Optional[str]
     variety_candidates: List[str]

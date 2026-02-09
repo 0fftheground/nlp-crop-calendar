@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,8 +37,27 @@ class AppConfig(BaseSettings):
     agri_db_url: Optional[str] = Field(
         default=None, validation_alias=AliasChoices("AGRI_DB_URL", "DB_URL")
     )
-    user_farm_table: str = Field(
-        default="user_farm_map", validation_alias="USER_FARM_TABLE"
+    agri_db_host: Optional[str] = Field(
+        default=None, validation_alias="AGRI_DB_HOST"
+    )
+    agri_db_port: int = Field(default=5432, validation_alias="AGRI_DB_PORT")
+    agri_db_name: Optional[str] = Field(
+        default=None, validation_alias="AGRI_DB_NAME"
+    )
+    agri_db_user: Optional[str] = Field(
+        default=None, validation_alias="AGRI_DB_USER"
+    )
+    agri_db_password: Optional[str] = Field(
+        default=None, validation_alias="AGRI_DB_PASSWORD"
+    )
+    agri_db_sslmode: Optional[str] = Field(
+        default=None, validation_alias="AGRI_DB_SSLMODE"
+    )
+    cache_db_url: Optional[str] = Field(
+        default=None, validation_alias="CACHE_DB_URL"
+    )
+    default_farm_id: Optional[str] = Field(
+        default=None, validation_alias="DEFAULT_FARM_ID"
     )
     variety_provider: str = Field(
         default="local", validation_alias="VARIETY_PROVIDER"
@@ -104,12 +123,6 @@ class AppConfig(BaseSettings):
     pending_store_path: Optional[str] = Field(
         default=None, validation_alias="PENDING_STORE_PATH"
     )
-    weather_archive_path: Optional[str] = Field(
-        default=None, validation_alias="WEATHER_ARCHIVE_PATH"
-    )
-    weather_archive_dir: Optional[str] = Field(
-        default=None, validation_alias="WEATHER_ARCHIVE_DIR"
-    )
     tool_cache_store: str = Field(default="sqlite", validation_alias="TOOL_CACHE_STORE")
     tool_cache_ttl_seconds: int = Field(
         default=3600, validation_alias="TOOL_CACHE_TTL_SECONDS"
@@ -138,8 +151,8 @@ class AppConfig(BaseSettings):
     interaction_raw_dir: Optional[str] = Field(
         default=None, validation_alias="INTERACTION_RAW_DIR"
     )
-    memory_store_ttl_days: int = Field(
-        default=30, validation_alias="MEMORY_STORE_TTL_DAYS"
+    geocode_cache_store: str = Field(
+        default="sqlite", validation_alias="GEOCODE_CACHE_STORE"
     )
     geocode_cache_ttl_days: int = Field(
         default=30, validation_alias="GEOCODE_CACHE_TTL_DAYS"
@@ -174,11 +187,29 @@ class AppConfig(BaseSettings):
         "pending_store",
         "tool_cache_store",
         "interaction_store",
+        "geocode_cache_store",
         mode="after",
     )
     @classmethod
     def normalize_pending_store(cls, value: str) -> str:
         return value.lower() if value else value
+
+    @model_validator(mode="after")
+    def build_agri_db_url(self) -> "AppConfig":
+        if self.agri_db_url:
+            return self
+        if not (self.agri_db_host and self.agri_db_name and self.agri_db_user):
+            return self
+        host = self.agri_db_host
+        port = self.agri_db_port or 5432
+        user = self.agri_db_user
+        password = self.agri_db_password or ""
+        auth = f"{user}:{password}" if password else user
+        url = f"postgresql://{auth}@{host}:{port}/{self.agri_db_name}"
+        if self.agri_db_sslmode:
+            url = f"{url}?sslmode={self.agri_db_sslmode}"
+        self.agri_db_url = url
+        return self
 
 
 @lru_cache(maxsize=1)

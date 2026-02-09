@@ -13,6 +13,7 @@ from threading import Lock
 from typing import Optional
 
 from .config import get_config
+from .postgres import connect_postgres
 
 
 def _normalize_text(value: Optional[str]) -> str:
@@ -87,10 +88,89 @@ class SqliteGeocodeCacheStore:
             )
 
 
-def _build_store() -> SqliteGeocodeCacheStore:
+class PostgresGeocodeCacheStore:
+    def __init__(self, url: str, ttl_seconds: int) -> None:
+        self._url = url
+        self._ttl_seconds = max(1, int(ttl_seconds))
+        self._lock = Lock()
+        self._init_db()
+
+    def _connect(self):
+        return connect_postgres(self._url)
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS geocode_cache ("
+                "cache_key TEXT PRIMARY KEY, "
+                "payload JSONB NOT NULL, "
+                "expires_at BIGINT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_geocode_expires "
+                "ON geocode_cache (expires_at)"
+            )
+
+    def get(self, cache_key: str) -> Optional[dict]:
+        now = int(time.time())
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload, expires_at FROM geocode_cache WHERE cache_key = %s",
+                (cache_key,),
+            ).fetchone()
+            if not row:
+                return None
+            if isinstance(row, dict):
+                payload = row.get("payload")
+                expires_at = row.get("expires_at")
+            else:
+                payload, expires_at = row
+            if expires_at <= now:
+                conn.execute(
+                    "DELETE FROM geocode_cache WHERE cache_key = %s",
+                    (cache_key,),
+                )
+                return None
+            if isinstance(payload, dict):
+                return dict(payload)
+            if isinstance(payload, str):
+                try:
+                    parsed = json.loads(payload)
+                except json.JSONDecodeError:
+                    return None
+                return parsed if isinstance(parsed, dict) else None
+            return None
+
+    def set(self, cache_key: str, payload: dict) -> None:
+        expires_at = int(time.time()) + self._ttl_seconds
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO geocode_cache (cache_key, payload, expires_at) "
+                "VALUES (%s, %s::jsonb, %s) "
+                "ON CONFLICT(cache_key) DO UPDATE SET "
+                "payload = excluded.payload, "
+                "expires_at = excluded.expires_at",
+                (cache_key, payload_json, expires_at),
+            )
+
+
+def _require_cache_db_url() -> str:
+    cfg = get_config()
+    if not cfg.cache_db_url:
+        raise RuntimeError("缺少 CACHE_DB_URL，无法写入外部地理编码缓存。")
+    return cfg.cache_db_url
+
+
+def _build_store():
     cfg = get_config()
     ttl_days = max(1, int(cfg.geocode_cache_ttl_days))
     ttl_seconds = ttl_days * 86400
+    store = (cfg.geocode_cache_store or "sqlite").lower()
+    if store == "postgres":
+        return PostgresGeocodeCacheStore(
+            url=_require_cache_db_url(), ttl_seconds=ttl_seconds
+        )
     if cfg.geocode_cache_path:
         path = Path(cfg.geocode_cache_path)
     else:
@@ -100,7 +180,7 @@ def _build_store() -> SqliteGeocodeCacheStore:
 
 
 @lru_cache(maxsize=1)
-def get_geocode_cache() -> SqliteGeocodeCacheStore:
+def get_geocode_cache():
     return _build_store()
 
 

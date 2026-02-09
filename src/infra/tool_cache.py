@@ -13,6 +13,7 @@ from threading import Lock
 from typing import Optional, Tuple
 
 from .config import get_config
+from .postgres import connect_postgres
 
 
 class ToolResultCache:
@@ -122,6 +123,76 @@ class SqliteToolResultCache(ToolResultCache):
             )
 
 
+class PostgresToolResultCache(ToolResultCache):
+    def __init__(self, url: str, ttl_seconds: int) -> None:
+        self._url = url
+        self._ttl_seconds = max(1, int(ttl_seconds))
+        self._lock = Lock()
+        self._init_db()
+
+    def _connect(self):
+        return connect_postgres(self._url)
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS tool_cache ("
+                "cache_key TEXT PRIMARY KEY, "
+                "tool_name TEXT NOT NULL, "
+                "payload JSONB NOT NULL, "
+                "expires_at BIGINT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tool_expires "
+                "ON tool_cache (expires_at)"
+            )
+
+    def get(self, tool_name: str, provider: str, prompt: str) -> Optional[dict]:
+        cache_key = _make_cache_key(tool_name, provider, prompt)
+        now = int(time.time())
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload, expires_at FROM tool_cache WHERE cache_key = %s",
+                (cache_key,),
+            ).fetchone()
+            if not row:
+                return None
+            if isinstance(row, dict):
+                payload = row.get("payload")
+                expires_at = row.get("expires_at")
+            else:
+                payload, expires_at = row
+            if expires_at <= now:
+                conn.execute(
+                    "DELETE FROM tool_cache WHERE cache_key = %s",
+                    (cache_key,),
+                )
+                return None
+            if isinstance(payload, dict):
+                return dict(payload)
+            if isinstance(payload, str):
+                try:
+                    parsed = json.loads(payload)
+                except json.JSONDecodeError:
+                    return None
+                return parsed if isinstance(parsed, dict) else None
+            return None
+
+    def set(self, tool_name: str, provider: str, prompt: str, payload: dict) -> None:
+        cache_key = _make_cache_key(tool_name, provider, prompt)
+        expires_at = int(time.time()) + self._ttl_seconds
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO tool_cache (cache_key, tool_name, payload, expires_at) "
+                "VALUES (%s, %s, %s::jsonb, %s) "
+                "ON CONFLICT(cache_key) DO UPDATE SET "
+                "payload = excluded.payload, "
+                "expires_at = excluded.expires_at",
+                (cache_key, tool_name, payload_json, expires_at),
+            )
+
+
 class NoopToolResultCache(ToolResultCache):
     def get(self, tool_name: str, provider: str, prompt: str) -> Optional[dict]:
         return None
@@ -136,6 +207,11 @@ def build_tool_result_cache() -> ToolResultCache:
     ttl_seconds = cfg.tool_cache_ttl_seconds
     if store in {"off", "disabled", "none"}:
         return NoopToolResultCache()
+    if store == "postgres":
+        url = cfg.cache_db_url
+        if not url:
+            raise RuntimeError("缺少 CACHE_DB_URL，无法写入外部工具缓存。")
+        return PostgresToolResultCache(url=url, ttl_seconds=ttl_seconds)
     if store == "sqlite":
         if cfg.tool_cache_path:
             path = Path(cfg.tool_cache_path)

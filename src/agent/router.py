@@ -7,8 +7,6 @@ from pydantic import ValidationError
 
 from ..infra.pending_store import build_pending_followup_store
 from ..infra.variety_store import find_exact_variety_in_text, retrieve_variety_candidates
-from ..infra.planting_choice_store import get_planting_choice_store
-from ..infra.variety_choice_store import get_variety_choice_store
 from ..observability.logging_utils import log_event
 from ..observability.otel import (
     build_span_attributes,
@@ -396,12 +394,6 @@ class RequestRouter:
                     "planting_draft": pending.get("planting_draft"),
                     "missing_fields": pending.get("missing_fields"),
                     "followup_count": pending.get("followup_count", 0),
-                    "experience_key": pending.get("experience_key"),
-                    "experience_applied": pending.get("experience_applied", []),
-                    "experience_skip_fields": pending.get(
-                        "experience_skip_fields", []
-                    ),
-                    "experience_notice": pending.get("experience_notice"),
                     "pending_options": pending.get("options") or [],
                     "pending_message": pending.get("pending_message"),
                     "future_sowing_date_warning": pending.get(
@@ -506,10 +498,6 @@ class RequestRouter:
                 "missing_fields": missing,
                 "followup_count": state.get("followup_count", 0),
                 "pending_message": state.get("message"),
-                "experience_key": state.get("experience_key"),
-                "experience_applied": state.get("experience_applied", []),
-                "experience_skip_fields": state.get("experience_skip_fields", []),
-                "experience_notice": state.get("experience_notice"),
                 "future_sowing_date_warning": state.get(
                     "future_sowing_date_warning", False
                 ),
@@ -581,9 +569,6 @@ class RequestRouter:
     def _clear_session_memory(
         self, session_id: str, pending: Optional[dict]
     ) -> ToolInvocation:
-        memory_id = self._memory_id_ctx.get()
-        get_planting_choice_store().delete_user(memory_id)
-        get_variety_choice_store().delete_user(memory_id)
         if pending and pending.get("mode") == "workflow":
             pending = dict(pending)
             self._pending_store.set(session_id, pending)
