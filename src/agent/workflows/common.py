@@ -22,6 +22,9 @@ UNKNOWN_MARKERS = ["不知道", "不清楚", "不确定", "记不清", "不记�
 class PlantingExtract(BaseModel):
     crop: Optional[str] = None
     variety: Optional[str] = None
+    culti_type: Optional[str] = Field(
+        default=None, description="稻作类型/熟制，如早稻、晚稻、双季晚稻"
+    )
     planting_method: Optional[str] = Field(
         default=None, description="direct_seeding 或 transplanting"
     )
@@ -123,10 +126,10 @@ def build_fallback_planting(draft: PlantingDetailsDraft) -> PlantingDetails:
     return PlantingDetails(
         crop=draft.crop or "水稻",
         variety=draft.variety,
+        culti_type=draft.culti_type,
         planting_method=draft.planting_method or "direct_seeding",
         sowing_date=draft.sowing_date or today,
         transplant_date=draft.transplant_date,
         region=draft.region or cfg.default_region,
         planting_location=draft.planting_location,
     )
-

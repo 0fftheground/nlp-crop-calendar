@@ -105,16 +105,47 @@ class AppConfig(BaseSettings):
         default=None, validation_alias="GROWTH_STAGE_API_KEY"
     )
     growth_stage_db_table: str = Field(
-        default="gdd_stages", validation_alias="GROWTH_STAGE_DB_TABLE"
+        default="agri_growth_stage_forecast",
+        validation_alias="GROWTH_STAGE_DB_TABLE",
     )
-    recommendation_provider: str = Field(
-        default="mock", validation_alias="RECOMMENDATION_PROVIDER"
+    planting_plan_db_table: str = Field(
+        default="agri_plant_plan",
+        validation_alias="PLANTING_PLAN_DB_TABLE",
     )
-    recommendation_api_url: Optional[str] = Field(
-        default=None, validation_alias="RECOMMENDATION_API_URL"
+    crop_calendar_provider: str = Field(
+        default="mock",
+        validation_alias=AliasChoices(
+            "CROP_CALENDAR_PROVIDER",
+            "RECOMMENDATION_PROVIDER",
+        ),
     )
-    recommendation_api_key: Optional[str] = Field(
-        default=None, validation_alias="RECOMMENDATION_API_KEY"
+    crop_calendar_api_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "CROP_CALENDAR_API_URL",
+            "RECOMMENDATION_API_URL",
+        ),
+    )
+    crop_calendar_api_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "CROP_CALENDAR_API_KEY",
+            "RECOMMENDATION_API_KEY",
+        ),
+    )
+    crop_calendar_save_api_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "CROP_CALENDAR_SAVE_API_URL",
+            "RECOMMENDATION_SAVE_API_URL",
+        ),
+    )
+    crop_calendar_delete_api_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "CROP_CALENDAR_DELETE_API_URL",
+            "RECOMMENDATION_DELETE_API_URL",
+        ),
     )
     pending_store: str = Field(default="sqlite", validation_alias="PENDING_STORE")
     pending_store_ttl_seconds: int = Field(
@@ -175,7 +206,7 @@ class AppConfig(BaseSettings):
         "variety_provider",
         "weather_provider",
         "growth_stage_provider",
-        "recommendation_provider",
+        "crop_calendar_provider",
         "weather_summary_mode",
         mode="after",
     )

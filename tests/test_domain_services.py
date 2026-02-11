@@ -26,7 +26,7 @@ if not _MISSING_PYDANTIC_SETTINGS:
 class DomainServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["WEATHER_PROVIDER"] = "mock"
-        os.environ["RECOMMENDATION_PROVIDER"] = "mock"
+        os.environ["CROP_CALENDAR_PROVIDER"] = "mock"
         get_config.cache_clear()
 
     def test_fetch_weather_returns_series(self) -> None:

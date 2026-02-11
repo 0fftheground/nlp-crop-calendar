@@ -399,6 +399,7 @@ class RequestRouter:
                     "future_sowing_date_warning": pending.get(
                         "future_sowing_date_warning", False
                     ),
+                    "plant_season_id": pending.get("plant_season_id"),
                     "variety_tool_query": pending.get("variety_tool_query"),
                     "variety_tool_draft": pending.get("variety_tool_draft"),
                     "variety_tool_missing_fields": pending.get(
@@ -501,6 +502,7 @@ class RequestRouter:
                 "future_sowing_date_warning": state.get(
                     "future_sowing_date_warning", False
                 ),
+                "plant_season_id": state.get("plant_season_id"),
                 "variety_tool_query": state.get("variety_tool_query"),
                 "variety_tool_draft": state.get("variety_tool_draft"),
                 "variety_tool_missing_fields": state.get(

@@ -59,11 +59,6 @@ TOOL_INPUT_SPECS: Dict[str, InputSpec] = {
         field_labels=QUERY_FIELD_LABELS,
         to_prompt=_to_json_payload,
     ),
-    "farming_recommendation": InputSpec(
-        model=QueryInput,
-        field_labels=QUERY_FIELD_LABELS,
-        to_prompt=_to_json_payload,
-    ),
     "memory_clear": InputSpec(
         model=MemoryClearInput,
         field_labels=MEMORY_CLEAR_FIELD_LABELS,

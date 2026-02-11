@@ -109,10 +109,12 @@ def format_crop_calendar_plan_message(
     info_parts.append(f"方式: {method_label}")
     info_parts.append(f"播种日期: {planting.sowing_date.isoformat()}")
 
-    lines = ["已生成农事推荐。", HISTORICAL_WEATHER_NOTE]
-    warning = build_future_weather_warning(planting.sowing_date)
-    if warning:
-        lines.append(warning)
+    lines = ["已生成农事推荐。"]
+    if weather_note:
+        lines.append(HISTORICAL_WEATHER_NOTE)
+        warning = build_future_weather_warning(planting.sowing_date)
+        if warning:
+            lines.append(warning)
     lines.append("种植信息: " + "，".join(info_parts))
     if weather_note:
         lines.append(f"气象信息: {weather_note}")
@@ -142,6 +144,12 @@ def format_growth_stage_message(
     info_parts = [f"作物: {planting.crop}"]
     if planting.variety:
         info_parts.append(f"品种: {planting.variety}")
+    culti_type = getattr(planting, "culti_type", None)
+    if culti_type:
+        info_parts.append(f"稻作类型: {culti_type}")
+    culti_type = getattr(planting, "culti_type", None)
+    if culti_type:
+        info_parts.append(f"稻作类型: {culti_type}")
     if planting.region:
         info_parts.append(f"地区: {planting.region}")
     info_parts.append(f"播种日期: {planting.sowing_date.isoformat()}")

@@ -14,15 +14,11 @@ from ...schemas.models import ToolInvocation
 
 TOOLS: List[BaseTool] = []
 TOOL_INDEX: Dict[str, BaseTool] = {}
-HIDDEN_TOOL_NAMES = {"farming_recommendation", "growth_stage_prediction"}
+HIDDEN_TOOL_NAMES: set[str] = set()
 
 
-TOOL_CACHEABLE = {
-    "weather_lookup",
-    "farming_recommendation",
-    "growth_stage_prediction",
-}
-_TOOL_MODULES = ("variety", "weather", "growth_stage", "recommendation", "memory")
+TOOL_CACHEABLE: set[str] = set()
+_TOOL_MODULES = ("variety", "weather", "memory", "plant_plan")
 _TOOLS_INITIALIZED = False
 
 

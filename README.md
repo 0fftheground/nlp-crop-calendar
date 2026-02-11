@@ -61,16 +61,19 @@ WEATHER_API_KEY=
 GROWTH_STAGE_PROVIDER=local
 GROWTH_STAGE_API_URL=
 GROWTH_STAGE_API_KEY=
-GROWTH_STAGE_DB_TABLE=agri_gdd_stages
-RECOMMENDATION_PROVIDER=mock
-RECOMMENDATION_API_URL=
-RECOMMENDATION_API_KEY=
+GROWTH_STAGE_DB_TABLE=agri_growth_stage_forecast
+PLANTING_PLAN_DB_TABLE=agri_plant_plan
+CROP_CALENDAR_PROVIDER=mock
+CROP_CALENDAR_API_URL=
+CROP_CALENDAR_API_KEY=
+CROP_CALENDAR_SAVE_API_URL=
 ```
 If `EXTRACTOR_API_KEY` is empty, the extractor falls back to `OPENAI_API_KEY`.
-Tools default to `mock`. Variety lookup and GDD lookup read from Postgres via `AGRI_DB_URL` when `VARIETY_PROVIDER=local` / `GROWTH_STAGE_PROVIDER=local`.
+Tools default to `mock`. Variety lookup and growth-stage prediction read from Postgres via `AGRI_DB_URL` when `VARIETY_PROVIDER=local` / `GROWTH_STAGE_PROVIDER=local`.
+Crop calendar computation calls the external API when `CROP_CALENDAR_PROVIDER=external` and `CROP_CALENDAR_API_URL` is set; saving uses `CROP_CALENDAR_SAVE_API_URL`.
 To use a single Postgres connection for all data, set:
 - `AGRI_DB_URL`
-SQLite 数据源已移除，未配置 `AGRI_DB_URL` 会导致品种/积温查询失败。
+SQLite 数据源已移除，未配置 `AGRI_DB_URL` 会导致品种/生育期预测查询失败。
 也可使用拆分字段（`AGRI_DB_HOST/PORT/NAME/USER/PASSWORD/SSLMODE`）自动拼接连接串。
 
 Postgres品种表字段映射（会自动映射为内部字段）：
@@ -87,11 +90,12 @@ Postgres品种表字段映射（会自动映射为内部字段）：
 - `compare_days` -> 比对照长(天)
 - `rice_code` -> 稻种编码
 
-Postgres积温表字段需与现有列名一致（中文列名），例如“审定地区/稻作类型/亚种/熟制/标准品种/三叶一心/返青/.../成熟期”。
-Growth-stage 工作流的气象数据从 `WEATHER_DB_TABLE`（默认 `agri_weather`）读取，按 `farm_id + date` 查询。
+生育期预测从 `PLANTING_PLAN_DB_TABLE` 查到种植计划 `id`，再用该 `id` 查询 `GROWTH_STAGE_DB_TABLE`（默认 `agri_growth_stage_forecast`）。预测表需包含 `planting_plan_id`（或 `plan_id`）以及 `stage_name` + `stage_date`（或 `stages`/`stage_dates` JSON）。
+`sowing_method`、`culti_type`、`stage_name` 会从 `agri_code_dict`（类别 `sowingmtd` / `culti_type` / `growth_stage`）映射为可读名称。
+种植计划表默认 `agri_plant_plan`，当前匹配字段包含：`id`、`variety_id`（关联 `agri_rice_variety.name`）、`sowing_date`、`sowing_method`、`transp_date`、`culti_type`、`name` 等。
 POC 阶段直接设置 `DEFAULT_FARM_ID`（所有用户共用同一农场）。
 To use the external 15-day weather API, set `WEATHER_PROVIDER=91weather` and ensure the request includes `lat`/`lon` (the tool accepts `WeatherQueryInput` JSON with `lat`/`lon`).
-Crop calendar workflow uses historical weather (`goso_day`) and does not support future dates yet. Growth-stage workflow reads weather from `WEATHER_DB_TABLE`.
+Crop calendar workflow uses historical weather (`goso_day`) and does not support future dates yet.
 
 ## OpenTelemetry (Local Collector)
 The API initializes OpenTelemetry when OTLP endpoints are configured. A local collector config is provided in `otel-collector.yaml`.
@@ -248,9 +252,8 @@ docker compose --env-file .env.docker up -d --build
 - `otel-collector` runs internally (no host ports exposed). Logs/traces are persisted to the `otel-data` volume.
 
 ## External Access
-To allow other machines to access the app and download CSV exports, set:
+To allow other machines to access the app, set:
 - `HOST=0.0.0.0` to listen on all interfaces
-- `PUBLIC_BASE_URL=http://<your-host>:8000` so download links are absolute
 
 Start with:
 ```bash
@@ -261,14 +264,14 @@ Ensure your firewall/security group allows access to ports `8000` (FastAPI) and 
 ## Development Notes
 - `src/agent/router.py` + `src/agent/planner.py` implement Planner+Executor logic; you can adjust the planner prompt or add tools to extend capability (prompt lives in `src/prompts/planner.py`).
 - LangGraph state types are in `src/agent/workflows/state.py`; edit nodes/branches in `src/agent/workflows/crop_calendar_graph.py` and `src/agent/workflows/growth_stage_graph.py`.
-- Workflow flow: LLM extracts planting info, missing fields trigger follow-ups (max 2 rounds), then weather/variety tools run in parallel, and `farming_recommendation` consumes context to output recommendations.
+- Crop calendar workflow flow: LLM extracts planting info, missing fields trigger follow-ups (max 2 rounds), then the workflow calls the external crop calendar API (when configured) to generate operations/growth stages from the normalized planting data.
+- Growth-stage workflow flow: 解析品种/计划信息 -> 查询 `agri_plant_plan` -> 多条则追问选择 -> 读取 `agri_growth_stage_forecast`。
 - Business services live in `src/application/services`; tools are thin adapters calling application services.
 - LLM prompts and workflow user-facing text are centralized in `src/prompts` (planner / extraction / workflow copy / tool fallbacks).
 - `src/api/server.py` binds HTTP requests to router/graph; extend auth, logging, or persistence as needed.
 - An OpenAI API key is required. The system uses `ChatOpenAI` for planning and extraction; extraction can use a lighter model via `EXTRACTOR_*`.
-- `growth_stage_prediction` only reads cached results; growth-stage prediction must go through the workflow for extraction/follow-up and then calls Postgres via `AGRI_DB_URL`.
-- Crop calendar/growth-stage workflow results build cache keys from normalized `PlantingDetails`; cache hits return immediately.
-- To hit growth-stage cache, pass `PlantingDetails` JSON (or JSON containing a `planting` field).
+- Growth-stage workflow parses variety/plan info and reads prediction results from Postgres via `AGRI_DB_URL`.
+- Crop calendar workflow has cache hooks for normalized `PlantingDetails` (currently disabled via `tool_cache`).
 - Follow-up control: pending state is passed into the LLM planner; the LLM decides whether to continue follow-up or switch to a new question; when it selects a new tool/workflow or action=none, pending is cleared.
 - Infrastructure adapters live in `src/infra` (config, LLM client, structured extraction, etc.).
 - Non-agronomy requests return `mode="none"` and skip tools/workflows.
@@ -276,10 +279,9 @@ Ensure your firewall/security group allows access to ports `8000` (FastAPI) and 
 - 稻区范围映射用于生育期预测的审定地区匹配，配置文件为 `resources/rice_region_map.json`。
 
 ## Recent Updates
-- Growth-stage prediction uses the `variety_lookup` tool flow with follow-ups and can prompt for specific approval records when region matching is ambiguous.
-- Historical weather (`goso_day`) is used for the crop calendar workflow.
-- Future sowing dates (>=2026) trigger a re-ask for a valid date before continuing.
-- Growth-stage outputs now include the full ordered stage date list.
+- Growth-stage prediction now resolves `agri_plant_plan` and reads `agri_growth_stage_forecast`, mapping `sowing_method` / `culti_type` / `stage_name` via `agri_code_dict`.
+- Growth-stage workflow no longer depends on weather or variety tools.
+- Growth-stage outputs include ordered stage dates when available.
 
 ## Frontend client_id (user_id)
 If you want a stable `user_id` (for future user-level context like farm mapping), generate a UUID in the browser, store it in `localStorage` (or a long-lived cookie), and send it as `user_id` on each request. Keep `session_id` for per-chat isolation if needed.

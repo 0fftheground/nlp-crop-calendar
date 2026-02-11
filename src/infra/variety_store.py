@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import difflib
 import re
-from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
 
@@ -87,14 +86,12 @@ def _load_variety_names_postgres(url: str) -> List[str]:
     return names
 
 
-@lru_cache(maxsize=1)
 def load_variety_names(path: Path | None = None) -> List[str]:
     del path
     url = _require_db_url()
     return _load_variety_names_postgres(url)
 
 
-@lru_cache(maxsize=1)
 def load_variety_name_list(path: Path | None = None) -> List[str]:
     names = [name for name in load_variety_names(path) if name]
     names.sort(key=len, reverse=True)

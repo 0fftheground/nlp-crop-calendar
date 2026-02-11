@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Dict, List
 
 from .config import get_config
@@ -41,10 +40,9 @@ def _fetch_gdd_records() -> List[Dict[str, object]]:
         raise RuntimeError(f"GDD Postgres 读取失败: {exc}") from exc
 
 
-@lru_cache(maxsize=1)
 def get_gdd_records() -> List[Dict[str, object]]:
     return _fetch_gdd_records()
 
 
 def clear_gdd_cache() -> None:
-    get_gdd_records.cache_clear()
+    return None

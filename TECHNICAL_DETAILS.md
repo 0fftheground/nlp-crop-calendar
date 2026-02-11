@@ -8,9 +8,10 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 2. **FastAPI (`src/api/server.py`)** exposes `/health` and `/api/v1/handle`; all requests/responses use unified Pydantic models.
 3. **Planner Router (`src/agent/router.py`)** calls the LLM planner to choose tool/workflow/none, then executes and persists follow-up state by `session_id`.
 4. **LangGraph (`src/agent/workflows/crop_calendar_graph.py`/`src/agent/workflows/growth_stage_graph.py`)**
-   - The crop calendar workflow implements extraction -> follow-up -> parallel tools -> recommendation output.
+   - The crop calendar workflow implements extraction -> follow-up -> external crop calendar API -> recommendation output.
+   - The growth-stage workflow implements extraction -> follow-up -> DB lookup (plant plan + forecast) -> response formatting.
    - Extraction uses an LLM (structured output) with heuristic fallback; missing fields are asked up to 2 times, and any remaining fields are filled with defaults.
-   - Weather, variety, and recommendations are fetched via tools or workflow services (`weather_lookup`/`variety_lookup`/`farming_recommendation` plus historical weather in workflows).
+   - Crop calendar recommendations are generated via the external crop calendar API when configured; weather/variety tools are used for their standalone queries.
 
 ## Core Modules
 - `src/infra/config.py` - Reads `.env` and exposes `AppConfig`.
@@ -26,25 +27,24 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 - Variety retrieval uses candidate-name matching + fuzzy tokens, no embedding/Qdrant.
 - `src/schemas/models.py` - Shared schemas (`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`), `UserRequest` supports `session_id` and optional `user_id`.
 - `src/agent/planner.py` - LLM planner that outputs `ActionPlan` (tool/workflow/none) using tool/workflow lists and pending context (prompt in `src/prompts/planner.py`).
-- `src/agent/tools/registry.py` - Tool registration and execution (variety/weather/growth-stage/recommendation).
+- `src/agent/tools/registry.py` - Tool registration and execution (variety/weather/growth-stage/memory).
 - `src/agent/router.py` - Executes planner decisions, dispatches tools/workflows, and updates follow-up state.
 - `src/application/services/*` - Application-layer services (variety/weather/recommendation/crop calendar/planting extraction) used by tools and workflows.
 - `src/domain/planting.py` - Domain logic for planting extraction/validation and heuristic rules.
 - `src/agent/workflows/state.py` / `crop_calendar_graph.py` / `growth_stage_graph.py` - LangGraph state definition and workflow implementation.
 - `src/api/server.py` - FastAPI routes and dependency cache.
 - `chainlit_app.py` - UI client.
-- 品种与积温数据通过 Postgres 读取（`AGRI_DB_URL`，或由 `AGRI_DB_HOST/PORT/NAME/USER/PASSWORD/SSLMODE` 拼接）。
+- 品种与生育期预测数据通过 Postgres 读取（`AGRI_DB_URL`，或由 `AGRI_DB_HOST/PORT/NAME/USER/PASSWORD/SSLMODE` 拼接）。
 
 ## LangGraph Details
-- `StateGraph` is the orchestration skeleton and currently includes `extract`, `ask`, `context`, and `recommend` nodes.
+- `StateGraph` is the orchestration skeleton; crop calendar uses `extract`/`ask`/`context`/`recommend`, growth-stage uses `extract`/`ask`/`predict`.
 - `GraphState` key fields: `planting_draft`, `missing_fields`, `followup_count`, `weather_info`, `variety_info`, `recommendation_info`.
 - Follow-up logic: if missing fields exist, go to `ask`; user replies are merged with the existing draft, up to two rounds; remaining missing fields are filled with defaults before entering `context`.
-- Crop calendar and growth-stage workflows cache results by `PlantingDetails`; cache hits short-circuit and return immediately.
+- Crop calendar workflow has cache hooks keyed by `PlantingDetails` (currently disabled via `tool_cache`).
 
 Growth-stage workflow specifics:
-- Uses the `variety_lookup` tool flow with follow-ups to resolve the exact approval record when needed.
-- Weather data is read from `WEATHER_DB_TABLE` using `farm_id` resolved via `DEFAULT_FARM_ID`.
-- If sowing date >= 2026, the workflow asks for a new date before continuing.
+- Parses user variety/plan info, queries `agri_plant_plan`; if multiple matches, asks the user to pick one, then reads `agri_growth_stage_forecast`.
+- Maps `sowing_method` / `culti_type` / `stage_name` via `agri_code_dict` categories (`sowingmtd` / `culti_type` / `growth_stage`).
 
 ## Routing Logic
 - `src/agent/router.RequestRouter` uses `PlannerRunner` to output `ActionPlan` (tool/workflow/none) and executes the action.
@@ -59,14 +59,11 @@ Growth-stage workflow specifics:
 2. **Missing field check/follow-up**: `list_missing_required_fields(draft)` checks required fields; missing fields enter the follow-up node. User replies are merged, up to two rounds.
 3. **Default fill**: if fields are still missing after follow-ups, defaults are applied and recorded in `assumptions`.
 4. **Parallel tool context**: `weather_lookup` and `variety_lookup` run in parallel to produce `weather_info`/`variety_info`.
-5. **Farming recommendation**: call `farming_recommendation` with a JSON string containing `planting`, `weather`, and `variety`; output is stored in `recommendation_info`, and the workflow composes the final message.
+5. **Farming recommendation**: call the external crop calendar API (when configured) using normalized planting data; output is stored in `recommendation_info`, and the workflow composes the final message.
 
 ## Tool Notes
-- `growth_stage_prediction` only reads cached results; growth-stage prediction must go through the workflow for extraction/follow-up and uses Postgres (`AGRI_DB_URL`).
-- To hit the growth-stage cache, pass `PlantingDetails` JSON (or JSON containing a `planting` field); the cache key is generated by `cache_keys.py`.
 - Tools/services support `mock`/`local` providers; variety lookup reads Postgres via `AGRI_DB_URL` when `VARIETY_PROVIDER=local`. Weather can use `WEATHER_PROVIDER=91weather` for external forecasts.
-- Growth-stage workflow weather reads from `WEATHER_DB_TABLE` using `farm_id` resolved via `DEFAULT_FARM_ID`.
-- `variety_lookup` / `weather_lookup` / `farming_recommendation` results are cached with TTL to reduce repeated calls.
+- Tool cache is currently disabled (no-op implementation).
 - Variety matching strategy: first recall all approval records by variety name, score using user location and "approval region/suitable region" rules; if multiple high-score records exist, an LLM chooses the best.
  - Historical weather data is fetched via `goso_day` inside the crop calendar workflow.
 

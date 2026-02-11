@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import unittest
-from datetime import date, datetime, time
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,9 +22,6 @@ if not _MISSING_PYDANTIC_SETTINGS:
     from src.schemas import (
         GrowthStageResult,
         PlantingDetailsDraft,
-        ToolInvocation,
-        WeatherDataPoint,
-        WeatherSeries,
     )
 
 
@@ -90,29 +87,8 @@ class FeatureCaseTests(unittest.TestCase):
             sowing_date=date(2025, 4, 3),
             region="常德鼎城区",
         )
-        series = WeatherSeries(
-            region="常德鼎城区",
-            granularity="daily",
-            start_date=date(2025, 1, 1),
-            end_date=date(2025, 1, 2),
-            points=[
-                WeatherDataPoint(
-                    timestamp=datetime.combine(date(2025, 1, 1), time.min),
-                    temperature=20.0,
-                )
-            ],
-            source="test",
-        )
-        weather_payload = ToolInvocation(
-            name="growth_weather_lookup",
-            message="ok",
-            data=series.model_dump(mode="json"),
-        )
-        variety_payload = ToolInvocation(
-            name="variety_lookup",
-            message="ok",
-            data={"variety": "美香占", "raw_selected": {}, "missing_fields": []},
-        )
+        planting = draft.to_canonical()
+        # weather lookup is no longer required for growth stage workflow
         stages = {
             "stage_dates": json.dumps(
                 {"三叶一心": "2025-05-01", "成熟期": "2025-08-09"},
@@ -124,13 +100,13 @@ class FeatureCaseTests(unittest.TestCase):
             "src.agent.workflows.growth_stage_graph.extract_planting_details",
             return_value=draft,
         ), patch(
-            "src.agent.workflows.growth_stage_graph.execute_tool",
-            return_value=variety_payload,
+            "src.agent.workflows.growth_stage_graph.search_planting_plans",
+            return_value=([{"id": 1}], "id", ["id"]),
         ), patch(
-            "src.agent.workflows.growth_stage_graph.lookup_goso_weather",
-            return_value=weather_payload,
+            "src.agent.workflows.growth_stage_graph.resolve_planting_from_plan_id",
+            return_value=planting,
         ), patch(
-            "src.agent.workflows.growth_stage_graph.predict_growth_stage_local",
+            "src.agent.workflows.growth_stage_graph.predict_growth_stage_from_plan_id",
             return_value=growth_payload,
         ):
             graph = build_growth_stage_graph()

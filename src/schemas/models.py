@@ -82,6 +82,10 @@ class PlantingDetailsDraft(BaseModel):
     )
     crop: Optional[str] = None
     variety: Optional[str] = None
+    culti_type: Optional[str] = Field(
+        default=None,
+        description="稻作类型/熟制，如早稻、双季晚稻等。",
+    )
     planting_method: Optional[str] = Field(
         default=None,
         description="自然语言中的种植方式，可包含别名（如直播/插秧）。",
@@ -131,6 +135,10 @@ class PlantingDetails(BaseModel):
         default=None,
         description="品种名称，如美香占 2 号。",
         examples=["美香占2号"],
+    )
+    culti_type: Optional[str] = Field(
+        default=None,
+        description="稻作类型/熟制，如早稻、双季晚稻等。",
     )
     planting_method: PlantingMethod = Field(
         ...,

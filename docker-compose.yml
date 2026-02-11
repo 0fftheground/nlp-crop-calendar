@@ -15,8 +15,6 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      db:
-        condition: service_healthy
       otel-collector:
         condition: service_started
     restart: unless-stopped
@@ -48,8 +46,6 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      db:
-        condition: service_healthy
       api:
         condition: service_healthy
     restart: unless-stopped
@@ -64,28 +60,8 @@ services:
       retries: 5
       start_period: 10s
 
-  db:
-    image: postgres:15
-    container_name: nlp-crop-calendar-db
-    env_file: .env.docker
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    volumes:
-      - db-data:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
   otel-collector:
-    image: otel/opentelemetry-collector:latest
+    image: otel/opentelemetry-collector-contrib:latest
     container_name: otel-collector
     volumes:
       - ./otel-collector.yaml:/etc/otelcol/config.yaml
@@ -97,5 +73,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  db-data:
   otel-data:

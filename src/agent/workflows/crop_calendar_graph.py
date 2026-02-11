@@ -6,17 +6,18 @@ from __future__ import annotations
 
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 from typing import Dict, List, Optional
 
 from langgraph.graph import END, StateGraph
 
-from ...application.services.planting_service import extract_planting_details
-from ...application.services.weather_service import (
-    lookup_goso_weather,
-    normalize_weather_prompt,
+from ...application.services.crop_calendar_service import (
+    list_code_names,
+    request_crop_calendar_plan,
+    resolve_culti_type_code,
+    resolve_sowing_method_code,
+    set_crop_calendar_active,
 )
+from ...application.services.planting_service import extract_planting_details
 from ...domain.planting import (
     MissingPlantingInfoError,
     list_missing_required_fields,
@@ -30,35 +31,28 @@ from ...infra.variety_store import (
     load_variety_names,
     retrieve_variety_candidates,
 )
-from ...observability.logging_utils import get_trace_id, reset_trace_id, set_trace_id
 from ...observability.otel import (
     build_span_attributes,
     record_exception,
     start_span,
     summarize_state,
-    wrap_with_otel_context,
 )
 from ...schemas import (
     OperationPlanResult,
     PlantingDetails,
     Recommendation,
-    WeatherQueryInput,
     WorkflowResponse,
 )
 from ...prompts.workflow_messages import (
+    GROWTH_STAGE_ORDER,
     build_crop_calendar_missing_question,
-    build_future_weather_warning,
     format_crop_calendar_plan_message,
 )
-from ...prompts.tool_messages import TOOL_NOT_FOUND_MESSAGE
-from ..tools.registry import execute_tool
 from .common import (
     coerce_planting_draft,
-    coerce_weather_series,
     build_fallback_planting,
     infer_unknown_fields,
     llm_extract_planting,
-    summarize_weather_series,
 )
 from .state import GraphState, add_trace
 
@@ -68,13 +62,25 @@ CROP_FIELD_LABELS = {
     "variety": "品种",
     "planting_method": "种植方式",
     "sowing_date": "播种日期",
+    "culti_type": "稻作类型",
 }
 CROP_CACHE_NAME = "crop_calendar_workflow"
 CROP_CACHE_PROVIDER = "workflow"
 _FOLLOWUP_INDEX_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
+_YES_WORDS = {"是", "保存", "需要", "要", "确认", "好的", "好", "ok", "yes", "y"}
+_NO_WORDS = {
+    "否",
+    "不",
+    "不用",
+    "不需要",
+    "不保存",
+    "取消",
+    "算了",
+    "no",
+    "n",
+}
 
 
-@lru_cache(maxsize=1)
 def _get_variety_name_set() -> set[str]:
     return set(load_variety_names())
 
@@ -103,17 +109,6 @@ def _resolve_followup_candidate(
         if text in candidate or candidate in text:
             return candidate
     return None
-
-
-def _coerce_operation_plan(
-    data: Dict[str, object],
-) -> Optional[OperationPlanResult]:
-    if not data:
-        return None
-    try:
-        return OperationPlanResult.model_validate(data)
-    except Exception:
-        return None
 
 
 def _build_recommendations_from_plan(
@@ -172,9 +167,60 @@ def _extract_node(state: GraphState) -> GraphState:
     prompt = state.get("user_prompt", "")
     prior_draft = coerce_planting_draft(state.get("planting_draft"))
     prior_missing = state.get("missing_fields") or []
+    plant_season_id = state.get("plant_season_id")
     pending_options = list(state.get("pending_options") or [])
     followup_count = state.get("followup_count", 0)
-    prior_future_warning = bool(state.get("future_sowing_date_warning"))
+    if "save_confirmation" in prior_missing:
+        decision = _parse_save_confirmation(prompt)
+        if decision is None:
+            state = add_trace(state, "save confirm missing")
+            state.update(
+                {
+                    "planting_draft": prior_draft,
+                    "missing_fields": ["save_confirmation"],
+                    "followup_count": followup_count + 1,
+                    "pending_message": "是否保存该方案？请回复“是/否”。",
+                }
+            )
+            return state
+        if not decision:
+            state = add_trace(state, "save cancelled")
+            state.update(
+                {
+                    "missing_fields": [],
+                    "message": "已取消保存。",
+                }
+            )
+            return state
+        if plant_season_id is None:
+            state = add_trace(state, "save missing plan_id")
+            state.update(
+                {
+                    "missing_fields": [],
+                    "message": "缺少 plant_season_id，无法保存。",
+                }
+            )
+            return state
+        try:
+            result = set_crop_calendar_active(plant_season_id, is_active=True)
+            state = add_trace(state, "save ok")
+            state.update(
+                {
+                    "missing_fields": [],
+                    "message": "已保存种植计划。",
+                    "data": {"save_response": result},
+                }
+            )
+            return state
+        except Exception as exc:
+            state = add_trace(state, f"save failed={exc}")
+            state.update(
+                {
+                    "missing_fields": [],
+                    "message": f"保存失败: {exc}",
+                }
+            )
+            return state
     try:
         fresh_draft = extract_planting_details(
             prompt, llm_extract=llm_extract_planting
@@ -192,34 +238,6 @@ def _extract_node(state: GraphState) -> GraphState:
         draft = fresh_draft
     if draft.variety is not None:
         draft = draft.model_copy(update={"variety": None})
-    if prior_future_warning and (
-        draft.sowing_date is None or draft.sowing_date.year >= 2026
-    ):
-        state = add_trace(state, "extract future_sowing_date_rejected")
-        state.update(
-            {
-                "planting_draft": draft,
-                "missing_fields": ["sowing_date"],
-                "followup_count": followup_count,
-                "pending_message": "播种日期仍为2026年及以后，请直接回复新的播种日期（2025年及以前）。",
-                "future_sowing_date_warning": True,
-                "pending_options": [],
-            }
-        )
-        return state
-    if draft.sowing_date and draft.sowing_date.year >= 2026:
-        state = add_trace(state, "extract future_sowing_date")
-        state.update(
-            {
-                "planting_draft": draft,
-                "missing_fields": ["sowing_date"],
-                "followup_count": followup_count,
-                "pending_message": "暂不支持未来气象数据，请提供新的播种日期（2025年及以前）。",
-                "future_sowing_date_warning": True,
-                "pending_options": [],
-            }
-        )
-        return state
     missing_fields = list_missing_required_fields(draft)
     is_followup = bool(prior_draft and prior_missing)
     # Resolve variety selection from the previous candidate list.
@@ -267,6 +285,41 @@ def _extract_node(state: GraphState) -> GraphState:
                 missing_fields.append("variety")
     elif "variety" in missing_fields and not variety_candidates:
         variety_candidates = retrieve_variety_candidates(prompt, limit=5)
+    invalid_messages: List[str] = []
+    if draft.planting_method:
+        method_code = resolve_sowing_method_code(draft.planting_method)
+        if method_code is None:
+            options = list_code_names("sowingmtd", limit=6)
+            hint = "、".join(options) if options else "直播/插秧"
+            invalid_messages.append(
+                f"播种方式需匹配字典表，请确认（{hint}）。"
+            )
+            draft = draft.model_copy(update={"planting_method": None})
+            if "planting_method" not in missing_fields:
+                missing_fields.append("planting_method")
+    if getattr(draft, "culti_type", None):
+        culti_code = resolve_culti_type_code(draft.culti_type)
+        if culti_code is None:
+            options = list_code_names("culti_type", limit=6)
+            hint = "、".join(options) if options else "早稻/中稻/晚稻/双季晚稻"
+            invalid_messages.append(
+                f"稻作类型需匹配字典表，请确认（{hint}）。"
+            )
+            draft = draft.model_copy(update={"culti_type": None})
+            if "culti_type" not in missing_fields:
+                missing_fields.append("culti_type")
+    if invalid_messages:
+        state = add_trace(state, "extract code_dict_mismatch")
+        state.update(
+            {
+                "planting_draft": draft,
+                "missing_fields": missing_fields,
+                "followup_count": followup_count,
+                "pending_message": "\n".join(invalid_messages),
+                "pending_options": [],
+            }
+        )
+        return state
     # If user says "不确定/不知道", allow fallback defaults to avoid dead-ends.
     unknown_fields = infer_unknown_fields(prompt, missing_fields, CROP_FIELD_LABELS)
     if unknown_fields:
@@ -296,11 +349,23 @@ def _extract_node(state: GraphState) -> GraphState:
             "followup_count": followup_count,
             "assumptions": list(draft.assumptions),
             "variety_candidates": variety_candidates,
-            "future_sowing_date_warning": False,
             "pending_message": None,
         }
     )
     return state
+
+
+def _parse_save_confirmation(prompt: str) -> Optional[bool]:
+    text = (prompt or "").strip().lower()
+    if not text:
+        return None
+    for token in _NO_WORDS:
+        if token in text:
+            return False
+    for token in _YES_WORDS:
+        if token in text:
+            return True
+    return None
 
 
 def _ask_node(state: GraphState) -> GraphState:
@@ -323,78 +388,12 @@ def _ask_node(state: GraphState) -> GraphState:
             missing_fields,
             CROP_FIELD_LABELS,
         )
-        draft = state.get("planting_draft")
-        warning = (
-            build_future_weather_warning(draft.sowing_date) if draft else None
-        )
-        if warning:
-            message = f"{warning}\n{message}"
     state = add_trace(state, f"ask missing={missing_fields}")
     state.update({"message": message})
     return state
 
 
-def _fetch_variety_info(planting: PlantingDetails, prompt: str) -> Dict[str, object]:
-    query = planting.variety or planting.crop or prompt
-    result = execute_tool("variety_lookup", query)
-    if not result:
-        return {
-            "name": "variety_lookup",
-            "message": TOOL_NOT_FOUND_MESSAGE,
-            "data": {},
-        }
-    return result.model_dump(mode="json")
-
-
-def _fetch_weather_info(planting: PlantingDetails, prompt: str) -> Dict[str, object]:
-    weather_query = None
-    if planting.region:
-        try:
-            weather_query = WeatherQueryInput(
-                region=planting.region,
-                year=planting.sowing_date.year,
-                granularity="daily",
-            )
-        except Exception:
-            weather_query = None
-    if weather_query is None and prompt:
-        _, parsed = normalize_weather_prompt(prompt)
-        if parsed:
-            try:
-                weather_query = parsed.model_copy(
-                    update={
-                        "year": planting.sowing_date.year,
-                        "granularity": "daily",
-                    }
-                )
-            except Exception:
-                weather_query = None
-    result = lookup_goso_weather(weather_query)
-    if not result:
-        weather_series = coerce_weather_series(
-            {}, region=planting.region or "unknown"
-        )
-        return {
-            "name": "growth_weather_lookup",
-            "message": TOOL_NOT_FOUND_MESSAGE,
-            "data": {
-                "summary": summarize_weather_series(weather_series),
-            },
-        }
-    weather_series = coerce_weather_series(
-        result.data, region=planting.region or "unknown"
-    )
-    return {
-        "name": result.name,
-        "message": result.message,
-        "data": {
-            "summary": summarize_weather_series(weather_series),
-        },
-    }
-
-
 def _context_node(state: GraphState) -> GraphState:
-    prompt = state.get("user_prompt", "")
     draft = state.get("planting_draft")
     if draft is None:
         state = add_trace(state, "context missing draft")
@@ -440,42 +439,19 @@ def _context_node(state: GraphState) -> GraphState:
         )
         return state
 
-    trace_id = get_trace_id()
-
-    def _wrap_with_trace(func):
-        def _inner(*args, **kwargs):
-            token = set_trace_id(trace_id)
-            try:
-                return func(*args, **kwargs)
-            finally:
-                reset_trace_id(token)
-
-        return wrap_with_otel_context(_inner)
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        weather_future = executor.submit(
-            _wrap_with_trace(_fetch_weather_info), planting, prompt
-        )
-        variety_future = executor.submit(
-            _wrap_with_trace(_fetch_variety_info), planting, prompt
-        )
-        weather_info = weather_future.result()
-        variety_info = variety_future.result()
-
     state = add_trace(state, "context ready")
     state.update(
         {
             "planting": planting,
             "assumptions": list(draft.assumptions),
-            "weather_info": weather_info,
-            "variety_info": variety_info,
+            "weather_info": {},
+            "variety_info": {},
         }
     )
     return state
 
 
 def _recommend_node(state: GraphState) -> GraphState:
-    prompt = state.get("user_prompt", "")
     planting = state.get("planting")
     weather_info = state.get("weather_info") or {}
     variety_info = state.get("variety_info") or {}
@@ -492,35 +468,36 @@ def _recommend_node(state: GraphState) -> GraphState:
         )
         return state
 
-    recommendation_context = {
-        "user_prompt": prompt,
-        "planting": planting.model_dump(mode="json"),
-        "weather": weather_info,
-        "variety": variety_info,
+    try:
+        plan_result = request_crop_calendar_plan(planting)
+    except Exception as exc:
+        state = add_trace(state, f"recommend failed={exc}")
+        state.update(
+            {
+                "message": f"农事方案生成失败: {exc}",
+            }
+        )
+        return state
+    plan = plan_result["operation_plan"]
+    growth_stage = plan_result["growth_stage"]
+    plant_season_id = plan_result.get("plant_season_id")
+    raw_payload = plan_result.get("raw") or {}
+    raw_data = raw_payload.get("data") if isinstance(raw_payload, dict) else {}
+    farmworks_payload = (
+        raw_data.get("farmworks") if isinstance(raw_data, dict) else {}
+    )
+    growth_stages_payload = (
+        raw_data.get("growth_stages") if isinstance(raw_data, dict) else {}
+    )
+    recommendation_info = {
+        "name": "crop_calendar_plan",
+        "message": plan.summary or "已生成农事方案。",
+        "data": plan.model_dump(mode="json"),
     }
-    recommendation_prompt = json.dumps(
-        recommendation_context, ensure_ascii=False, default=str
-    )
-    recommendation_payload = execute_tool(
-        "farming_recommendation",
-        recommendation_prompt,
-    )
-    recommendation_info = (
-        recommendation_payload.model_dump(mode="json")
-        if recommendation_payload
-        else {
-            "name": "farming_recommendation",
-            "message": TOOL_NOT_FOUND_MESSAGE,
-            "data": {},
-        }
-    )
     weather_note = weather_info.get("message") or ""
     variety_note = variety_info.get("message") or ""
     recommendation_note = recommendation_info.get("message") or ""
-    plan = _coerce_operation_plan(recommendation_info.get("data", {}))
-    recommendations = (
-        _build_recommendations_from_plan(plan, planting) if plan else []
-    )
+    recommendations = _build_recommendations_from_plan(plan, planting)
     message = format_crop_calendar_plan_message(
         planting,
         recommendations,
@@ -529,6 +506,11 @@ def _recommend_node(state: GraphState) -> GraphState:
         variety_note=variety_note,
         recommendation_note=recommendation_note,
     )
+    growth_lines = _format_growth_stage_lines(growth_stage.stages)
+    if growth_lines:
+        message = f"{message}\n{growth_lines}"
+    if plant_season_id is not None:
+        message = f"{message}\n是否保存该方案？请回复“是/否”。"
     state = add_trace(state, "recommend complete")
     cache_key = build_planting_cache_key(planting)
     _store_calendar_response(
@@ -542,13 +524,60 @@ def _recommend_node(state: GraphState) -> GraphState:
     state.update(
         {
             "recommendations": recommendations,
+            "growth_stage": growth_stage,
+            "plant_season_id": plant_season_id,
             "message": message,
+            "data": {
+                "plant_season_id": plant_season_id,
+                "farmworks": farmworks_payload,
+                "growth_stages": growth_stages_payload,
+            },
             "weather_info": weather_info,
             "variety_info": variety_info,
             "recommendation_info": recommendation_info,
+            "missing_fields": (
+                ["save_confirmation"] if plant_season_id is not None else []
+            ),
+            "pending_message": (
+                "是否保存该方案？请回复“是/否”。"
+                if plant_season_id is not None
+                else None
+            ),
         }
     )
     return state
+
+
+def _format_growth_stage_lines(stages: Dict[str, str]) -> str:
+    if not stages:
+        return ""
+    stage_dates = stages.get("stage_dates")
+    if not stage_dates:
+        return ""
+    try:
+        payload = json.loads(stage_dates)
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict) or not payload:
+        return ""
+    ordered: List[tuple[str, str]] = []
+    seen = set()
+    for name in GROWTH_STAGE_ORDER:
+        value = payload.get(name)
+        if isinstance(value, str) and value:
+            ordered.append((name, value))
+            seen.add(name)
+    for name, value in payload.items():
+        if name in seen:
+            continue
+        if isinstance(value, str) and value:
+            ordered.append((name, value))
+    if not ordered:
+        return ""
+    lines = ["生育期阶段日期:"]
+    for name, value in ordered:
+        lines.append(f"{name}: {value}")
+    return "\n".join(lines)
 
 
 def _route_after_extract(state: GraphState) -> str:

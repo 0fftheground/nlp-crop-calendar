@@ -4,6 +4,9 @@ receivers:
       grpc:
       http:
 
+processors:
+  batch:
+
 exporters:
   debug:
     verbosity: normal
@@ -11,12 +14,20 @@ exporters:
     path: ${OTEL_LOG_PATH}
   file/traces:
     path: ${OTEL_TRACES_PATH}
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
 
 service:
   pipelines:
     logs:
       receivers: [otlp]
-      exporters: [file]
+      processors: [batch]
+      exporters: [loki, file]
     traces:
       receivers: [otlp]
-      exporters: [debug, file/traces]
+      processors: [batch]
+      exporters: [otlp/tempo, debug, file/traces]

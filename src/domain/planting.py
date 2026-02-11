@@ -13,6 +13,17 @@ DEFAULT_CROP = "水稻"
 CROP_REQUIRED_FIELDS = ["crop", "variety", "planting_method", "sowing_date"]
 
 CROP_KEYWORDS = ["水稻", "小麦", "玉米", "大豆", "油菜", "棉花", "花生"]
+CULTI_TYPE_KEYWORDS = {
+    "早稻": "早稻",
+    "中稻": "中稻",
+    "晚稻": "晚稻",
+    "单季稻": "单季稻",
+    "一季稻": "一季稻",
+    "双季稻": "双季稻",
+    "双季早稻": "双季早稻",
+    "双季晚稻": "双季晚稻",
+    "再生稻": "再生稻",
+}
 METHOD_KEYWORDS = {
     "直播": "direct_seeding",
     "撒播": "direct_seeding",
@@ -121,6 +132,12 @@ def _apply_heuristics(
     prompt: str,
     variety_resolver: Optional[VarietyResolver],
 ) -> None:
+    if "culti_type" not in data:
+        for key, value in CULTI_TYPE_KEYWORDS.items():
+            if key in prompt:
+                data["culti_type"] = value
+                break
+
     if "crop" not in data:
         for crop in CROP_KEYWORDS:
             if crop in prompt:
@@ -182,6 +199,11 @@ def _sanitize_crop_field(
     candidate = crop.strip()
     if not candidate:
         data.pop("crop", None)
+        return
+    if candidate in CULTI_TYPE_KEYWORDS:
+        if not data.get("culti_type"):
+            data["culti_type"] = CULTI_TYPE_KEYWORDS[candidate]
+        data["crop"] = DEFAULT_CROP
         return
     if candidate in CROP_KEYWORDS:
         return

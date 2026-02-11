@@ -185,12 +185,10 @@ def get_geocode_cache():
 
 
 def get_geocode_cached(address: str, city: Optional[str] = None) -> Optional[dict]:
-    cache_key = make_geocode_cache_key(address, city)
-    return get_geocode_cache().get(cache_key)
+    return None
 
 
 def set_geocode_cached(
     address: str, city: Optional[str], payload: dict
 ) -> None:
-    cache_key = make_geocode_cache_key(address, city)
-    get_geocode_cache().set(cache_key, payload)
+    return None

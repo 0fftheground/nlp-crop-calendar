@@ -21,7 +21,7 @@ _WORKFLOWS = (
     WorkflowSpec(
         name=CROP_WORKFLOW_NAME,
         description=(
-            "完整种植计划工作流（抽取→追问→并行工具→推荐）。"
+            "完整种植计划工作流（抽取→追问→外部计算→推荐）。"
             "适用：用户要全流程/多环节方案，或在补充作物/品种/播种方式/播期等关键信息时。"
             "与种植无关不要调用"
         ),
@@ -30,8 +30,8 @@ _WORKFLOWS = (
     WorkflowSpec(
         name=GROWTH_WORKFLOW_NAME,
         description=(
-            "生育期预测工作流（信息抽取-气象数据-生育期计算）。"
-            "当问题涉及生育期预测或用户在补充相关种植要素时使用。"
+            "生育期预测工作流（解析品种/计划-查询种植计划-读取生育期）。"
+            "当问题涉及生育期预测或需要选择种植计划时使用。"
         ),
         builder=build_growth_stage_graph,
     ),
