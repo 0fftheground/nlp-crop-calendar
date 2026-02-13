@@ -7,7 +7,7 @@ from typing import Callable, Dict, List, Optional, TypedDict
 
 import httpx
 
-from .growth_stage_service import predict_growth_stage_from_db
+from .growth_stage_service import query_growth_stage_from_db
 from ...infra.config import get_config
 from ...infra.postgres import fetch_all, quote_identifier
 from ...infra.tool_provider import normalize_provider
@@ -51,13 +51,18 @@ def derive_weather_range(
     """
     Infer the weather query year based on sowing/transplanting dates.
     """
-    region = planting.region or default_region
+    cfg = get_config()
+    region = default_region or cfg.default_region
     if not region:
         raise ValueError("查询气象必须提供地区信息。")
 
+    start_date = planting.sowing_date
+    end_date = planting.sowing_date + timedelta(days=max(1, int(duration_days)) - 1)
     return WeatherQueryInput(
         region=region,
-        year=planting.sowing_date.year,
+        start_date=start_date,
+        end_date=end_date,
+        year=start_date.year,
         granularity="daily",
         include_advice=True,
     )
@@ -95,8 +100,9 @@ def assemble_weather_series(
 
 
 def _default_weather_series(planting: PlantingDetails) -> WeatherSeries:
+    cfg = get_config()
     return WeatherSeries(
-        region=planting.region or "unknown",
+        region=cfg.default_region or "unknown",
         granularity="daily",
         start_date=planting.sowing_date,
         end_date=None,
@@ -105,15 +111,16 @@ def _default_weather_series(planting: PlantingDetails) -> WeatherSeries:
     )
 
 
-def predict_growth_stage(
+def query_growth_stage(
     planting: PlantingDetails, weather_series: Optional[WeatherSeries] = None
 ) -> GrowthStageResult:
     """
-    Helper wrapper that prepares PredictGrowthStageInput for the prediction service.
+    Helper wrapper that prepares PredictGrowthStageInput for the query service.
     """
     if weather_series is None:
+        cfg = get_config()
         weather_series = WeatherSeries(
-            region=planting.region or "unknown",
+            region=cfg.default_region or "unknown",
             granularity="daily",
             start_date=planting.sowing_date,
             end_date=None,
@@ -121,7 +128,7 @@ def predict_growth_stage(
             source="synthetic",
         )
     request = PredictGrowthStageInput(planting=planting, weatherSeries=weather_series)
-    return predict_growth_stage_from_db(request)
+    return query_growth_stage_from_db(request)
 
 
 def build_operation_plan(
@@ -175,7 +182,7 @@ def generate_crop_calendar(
     )
     weather_result = fetch_weather(weather_query)
     weather_series = assemble_weather_series(weather_result, weather_query)
-    growth_stage = predict_growth_stage(planting, weather_series)
+    growth_stage = query_growth_stage(planting, weather_series)
     operation_plan = build_operation_plan(
         planting,
         weather_series,
@@ -191,11 +198,12 @@ def generate_crop_calendar(
     )
 
 
-def predict_growth_stage_gdd(input: PredictGrowthStageInput) -> GrowthStageResult:
-    return predict_growth_stage_from_db(input)
+def query_growth_stage_gdd(input: PredictGrowthStageInput) -> GrowthStageResult:
+    return query_growth_stage_from_db(input)
 
 
 def get_farm_weather(input: WeatherQueryInput) -> WeatherSeries:
+    cfg = get_config()
     base_year = input.year
     if input.start_date:
         base_year = input.start_date.year
@@ -223,7 +231,7 @@ def get_farm_weather(input: WeatherQueryInput) -> WeatherSeries:
         points.append(point)
 
     return WeatherSeries(
-        region=input.region,
+        region=input.region or cfg.default_region or "unknown",
         granularity=input.granularity,
         start_date=start,
         end_date=end,

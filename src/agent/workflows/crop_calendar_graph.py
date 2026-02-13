@@ -62,6 +62,7 @@ CROP_FIELD_LABELS = {
     "variety": "品种",
     "planting_method": "种植方式",
     "sowing_date": "播种日期",
+    "transplant_date": "移栽日期",
     "culti_type": "稻作类型",
 }
 CROP_CACHE_NAME = "crop_calendar_workflow"
@@ -79,6 +80,40 @@ _NO_WORDS = {
     "no",
     "n",
 }
+
+
+def _optional_fields_for_prompt(state: GraphState) -> list[str]:
+    draft = coerce_planting_draft(state.get("planting_draft"))
+    prompt = state.get("user_prompt", "") or ""
+    optional: list[str] = []
+    if not (draft and getattr(draft, "culti_type", None)):
+        optional.append("culti_type")
+    if _requires_transplant_date(draft, prompt) and not (
+        draft and draft.transplant_date
+    ):
+        optional.append("transplant_date")
+    return optional
+
+
+def _requires_transplant_date(draft: Optional[PlantingDetailsDraft], prompt: str) -> bool:
+    if draft:
+        method = getattr(draft, "planting_method", None)
+        if method:
+            value = method.value if hasattr(method, "value") else str(method)
+            if value in {"transplanting", "插秧", "移栽", "机插", "抛秧"}:
+                return True
+    text = prompt or ""
+    return any(token in text for token in ("插秧", "移栽", "机插", "抛秧"))
+
+
+def _build_missing_question(
+    state: GraphState, missing_fields: list[str]
+) -> str:
+    return build_crop_calendar_missing_question(
+        missing_fields,
+        CROP_FIELD_LABELS,
+        optional_fields=_optional_fields_for_prompt(state),
+    )
 
 
 def _get_variety_name_set() -> set[str]:
@@ -115,7 +150,6 @@ def _build_recommendations_from_plan(
     plan: OperationPlanResult, planting: PlantingDetails
 ) -> List[Recommendation]:
     crop = plan.crop or planting.crop
-    regions = [planting.region] if planting.region else []
     recommendations: List[Recommendation] = []
     for item in plan.operations:
         reasoning_parts = []
@@ -132,7 +166,7 @@ def _build_recommendations_from_plan(
                 description=item.description,
                 reasoning=reasoning,
                 months=[],
-                regions=list(regions),
+                regions=[],
             )
         )
     return recommendations
@@ -189,6 +223,7 @@ def _extract_node(state: GraphState) -> GraphState:
                 {
                     "missing_fields": [],
                     "message": "已取消保存。",
+                    "halt": True,
                 }
             )
             return state
@@ -198,6 +233,7 @@ def _extract_node(state: GraphState) -> GraphState:
                 {
                     "missing_fields": [],
                     "message": "缺少 plant_season_id，无法保存。",
+                    "halt": True,
                 }
             )
             return state
@@ -209,6 +245,7 @@ def _extract_node(state: GraphState) -> GraphState:
                     "missing_fields": [],
                     "message": "已保存种植计划。",
                     "data": {"save_response": result},
+                    "halt": True,
                 }
             )
             return state
@@ -218,6 +255,7 @@ def _extract_node(state: GraphState) -> GraphState:
                 {
                     "missing_fields": [],
                     "message": f"保存失败: {exc}",
+                    "halt": True,
                 }
             )
             return state
@@ -384,24 +422,21 @@ def _ask_node(state: GraphState) -> GraphState:
             "请回复序号或品种名称。"
         )
     else:
-        message = build_crop_calendar_missing_question(
-            missing_fields,
-            CROP_FIELD_LABELS,
-        )
+        message = _build_missing_question(state, missing_fields)
     state = add_trace(state, f"ask missing={missing_fields}")
     state.update({"message": message})
     return state
 
 
 def _context_node(state: GraphState) -> GraphState:
-    draft = state.get("planting_draft")
+    raw_draft = state.get("planting_draft")
+    draft = coerce_planting_draft(raw_draft)
     if draft is None:
         state = add_trace(state, "context missing draft")
         state.update(
             {
-                "message": build_crop_calendar_missing_question(
-                    list(CROP_FIELD_LABELS.keys()),
-                    CROP_FIELD_LABELS,
+                "message": _build_missing_question(
+                    state, list(CROP_FIELD_LABELS.keys())
                 )
             }
         )
@@ -415,10 +450,7 @@ def _context_node(state: GraphState) -> GraphState:
         state.update(
             {
                 "missing_fields": missing,
-                "message": build_crop_calendar_missing_question(
-                    missing,
-                    CROP_FIELD_LABELS,
-                ),
+                "message": _build_missing_question(state, missing),
             }
         )
         return state
@@ -460,9 +492,8 @@ def _recommend_node(state: GraphState) -> GraphState:
         state = add_trace(state, "recommend missing planting")
         state.update(
             {
-                "message": build_crop_calendar_missing_question(
-                    list(CROP_FIELD_LABELS.keys()),
-                    CROP_FIELD_LABELS,
+                "message": _build_missing_question(
+                    state, list(CROP_FIELD_LABELS.keys())
                 )
             }
         )
@@ -574,9 +605,9 @@ def _format_growth_stage_lines(stages: Dict[str, str]) -> str:
             ordered.append((name, value))
     if not ordered:
         return ""
-    lines = ["生育期阶段日期:"]
+    lines = ["", "【生育期预测结果】"]
     for name, value in ordered:
-        lines.append(f"{name}: {value}")
+        lines.append(f"{name}：{value}")
     return "\n".join(lines)
 
 

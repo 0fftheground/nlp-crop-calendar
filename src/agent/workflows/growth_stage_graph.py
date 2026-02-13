@@ -1,5 +1,5 @@
 """
-LangGraph workflow for growth stage prediction.
+LangGraph workflow for growth stage query.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from ...application.services.growth_stage_service import (
     build_planting_from_plan_row,
     extract_plan_name_from_row,
     list_active_planting_plans,
-    predict_growth_stage_from_plan_id,
+    query_growth_stage_from_plan_id,
     resolve_planting_from_plan_id,
     search_planting_plans,
 )
@@ -38,9 +38,12 @@ from .common import (
 from .state import GraphState, add_trace
 
 
-GROWTH_WORKFLOW_NAME = "growth_stage_workflow"
+GROWTH_WORKFLOW_NAME = "growth_stage_query_workflow"
 _PLAN_CHOICE_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
-_PLAN_ID_RE = re.compile(r"(?:plan_id|计划id|计划编号|id)\s*[:=]?\s*([\w-]+)", re.IGNORECASE)
+_PLAN_ID_RE = re.compile(
+    r"(?:plan_id|计划id|计划编号|id)\s*[:=]?\s*(\d+)",
+    re.IGNORECASE,
+)
 _QUOTED_RE = re.compile(r"[\"“”']([^\"“”']+)[\"“”']")
 
 
@@ -57,9 +60,25 @@ def _parse_prompt_payload(prompt: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _normalize_plan_id(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return text
+    match = re.search(r"\d+", text)
+    if match:
+        return match.group(0)
+    return None
+
+
 def _extract_plan_id_from_text(text: str) -> Optional[str]:
     if not text:
         return None
+    if text.strip().isdigit():
+        return text.strip()
     match = _PLAN_ID_RE.search(text)
     if match:
         return match.group(1).strip()
@@ -73,9 +92,9 @@ def _extract_plan_id_from_payload(payload: dict | None) -> Optional[str]:
         value = payload.get(key)
         if value is None:
             continue
-        text = str(value).strip()
-        if text:
-            return text
+        normalized = _normalize_plan_id(value)
+        if normalized:
+            return normalized
     return None
 
 
@@ -139,6 +158,8 @@ def _parse_plan_id_from_option(option: str) -> Optional[str]:
     match = _PLAN_ID_RE.search(option)
     if match:
         return match.group(1).strip()
+    if option.strip().isdigit():
+        return option.strip()
     return None
 
 
@@ -418,6 +439,16 @@ def _growth_predict_node(state: GraphState) -> GraphState:
         "plan_id": plan_id,
         "plan_filters": state.get("plan_filters") or {},
     }
+    if isinstance(plan_id, str) and plan_id and not plan_id.isdigit():
+        state = add_trace(state, f"predict invalid plan_id={plan_id}")
+        state.update(
+            {
+                "message": "计划 ID 需要是数字，请提供有效的计划 ID。",
+                "missing_fields": ["plan_id"],
+                "data": {"workflow": workflow_payload},
+            }
+        )
+        return state
     if not plan_id:
         state = add_trace(state, "predict missing plan_id")
         state.update(
@@ -431,7 +462,7 @@ def _growth_predict_node(state: GraphState) -> GraphState:
     result = None
     provider_response: Dict[str, object] = {}
     try:
-        result = predict_growth_stage_from_plan_id(plan_id)
+        result = query_growth_stage_from_plan_id(plan_id)
         provider_response = result.model_dump(mode="json")
         state = add_trace(state, "growth_stage_db ok")
     except Exception as exc:
@@ -440,7 +471,7 @@ def _growth_predict_node(state: GraphState) -> GraphState:
         workflow_payload["trace"] = trace
         state.update(
             {
-                "message": f"生育期预测失败: {exc}",
+                "message": f"生育期结果查询失败: {exc}",
                 "data": {"workflow": workflow_payload},
             }
         )
@@ -492,7 +523,7 @@ def _growth_route_after_extract(state: GraphState) -> str:
 
 def build_growth_stage_graph():
     """
-    Construct and return the growth stage prediction LangGraph workflow.
+    Construct and return the growth stage query LangGraph workflow.
     """
     def _trace_node(node_name: str, func):
         def _inner(state: GraphState) -> GraphState:

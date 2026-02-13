@@ -191,6 +191,15 @@ class AppConfig(BaseSettings):
     geocode_cache_path: Optional[str] = Field(
         default=None, validation_alias="GEOCODE_CACHE_PATH"
     )
+    intent_rules_path: Optional[str] = Field(
+        default=None, validation_alias="INTENT_RULES_PATH"
+    )
+    intent_rules_reload_seconds: int = Field(
+        default=5, validation_alias="INTENT_RULES_RELOAD_SECONDS"
+    )
+    intent_routing_mode: str = Field(
+        default="llm_only", validation_alias="INTENT_ROUTING_MODE"
+    )
 
     @field_validator("llm_provider", mode="after")
     @classmethod

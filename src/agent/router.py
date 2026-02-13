@@ -1,10 +1,16 @@
 import contextvars
 import json
 import re
+import time
+from collections import OrderedDict
+from datetime import date
+from pathlib import Path
+from threading import Lock
 from typing import Optional
 
 from pydantic import ValidationError
 
+from ..infra.config import get_config
 from ..infra.pending_store import build_pending_followup_store
 from ..infra.variety_store import find_exact_variety_in_text, retrieve_variety_candidates
 from ..observability.logging_utils import log_event
@@ -29,6 +35,8 @@ from ..schemas.models import (
     UserRequest,
     WorkflowResponse,
 )
+from .fast_intent import FastIntentRouter
+from .intent_rules import IntentRule, IntentRuleEngine
 from .input_specs import get_input_spec
 from .planner import ActionPlan, PlannerRunner
 from .tools.registry import execute_tool, list_tool_specs
@@ -76,6 +84,58 @@ _QUESTION_HINTS = {
     "查一下",
     "帮忙",
 }
+FAST_INTENT_MIN_CONFIDENCE = 0.7
+FAST_INTENT_MIN_CONFIDENCE_NONE = 0.85
+INTENT_CACHE_MIN_PROMPT_LEN = 2
+_WEATHER_REGION_RE = re.compile(
+    r"(?P<region>[\u4e00-\u9fa5]{2,10})(?:的)?"
+    r"(?:天气|气温|气象|降雨|降水|湿度|风速|预报)"
+)
+_YEAR_RE = re.compile(r"(20\d{2})\s*年?")
+_DATE_TEXT_RE = re.compile(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})")
+_DATE_TEXT_COMPACT_RE = re.compile(r"(20\d{2})(\d{2})(\d{2})")
+_PENDING_INTERRUPT_RULE_NAMES = {
+    "plant_plan_list_active",
+    "plant_plan_delete",
+    "memory_clear",
+}
+
+
+def _normalize_prompt(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+class _IntentPlanCache:
+    def __init__(self, max_items: int, ttl_seconds: int) -> None:
+        self._max_items = max(1, int(max_items))
+        self._ttl_seconds = max(1, int(ttl_seconds))
+        self._items: "OrderedDict[str, tuple[dict, int]]" = OrderedDict()
+        self._lock = Lock()
+
+    def get(self, key: str) -> Optional[dict]:
+        if not key:
+            return None
+        now = int(time.time())
+        with self._lock:
+            item = self._items.get(key)
+            if not item:
+                return None
+            payload, expires_at = item
+            if expires_at <= now:
+                self._items.pop(key, None)
+                return None
+            self._items.move_to_end(key)
+            return dict(payload)
+
+    def set(self, key: str, payload: dict) -> None:
+        if not key:
+            return None
+        expires_at = int(time.time()) + self._ttl_seconds
+        with self._lock:
+            self._items[key] = (dict(payload), expires_at)
+            self._items.move_to_end(key)
+            while len(self._items) > self._max_items:
+                self._items.popitem(last=False)
 
 
 class RequestRouter:
@@ -92,6 +152,30 @@ class RequestRouter:
         self._tool_names = {spec["name"] for spec in tool_specs}
         self._planner = PlannerRunner(tool_specs, self._workflow_specs)
         self._pending_store = build_pending_followup_store()
+        cfg = get_config()
+        self._intent_cache = _IntentPlanCache(
+            cfg.tool_cache_max_items, cfg.tool_cache_ttl_seconds
+        )
+        mode = (cfg.intent_routing_mode or "hybrid").strip().lower()
+        if mode not in {"llm_only", "hybrid"}:
+            log_event("intent_mode_invalid", value=mode)
+            mode = "hybrid"
+        self._intent_mode = mode
+        rules_path = None
+        if cfg.intent_rules_path:
+            rules_path = Path(cfg.intent_rules_path)
+        else:
+            rules_path = Path(__file__).resolve().parents[2] / "resources" / "intent_rules.json"
+        self._rule_engine = IntentRuleEngine(
+            rules_path, reload_seconds=cfg.intent_rules_reload_seconds
+        )
+        try:
+            self._fast_router: Optional[FastIntentRouter] = FastIntentRouter(
+                tool_specs, self._workflow_specs
+            )
+        except Exception as exc:
+            log_event("fast_intent_init_error", error=str(exc))
+            self._fast_router = None
 
     def handle(self, request: UserRequest) -> HandleResponse:
         session_id = request.session_id or request.user_id or "default"
@@ -115,18 +199,57 @@ class RequestRouter:
                 # New question: clear stale pending to avoid misrouting follow-ups.
                 self._pending_store.delete(session_id)
                 pending = None
+            if self._intent_mode == "llm_only":
+                plan = self._planner.plan(prompt, pending=pending)
+                if not plan:
+                    return self._fallback_from_planner(prompt, pending, session_id)
+                return self._execute_with_validation(plan, prompt, pending, session_id)
+            plan = self._rule_route(prompt)
+            if plan:
+                log_event(
+                    "intent_rule_hit",
+                    action=plan.action,
+                    name=plan.name,
+                    reason=plan.reason,
+                )
+                return self._execute_with_validation(plan, prompt, pending, session_id)
+            cached_plan = self._get_cached_plan(prompt)
+            if cached_plan:
+                log_event(
+                    "intent_cache_hit",
+                    action=cached_plan.action,
+                    name=cached_plan.name,
+                )
+                return self._execute_with_validation(
+                    cached_plan, prompt, pending, session_id
+                )
+            fast_plan = self._fast_intent_route(prompt, pending)
+            if fast_plan:
+                log_event("intent_fast_hit", action=fast_plan.action, name=fast_plan.name)
+                self._cache_plan(prompt, fast_plan)
+                return self._execute_with_validation(fast_plan, prompt, pending, session_id)
             plan = self._planner.plan(prompt, pending=pending)
             if not plan:
                 return self._fallback_from_planner(prompt, pending, session_id)
-            plan, exec_pending, response = self._apply_input_validation(
-                plan, pending, session_id
-            )
-            if response:
-                return response
-            return self._execute_plan(plan, prompt, exec_pending, session_id)
+            self._cache_plan(prompt, plan)
+            return self._execute_with_validation(plan, prompt, pending, session_id)
         finally:
             self._memory_id_ctx.reset(memory_token)
             self._session_id_ctx.reset(session_token)
+
+    def _execute_with_validation(
+        self,
+        plan: ActionPlan,
+        prompt: str,
+        pending: Optional[dict],
+        session_id: str,
+    ) -> HandleResponse:
+        plan, exec_pending, response = self._apply_input_validation(
+            plan, pending, session_id
+        )
+        if response:
+            return response
+        return self._execute_plan(plan, prompt, exec_pending, session_id)
 
     def _execute_plan(
         self,
@@ -147,6 +270,154 @@ class RequestRouter:
             )
             return self._resume_pending(prompt, pending, session_id)
         return self._respond_none(plan, pending, session_id)
+
+    def _rule_route(self, prompt: str) -> Optional[ActionPlan]:
+        text = _normalize_prompt(prompt)
+        if not text:
+            return None
+        lowered = text.lower()
+        for name in self._tool_names:
+            if name.lower() in lowered:
+                return ActionPlan(
+                    action="tool",
+                    name=name,
+                    input=self._default_plan_input("tool", name, text),
+                )
+        for name in self._workflow_names:
+            if name.lower() in lowered:
+                return ActionPlan(
+                    action="workflow",
+                    name=name,
+                    input=self._default_plan_input("workflow", name, text),
+                )
+        rule = self._rule_engine.match(text)
+        if rule:
+            return self._plan_from_rule(rule, text)
+        return None
+
+    def _fast_intent_route(
+        self, prompt: str, pending: Optional[dict]
+    ) -> Optional[ActionPlan]:
+        if not self._fast_router:
+            return None
+        result = self._fast_router.classify(prompt, pending=pending)
+        if not result:
+            return None
+        if result.action == "none":
+            if result.confidence < FAST_INTENT_MIN_CONFIDENCE_NONE:
+                return None
+            return ActionPlan(action="none", reason=result.reason)
+        if result.confidence < FAST_INTENT_MIN_CONFIDENCE:
+            return None
+        if not result.name:
+            return None
+        plan_input = result.input
+        if plan_input is None or plan_input == "":
+            plan_input = self._default_plan_input(result.action, result.name, prompt)
+        return ActionPlan(
+            action=result.action,
+            name=result.name,
+            input=plan_input,
+            reason=result.reason,
+        )
+
+    def _default_plan_input(self, action: str, name: str, prompt: str) -> object:
+        if action == "workflow":
+            return {"prompt": prompt}
+        if action != "tool":
+            return None
+        if name == "variety_lookup":
+            return {"query": prompt}
+        if name == "weather_lookup":
+            return self._build_weather_payload(prompt)
+        if name == "memory_clear":
+            return {}
+        return prompt
+
+    def _plan_from_rule(self, rule: IntentRule, prompt: str) -> Optional[ActionPlan]:
+        if rule.action == "none":
+            return ActionPlan(action="none", reason=f"rule:{rule.id}")
+        if rule.action in {"tool", "workflow"} and not rule.name:
+            return None
+        plan_input = None
+        handler = (rule.handler or "").lower()
+        if handler == "weather":
+            plan_input = self._build_weather_payload(prompt)
+            if not plan_input:
+                return None
+        else:
+            plan_input = self._default_plan_input(rule.action, rule.name, prompt)
+        return ActionPlan(
+            action=rule.action,
+            name=rule.name,
+            input=plan_input,
+            reason=f"rule:{rule.id}",
+        )
+
+    def _build_weather_payload(self, prompt: str) -> Optional[dict]:
+        text = _normalize_prompt(prompt)
+        if not text:
+            return None
+        match = _WEATHER_REGION_RE.search(text)
+        region = match.group("region") if match else None
+        payload: dict = {}
+        if region:
+            payload["region"] = region
+        dates = []
+        for match in _DATE_TEXT_RE.finditer(text):
+            try:
+                dates.append(
+                    date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                )
+            except ValueError:
+                continue
+        for match in _DATE_TEXT_COMPACT_RE.finditer(text):
+            try:
+                dates.append(
+                    date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                )
+            except ValueError:
+                continue
+        if dates:
+            payload["start_date"] = dates[0].isoformat()
+            if len(dates) >= 2:
+                payload["end_date"] = dates[1].isoformat()
+        year_match = _YEAR_RE.search(text)
+        if year_match:
+            try:
+                payload["year"] = int(year_match.group(1))
+            except ValueError:
+                pass
+        return payload or {}
+
+    def _build_intent_cache_key(self, prompt: str) -> str:
+        text = _normalize_prompt(prompt)
+        if len(text) < INTENT_CACHE_MIN_PROMPT_LEN:
+            return ""
+        return text.lower()
+
+    def _get_cached_plan(self, prompt: str) -> Optional[ActionPlan]:
+        key = self._build_intent_cache_key(prompt)
+        if not key:
+            return None
+        payload = self._intent_cache.get(key)
+        if not payload:
+            return None
+        try:
+            return ActionPlan.model_validate(payload)
+        except Exception:
+            return None
+
+    def _cache_plan(self, prompt: str, plan: ActionPlan) -> None:
+        if plan.action == "none":
+            return None
+        if not plan.name:
+            return None
+        key = self._build_intent_cache_key(prompt)
+        if not key:
+            return None
+        payload = plan.model_dump(mode="json")
+        self._intent_cache.set(key, payload)
 
     def _apply_input_validation(
         self,
@@ -706,6 +977,19 @@ class RequestRouter:
         if not isinstance(pending, dict):
             return False
         if pending.get("mode") not in {"tool", "workflow"}:
+            return False
+        rule = self._rule_engine.match(prompt or "")
+        if (
+            rule
+            and rule.action in {"tool", "workflow"}
+            and rule.name in _PENDING_INTERRUPT_RULE_NAMES
+        ):
+            log_event(
+                "pending_interrupt",
+                reason="rule_override",
+                rule_id=rule.id,
+                rule_name=rule.name,
+            )
             return False
         if pending.get("missing_fields") and "variety" in pending.get(
             "missing_fields", []

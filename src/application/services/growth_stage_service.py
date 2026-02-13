@@ -41,7 +41,6 @@ _PLAN_NAME_COLUMNS = (
 )
 _PLAN_VARIETY_ID_COLUMNS = ("variety_id", "varietyId", "variety_id", "品种ID")
 _PLAN_VARIETY_COLUMNS = ("variety", "variety_name", "品种", "品种名称")
-_PLAN_REGION_COLUMNS = ("region", "planting_region", "地区", "区域", "种植区域")
 _PLAN_CROP_COLUMNS = ("crop", "crop_name", "作物", "作物名称")
 _PLAN_METHOD_COLUMNS = (
     "planting_method",
@@ -68,16 +67,6 @@ _PLAN_TRANSPLANT_DATE_COLUMNS = (
     "插秧日期",
     "插秧时间",
 )
-_PLAN_LOCATION_COLUMNS = (
-    "planting_location",
-    "location",
-    "field_name",
-    "field_id",
-    "name",
-    "地块",
-    "地块名称",
-    "位置",
-)
 
 _FORECAST_PLAN_ID_COLUMNS = ("planting_plan_id", "plan_id", "planting_id")
 _FORECAST_STAGE_NAME_COLUMNS = (
@@ -99,7 +88,7 @@ _FORECAST_STAGE_DATE_COLUMNS = (
 def _require_db_url() -> str:
     cfg = get_config()
     if not cfg.agri_db_url:
-        raise RuntimeError("缺少 AGRI_DB_URL，无法读取生育期预测数据。")
+        raise RuntimeError("缺少 AGRI_DB_URL，无法读取生育期预测结果数据。")
     return cfg.agri_db_url
 
 
@@ -471,7 +460,7 @@ def _coerce_stages_from_rows(
     rows: List[Dict[str, object]], columns: List[str]
 ) -> Dict[str, str]:
     if not rows:
-        raise ValueError("未找到对应的生育期预测记录。")
+        raise ValueError("未找到对应的生育期预测结果。")
     stage_name_col = _resolve_column(columns, _FORECAST_STAGE_NAME_COLUMNS)
     stage_date_col = _resolve_column(columns, _FORECAST_STAGE_DATE_COLUMNS)
     if stage_name_col and stage_date_col:
@@ -502,7 +491,6 @@ def _build_plan_filters(planting: PlantingDetails) -> Dict[str, object]:
     return {
         "crop": planting.crop,
         "variety": planting.variety,
-        "region": planting.region,
         "culti_type": getattr(planting, "culti_type", None),
         "planting_method": method_value,
         "sowing_date": planting.sowing_date,
@@ -573,13 +561,6 @@ def _build_plan_conditions(
             if col:
                 conditions.append(f"{quote_identifier(col)} = %s")
                 params.append(value)
-
-    value = filters.get("region")
-    if value:
-        col = _resolve_column(columns, _PLAN_REGION_COLUMNS)
-        if col:
-            conditions.append(f"{quote_identifier(col)} = %s")
-            params.append(value)
 
     value = filters.get("crop")
     if value:
@@ -729,10 +710,10 @@ def _fetch_growth_stage_rows_by_plan_id(
     table = _get_growth_stage_table()
     columns = _get_table_columns(url, table)
     if not columns:
-        raise RuntimeError("无法读取生育期预测表结构。")
+        raise RuntimeError("无法读取生育期预测结果表结构。")
     plan_id_col = _resolve_column(columns, _FORECAST_PLAN_ID_COLUMNS)
     if not plan_id_col:
-        raise RuntimeError("生育期预测表缺少 planting_plan_id/plan_id 字段。")
+        raise RuntimeError("生育期预测结果表缺少 planting_plan_id/plan_id 字段。")
 
     order_column = None
     for candidate in (
@@ -755,7 +736,7 @@ def _fetch_growth_stage_rows_by_plan_id(
     try:
         rows = fetch_all(url, sql, (plan_id,))
     except Exception as exc:
-        raise RuntimeError(f"生育期预测查询失败: {exc}") from exc
+        raise RuntimeError(f"生育期预测结果查询失败: {exc}") from exc
     return rows, columns
 
 
@@ -786,12 +767,6 @@ def _build_planting_from_plan_row(
         if value is not None and str(value).strip():
             data["variety"] = str(value).strip()
 
-    region_col = _resolve_column(columns, _PLAN_REGION_COLUMNS)
-    if region_col:
-        value = row.get(region_col)
-        if value is not None and str(value).strip():
-            data["region"] = str(value).strip()
-
     culti_col = _resolve_column(columns, _PLAN_CULTI_TYPE_COLUMNS)
     if culti_col:
         value = row.get(culti_col)
@@ -817,22 +792,14 @@ def _build_planting_from_plan_row(
         if trans:
             data["transplant_date"] = trans
 
-    loc_col = _resolve_column(columns, _PLAN_LOCATION_COLUMNS)
-    if loc_col:
-        value = row.get(loc_col)
-        if value is not None and str(value).strip():
-            data["planting_location"] = str(value).strip()
-
     if fallback:
         for field in (
             "crop",
             "variety",
-            "region",
             "culti_type",
             "planting_method",
             "sowing_date",
             "transplant_date",
-            "planting_location",
         ):
             if field not in data or data[field] in ("", None):
                 value = getattr(fallback, field, None)
@@ -914,22 +881,22 @@ def resolve_plan_and_planting(
     return plan_id, planting
 
 
-def predict_growth_stage_from_plan_id(plan_id: object) -> GrowthStageResult:
+def query_growth_stage_from_plan_id(plan_id: object) -> GrowthStageResult:
     rows, columns = _fetch_growth_stage_rows_by_plan_id(plan_id)
     stages = _coerce_stages_from_rows(rows, columns)
     return GrowthStageResult(stages=stages)
 
 
-def predict_growth_stage_from_db(
+def query_growth_stage_from_db(
     input: PredictGrowthStageInput,
 ) -> GrowthStageResult:
     filters = _build_plan_filters(input.planting)
     plan_id, _, _ = resolve_planting_plan(filters)
-    return predict_growth_stage_from_plan_id(plan_id)
+    return query_growth_stage_from_plan_id(plan_id)
 
 
-def predict_growth_stage_from_db_by_filters(
+def query_growth_stage_from_db_by_filters(
     filters: Dict[str, object],
 ) -> GrowthStageResult:
     plan_id, _, _ = resolve_planting_plan(filters)
-    return predict_growth_stage_from_plan_id(plan_id)
+    return query_growth_stage_from_plan_id(plan_id)

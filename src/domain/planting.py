@@ -33,13 +33,6 @@ METHOD_KEYWORDS = {
     "机插": "transplanting",
 }
 DATE_PATTERN = re.compile(r"(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})")
-_REGION_SUFFIX_RE = re.compile(
-    r"[\u4e00-\u9fff]{2,8}(?:省|市|州|盟|地区|区|县)"
-)
-_REGION_INFIX_RE = re.compile(
-    r"(?:在|于|位于)([\u4e00-\u9fff]{2,8})(?:种植|种|播种|直播|栽培)"
-)
-
 VarietyResolver = Callable[[str], List[str]]
 
 
@@ -56,8 +49,18 @@ class MissingPlantingInfoError(ValueError):
         super().__init__(message)
 
 
-def list_missing_required_fields(draft: PlantingDetailsDraft) -> List[str]:
-    payload = draft.model_dump(exclude_none=True)
+def list_missing_required_fields(draft: object) -> List[str]:
+    if isinstance(draft, PlantingDetailsDraft):
+        payload = draft.model_dump(exclude_none=True)
+    elif isinstance(draft, dict):
+        try:
+            payload = PlantingDetailsDraft.model_validate(draft).model_dump(
+                exclude_none=True
+            )
+        except Exception:
+            payload = dict(draft)
+    else:
+        return list(CROP_REQUIRED_FIELDS)
     return [field for field in CROP_REQUIRED_FIELDS if payload.get(field) is None]
 
 
@@ -104,20 +107,6 @@ def _infer_variety_from_prompt(
     return candidates[0] if candidates else None
 
 
-def _infer_region_from_prompt(prompt: str) -> Optional[str]:
-    if not prompt:
-        return None
-    match = _REGION_SUFFIX_RE.search(prompt)
-    if match:
-        return match.group(0)
-    match = _REGION_INFIX_RE.search(prompt)
-    if match:
-        candidate = match.group(1)
-        if candidate and candidate not in CROP_KEYWORDS:
-            return candidate
-    return None
-
-
 def _is_known_variety(
     candidate: str, variety_resolver: Optional[VarietyResolver]
 ) -> bool:
@@ -158,11 +147,6 @@ def _apply_heuristics(
             day = day.zfill(2)
             iso_string = f"{year}-{month}-{day}"
             data["sowing_date"] = date.fromisoformat(iso_string)
-
-    if "region" not in data:
-        region = _infer_region_from_prompt(prompt)
-        if region:
-            data["region"] = region
 
     if "variety" not in data:
         variety = _infer_variety_from_prompt(prompt, variety_resolver)
@@ -220,26 +204,6 @@ def _sanitize_crop_field(
         data.pop("crop", None)
 
 
-def _normalize_region_field(data: Dict[str, object]) -> None:
-    region = data.get("region")
-    if not isinstance(region, str):
-        return
-    text = region.strip()
-    if not text:
-        data.pop("region", None)
-        return
-    text = re.sub(r"^(?:我要在|我在|在|于|位于)", "", text)
-    match = _REGION_SUFFIX_RE.search(text)
-    if match:
-        data["region"] = match.group(0)
-        return
-    match = _REGION_INFIX_RE.search(text)
-    if match:
-        candidate = match.group(1)
-        if candidate and candidate not in CROP_KEYWORDS:
-            data["region"] = candidate
-
-
 def _apply_rice_default(data: Dict[str, object]) -> None:
     if data.get("crop"):
         return
@@ -265,7 +229,6 @@ def extract_planting_details(
         _apply_heuristics(data, prompt, variety_resolver)
         _normalize_variety_field(data, prompt, variety_resolver)
         _sanitize_crop_field(data, prompt, variety_resolver)
-        _normalize_region_field(data)
         _apply_rice_default(data)
         data.pop("variety", None)
         data.setdefault("confidence", 0.9)
@@ -273,17 +236,24 @@ def extract_planting_details(
 
     _apply_heuristics(data, prompt, variety_resolver)
     _sanitize_crop_field(data, prompt, variety_resolver)
-    _normalize_region_field(data)
     _apply_rice_default(data)
     data.pop("variety", None)
     data["confidence"] = 0.4 if len(data) == 1 else 0.75
     return PlantingDetailsDraft(**data)
 
 
-def normalize_and_validate_planting(draft: PlantingDetailsDraft) -> PlantingDetails:
+def normalize_and_validate_planting(draft: object) -> PlantingDetails:
     """
     将完成的 Draft 转换为严格的 PlantingDetails。
     """
+    if not isinstance(draft, PlantingDetailsDraft):
+        if isinstance(draft, dict):
+            try:
+                draft = PlantingDetailsDraft.model_validate(draft)
+            except Exception as exc:
+                raise ValueError(f"种植信息校验失败: {exc}") from exc
+        else:
+            raise ValueError("种植信息校验失败: draft 类型不正确。")
     missing = list_missing_required_fields(draft)
     if missing:
         raise MissingPlantingInfoError(missing)

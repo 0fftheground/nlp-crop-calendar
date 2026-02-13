@@ -1,0 +1,128 @@
+{
+  "version": "2026-02-12",
+  "rules": [
+    {
+      "id": "memory_clear",
+      "action": "tool",
+      "name": "memory_clear",
+      "priority": 100,
+      "regex": [
+        "(清除|清空|删除|重置).*(记忆|历史|上下文)"
+      ]
+    },
+    {
+      "id": "plant_plan_delete",
+      "action": "tool",
+      "name": "plant_plan_delete",
+      "priority": 90,
+      "any": [
+        "删除计划",
+        "移除计划",
+        "删除种植计划",
+        "取消计划"
+      ],
+      "regex": [
+        "(?:plant_season_id|plan_id|计划id|计划编号|id)\\s*[:=]?\\s*(\\d+)"
+      ]
+    },
+    {
+      "id": "plant_plan_list_active",
+      "action": "tool",
+      "name": "plant_plan_list_active",
+      "priority": 80,
+      "any": [
+        "查一下",
+        "帮我查",
+        "查看",
+        "查询",
+        "列出",
+        "计划列表",
+        "种植计划列表",
+        "所有种植计划",
+        "全部种植计划",
+        "查询所有种植计划",
+        "全部计划",
+        "所有计划",
+        "有哪些计划",
+        "启用计划"
+      ],
+      "all": ["计划"],
+      "regex": [
+        "(查询|查看|列出|查一下|帮我查|帮忙查)?(所有|全部)?.*(种植计划|生产计划|计划)"
+      ],
+      "negative": [
+        "生育期",
+        "生长阶段",
+        "成熟期"
+      ]
+    },
+    {
+      "id": "weather_lookup",
+      "action": "tool",
+      "name": "weather_lookup",
+      "priority": 70,
+      "any": [
+        "天气",
+        "气象",
+        "气温",
+        "温度",
+        "降雨",
+        "降水",
+        "湿度",
+        "风速",
+        "预报"
+      ],
+      "negative": [
+        "农事",
+        "种植",
+        "方案",
+        "计划",
+        "生育期",
+        "病虫",
+        "施肥",
+        "打药"
+      ],
+      "handler": "weather"
+    },
+    {
+      "id": "growth_stage_query_workflow",
+      "action": "workflow",
+      "name": "growth_stage_query_workflow",
+      "priority": 60,
+      "any": [
+        "生育期",
+        "生长阶段",
+        "成熟期",
+        "返青",
+        "分蘖",
+        "孕穗",
+        "抽穗",
+        "灌浆"
+      ]
+    },
+    {
+      "id": "crop_calendar_workflow",
+      "action": "workflow",
+      "name": "crop_calendar_workflow",
+      "priority": 50,
+      "regex": [
+        "(创建|新增|新建|添加).*(种植计划|生产计划|种植方案|栽培方案|管理方案)"
+      ]
+    },
+    {
+      "id": "variety_lookup",
+      "action": "tool",
+      "name": "variety_lookup",
+      "priority": 40,
+      "any": [
+        "品种",
+        "审定",
+        "抗性",
+        "性状",
+        "特性",
+        "熟期",
+        "适应性"
+      ]
+    }
+  ]
+}

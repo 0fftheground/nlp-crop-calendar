@@ -15,7 +15,7 @@ class WorkflowSpec:
 
 
 CROP_WORKFLOW_NAME = "crop_calendar_workflow"
-GROWTH_WORKFLOW_NAME = "growth_stage_workflow"
+GROWTH_WORKFLOW_NAME = "growth_stage_query_workflow"
 
 _WORKFLOWS = (
     WorkflowSpec(
@@ -30,8 +30,8 @@ _WORKFLOWS = (
     WorkflowSpec(
         name=GROWTH_WORKFLOW_NAME,
         description=(
-            "生育期预测工作流（解析品种/计划-查询种植计划-读取生育期）。"
-            "当问题涉及生育期预测或需要选择种植计划时使用。"
+            "生育期预测结果查询工作流（解析品种/计划-查询种植计划-读取生育期）。"
+            "当问题涉及生育期结果查询或需要选择种植计划时使用。"
         ),
         builder=build_growth_stage_graph,
     ),

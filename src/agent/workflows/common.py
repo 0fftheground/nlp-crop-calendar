@@ -10,7 +10,6 @@ from typing import Dict, List, Optional, Type
 
 from pydantic import BaseModel, Field
 
-from ...infra.config import get_config
 from ...infra.llm_extract import llm_structured_extract
 from ...prompts.planting_extract import build_planting_extract_prompt
 from ...schemas import PlantingDetails, PlantingDetailsDraft, WeatherSeries
@@ -30,8 +29,6 @@ class PlantingExtract(BaseModel):
     )
     sowing_date: Optional[date] = None
     transplant_date: Optional[date] = None
-    region: Optional[str] = None
-    planting_location: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -130,6 +127,4 @@ def build_fallback_planting(draft: PlantingDetailsDraft) -> PlantingDetails:
         planting_method=draft.planting_method or "direct_seeding",
         sowing_date=draft.sowing_date or today,
         transplant_date=draft.transplant_date,
-        region=draft.region or cfg.default_region,
-        planting_location=draft.planting_location,
     )

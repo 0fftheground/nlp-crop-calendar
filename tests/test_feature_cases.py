@@ -85,7 +85,6 @@ class FeatureCaseTests(unittest.TestCase):
             crop="水稻",
             planting_method="direct_seeding",
             sowing_date=date(2025, 4, 3),
-            region="常德鼎城区",
         )
         planting = draft.to_canonical()
         # weather lookup is no longer required for growth stage workflow

@@ -8,7 +8,7 @@ from ..schemas import PlantingDetails, Recommendation
 
 
 CROP_CALENDAR_MISSING_PREFIX = "为了给出农事推荐，还需要补充："
-GROWTH_STAGE_MISSING_PREFIX = "生育期预测还需要补充："
+GROWTH_STAGE_MISSING_PREFIX = "生育期结果查询还需要补充："
 HISTORICAL_WEATHER_NOTE = "说明: 当前仅使用历史气象数据，结果仅适用于历史期。"
 FUTURE_WEATHER_WARNING = "提示: 暂不支持未来气象数据，无法获取未来日期对应气象。"
 GROWTH_STAGE_ORDER = [
@@ -38,8 +38,15 @@ def format_missing_question(
     prefix: str,
     *,
     allow_unknown: bool = True,
+    optional_fields: Optional[List[str]] = None,
 ) -> str:
     labels = [field_labels.get(field, field) for field in missing_fields]
+    if optional_fields:
+        for field in optional_fields:
+            if field in missing_fields:
+                continue
+            label = field_labels.get(field, field)
+            labels.append(f"{label}(可选)")
     joined = "、".join(labels)
     message = f"{prefix}{joined}。"
     if allow_unknown:
@@ -54,12 +61,14 @@ def build_crop_calendar_missing_question(
     field_labels: Dict[str, str],
     *,
     allow_unknown: bool = True,
+    optional_fields: Optional[List[str]] = None,
 ) -> str:
     return format_missing_question(
         missing_fields,
         field_labels,
         CROP_CALENDAR_MISSING_PREFIX,
         allow_unknown=allow_unknown,
+        optional_fields=optional_fields,
     )
 
 
@@ -95,19 +104,12 @@ def format_crop_calendar_plan_message(
     variety_note: Optional[str] = None,
     recommendation_note: Optional[str] = None,
 ) -> str:
-    info_parts = [f"作物: {planting.crop}"]
-    if planting.variety:
-        info_parts.append(f"品种: {planting.variety}")
-    if planting.region:
-        info_parts.append(f"区域: {planting.region}")
     method_key = (
         planting.planting_method.value
         if hasattr(planting.planting_method, "value")
         else str(planting.planting_method)
     )
     method_label = PLANTING_METHOD_LABELS.get(method_key, method_key)
-    info_parts.append(f"方式: {method_label}")
-    info_parts.append(f"播种日期: {planting.sowing_date.isoformat()}")
 
     lines = ["已生成农事推荐。"]
     if weather_note:
@@ -115,23 +117,45 @@ def format_crop_calendar_plan_message(
         warning = build_future_weather_warning(planting.sowing_date)
         if warning:
             lines.append(warning)
-    lines.append("种植信息: " + "，".join(info_parts))
+
+    lines.append("")
+    lines.append("【种植信息】")
+    lines.append(f"作物：{planting.crop}")
+    if planting.variety:
+        lines.append(f"品种：{planting.variety}")
+    culti_type = getattr(planting, "culti_type", None)
+    if culti_type:
+        lines.append(f"稻作类型：{culti_type}")
+    lines.append(f"播种方式：{method_label}")
+    lines.append(f"播种日期：{planting.sowing_date.isoformat()}")
+    if planting.transplant_date:
+        lines.append(f"移栽日期：{planting.transplant_date.isoformat()}")
+
     if weather_note:
-        lines.append(f"气象信息: {weather_note}")
+        lines.append("")
+        lines.append("【气象信息】")
+        lines.append(str(weather_note))
     if variety_note:
-        lines.append(f"品种信息: {variety_note}")
+        lines.append("")
+        lines.append("【品种信息】")
+        lines.append(str(variety_note))
     if recommendation_note:
-        lines.append(f"推荐摘要: {recommendation_note}")
+        lines.append("")
+        lines.append("【推荐摘要】")
+        lines.append(str(recommendation_note))
     if recommendations:
-        lines.append("推荐操作:")
+        lines.append("")
+        lines.append("【推荐操作】")
         for idx, rec in enumerate(recommendations, start=1):
             line = f"{idx}. {rec.title} - {rec.description}"
             lines.append(line)
 
     if assumptions:
-        lines.append("默认/假设: " + "；".join(assumptions))
+        lines.append("")
+        lines.append("【默认/假设】")
+        lines.append("；".join(assumptions))
 
-    return "\n".join(lines)
+    return "\n".join(lines).strip()
 
 
 def format_growth_stage_message(
@@ -141,24 +165,30 @@ def format_growth_stage_message(
     weather_note: str = "",
     variety_note: str = "",
 ) -> str:
-    info_parts = [f"作物: {planting.crop}"]
+    planting_method = getattr(planting, "planting_method", None)
+    if planting_method:
+        method_label = (
+            "直播"
+            if planting_method == "direct_seeding"
+            else "插秧"
+            if planting_method == "transplanting"
+            else str(planting_method)
+        )
+    else:
+        method_label = ""
+
+    lines = ["【种植信息】", f"作物：{planting.crop}"]
     if planting.variety:
-        info_parts.append(f"品种: {planting.variety}")
+        lines.append(f"品种：{planting.variety}")
     culti_type = getattr(planting, "culti_type", None)
     if culti_type:
-        info_parts.append(f"稻作类型: {culti_type}")
-    culti_type = getattr(planting, "culti_type", None)
-    if culti_type:
-        info_parts.append(f"稻作类型: {culti_type}")
-    if planting.region:
-        info_parts.append(f"地区: {planting.region}")
-    info_parts.append(f"播种日期: {planting.sowing_date.isoformat()}")
-    lines = ["种植信息: " + "，".join(info_parts)]
-    predicted = stages.get("predicted_stage")
-    next_stage = stages.get("estimated_next_stage")
-    gdd = stages.get("gdd_accumulated")
-    gdd_required = stages.get("gdd_required_maturity")
-    base_temp = stages.get("base_temperature")
+        lines.append(f"稻作类型：{culti_type}")
+    if method_label:
+        lines.append(f"播种方式：{method_label}")
+    lines.append(f"播种日期：{planting.sowing_date.isoformat()}")
+    if planting.transplant_date:
+        lines.append(f"移栽日期：{planting.transplant_date.isoformat()}")
+
     stage_dates = stages.get("stage_dates")
     if stage_dates:
         try:
@@ -180,10 +210,12 @@ def format_growth_stage_message(
                     ordered.append((name, value))
             entries = ordered
             if entries:
-                lines.append("生育期阶段日期:")
+                lines.append("")
+                lines.append("【生育期预测结果】")
                 for name, value in entries:
-                    lines.append(f"{name}: {value}")
-    return "\n".join(lines)
+                    lines.append(f"{name}：{value}")
+
+    return "\n".join(lines).strip()
 
 
 def format_planting_validation_error(error: Exception) -> str:

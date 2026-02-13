@@ -92,10 +92,6 @@ class PlantingDetailsDraft(BaseModel):
     )
     sowing_date: Optional[date] = None
     transplant_date: Optional[date] = None
-    region: Optional[str] = Field(
-        default=None, description="行政区域，如省/市/县。"
-    )
-    planting_location: Optional[str] = None
     notes: Optional[str] = None
     assumptions: List[str] = Field(
         default_factory=list,
@@ -154,14 +150,6 @@ class PlantingDetails(BaseModel):
         default=None,
         description="移栽/插秧日期；直播可留空。",
     )
-    region: Optional[str] = Field(
-        default=None,
-        description="行政区域，如省/市/县。",
-    )
-    planting_location: Optional[str] = Field(
-        default=None,
-        description="更精细的地址或地块编号。",
-    )
 
     @field_validator("planting_method", mode="before")
     @classmethod
@@ -171,7 +159,7 @@ class PlantingDetails(BaseModel):
 
 
 class PredictGrowthStageInput(BaseModel):
-    """Inputs required for the growth stage prediction service."""
+    """Inputs required for the growth stage result query service."""
 
     weatherSeries:WeatherSeries = Field(...)
     planting: PlantingDetails = Field(
@@ -199,14 +187,10 @@ class PredictGrowthStageInput(BaseModel):
     def sowing_date(self) -> date:
         return self.planting.sowing_date
 
-    @property
-    def region(self) -> Optional[str]:
-        return self.planting.region
-
 
 
 class GrowthStageResult(BaseModel):
-    """Result payload returned by the growth stage prediction service."""
+    """Result payload returned by the growth stage result query service."""
     stages: Dict[str, str] = Field(default_factory=dict)
 
 
@@ -222,11 +206,11 @@ def _strip_admin_prefix(value: str) -> str:
 class WeatherQueryInput(BaseModel):
     """Parameters for querying weather data."""
 
-    region: str = Field(
-        ...,
+    region: Optional[str] = Field(
+        default=None,
         min_length=1,
         max_length=64,
-        description="市级行政区或站点名称。",
+        description="市级行政区或站点名称（已忽略，默认使用农场气象）。",
     )
     lat: Optional[float] = Field(
         default=None,
@@ -240,11 +224,11 @@ class WeatherQueryInput(BaseModel):
         le=180,
         description="经度（用于外部气象 API）。",
     )
-    start_date: Optional[date] = Field(
-        default=None, description="查询起始日期（含），格式 YYYY-MM-DD。"
+    start_date: date = Field(
+        ..., description="查询起始日期（含），格式 YYYY-MM-DD。"
     )
-    end_date: Optional[date] = Field(
-        default=None, description="查询结束日期（含），格式 YYYY-MM-DD。"
+    end_date: date = Field(
+        ..., description="查询结束日期（含），格式 YYYY-MM-DD。"
     )
     year: int = Field(
         default_factory=lambda: date.today().year,
@@ -284,6 +268,15 @@ class WeatherQueryInput(BaseModel):
             values = dict(values)
             values["region"] = f"{lat},{lon}"
         return values
+
+    @model_validator(mode="after")
+    def _validate_date_range(self) -> "WeatherQueryInput":
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be on or after start_date")
+        days = (self.end_date - self.start_date).days + 1
+        if days > 30:
+            raise ValueError("date range must be within 30 days")
+        return self
 
 
 class WeatherDataPoint(BaseModel):
@@ -379,10 +372,8 @@ class WeatherSeriesDraft(BaseModel):
         lon = merged.get("lon")
         if merged.get("region") is None and lat is not None and lon is not None:
             merged["region"] = f"{lat},{lon}"
-        required = ["region", "year"]
-        missing = [f for f in required if merged.get(f) is None]
-        if missing:
-            raise ValueError(f"Missing required fields for WeatherQueryInput: {missing}")
+        if merged.get("start_date") is None or merged.get("end_date") is None:
+            raise ValueError("Missing required fields for WeatherQueryInput: start_date,end_date")
         merged.setdefault("granularity", "daily")
         merged.setdefault("include_advice", False)
         allowed = {

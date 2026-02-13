@@ -32,6 +32,8 @@ class DomainServiceTests(unittest.TestCase):
     def test_fetch_weather_returns_series(self) -> None:
         query = WeatherQueryInput(
             region="test",
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 12, 31),
             year=2025,
         )
         series = fetch_weather(query)
@@ -46,7 +48,6 @@ class DomainServiceTests(unittest.TestCase):
             crop="水稻",
             planting_method="direct_seeding",
             sowing_date=date(2025, 1, 1),
-            region="test",
         )
         weather_series = WeatherSeries(
             region="test",

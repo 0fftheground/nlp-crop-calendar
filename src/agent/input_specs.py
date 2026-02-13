@@ -31,9 +31,11 @@ def _to_json_payload(model: BaseModel) -> str:
 
 
 WEATHER_FIELD_LABELS = {
-    "region": "地区(省/市/区/县/站点)",
+    "region": "地区(已忽略，默认农场)",
     "lat": "纬度",
     "lon": "经度",
+    "start_date": "起始日期(YYYY-MM-DD)",
+    "end_date": "结束日期(YYYY-MM-DD,<=30天)",
     "year": "年份(默认当前年)",
     "granularity": "粒度(hourly/daily)",
     "include_advice": "是否包含建议",
@@ -72,7 +74,7 @@ WORKFLOW_INPUT_SPECS: Dict[str, InputSpec] = {
         field_labels=PROMPT_FIELD_LABELS,
         to_prompt=lambda payload: str(payload.prompt),
     ),
-    "growth_stage_workflow": InputSpec(
+    "growth_stage_query_workflow": InputSpec(
         model=PromptInput,
         field_labels=PROMPT_FIELD_LABELS,
         to_prompt=lambda payload: str(payload.prompt),

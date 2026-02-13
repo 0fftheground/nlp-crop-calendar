@@ -10,7 +10,7 @@ from .registry import auto_register_tool
 
 @auto_register_tool(
     "weather_lookup",
-    description="查询指定地区气象数据。仅用于获取天气数据本身；不生成农事建议或计划。",
+    description="查询默认农场气象数据（仅使用默认农场ID）。需要提供起止日期（最多30天）。",
 )
 def weather_lookup(prompt: str) -> ToolInvocation:
     prompt_text = prompt or ""

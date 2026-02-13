@@ -26,8 +26,10 @@ class PlannerRouterTests(unittest.TestCase):
     def setUp(self) -> None:
         self._env_backup = {
             "PENDING_STORE": os.environ.get("PENDING_STORE"),
+            "INTENT_ROUTING_MODE": os.environ.get("INTENT_ROUTING_MODE"),
         }
         os.environ["PENDING_STORE"] = "memory"
+        os.environ["INTENT_ROUTING_MODE"] = "hybrid"
         from src.infra.config import get_config
 
         get_config.cache_clear()
@@ -130,11 +132,10 @@ class PlannerRouterTests(unittest.TestCase):
             crop="rice",
             planting_method="direct_seeding",
             sowing_date=date(2025, 1, 1),
-            region="test",
         )
         planting_store = get_planting_choice_store()
         variety_store = get_variety_choice_store()
-        planting_store.set("u7", planting.crop, planting.region, planting)
+        planting_store.set("u7", planting.crop, "default", planting)
         variety_store.set("u7", "test-query", "test-variety", None)
 
         plan = ActionPlan(action="tool", name="memory_clear", input={})
@@ -148,7 +149,7 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertEqual(result.mode, "tool")
         self.assertIsNotNone(result.tool)
         self.assertEqual(result.tool.name, "memory_clear")
-        self.assertIsNone(planting_store.get("u7", "rice", "test"))
+        self.assertIsNone(planting_store.get("u7", "rice", "default"))
         self.assertIsNone(variety_store.get("u7", "test-query"))
 
     def test_workflow_action_invokes_runner(self) -> None:
@@ -200,6 +201,37 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertEqual(result.mode, "none")
         self.assertIsNone(self.router._pending_store.get("s4"))
         self.assertEqual(result.plan.message, "ok")
+
+    def test_rule_interrupts_pending_for_plan_list(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        self.router._pending_store.set(
+            "s8",
+            {
+                "mode": "workflow",
+                "workflow_name": "crop_calendar_workflow",
+                "draft": {},
+                "missing_fields": ["variety"],
+                "followup_count": 1,
+            },
+        )
+        tool_payload = ToolInvocation(
+            name="plant_plan_list_active",
+            message="ok",
+            data={},
+        )
+        with patch(
+            "src.agent.router.execute_tool", return_value=tool_payload
+        ) as mocked_execute:
+            result = self.router.handle(
+                UserRequest(prompt="查询所有种植计划", session_id="s8")
+            )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertIsNotNone(result.tool)
+        self.assertEqual(result.tool.name, "plant_plan_list_active")
+        self.assertTrue(mocked_execute.called)
+        self.assertIsNone(self.router._pending_store.get("s8"))
 
 
 if __name__ == "__main__":

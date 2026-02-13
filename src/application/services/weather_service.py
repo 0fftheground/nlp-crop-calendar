@@ -10,7 +10,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from ...infra.config import get_config
 from ...infra.llm import get_chat_model
-from ...infra.tool_provider import normalize_provider
 from ...infra.postgres import fetch_all, quote_identifier
 from ...observability.llm_usage import (
     apply_span_attributes,
@@ -67,6 +66,27 @@ def _parse_payload_date(value: object) -> Optional[date]:
         except ValueError:
             continue
     return None
+
+
+def _extract_dates_from_text(text: str) -> List[date]:
+    if not text:
+        return []
+    dates: List[date] = []
+    for match in re.finditer(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})", text):
+        try:
+            dates.append(
+                date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            )
+        except ValueError:
+            continue
+    for match in re.finditer(r"(20\d{2})(\d{2})(\d{2})", text):
+        try:
+            dates.append(
+                date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            )
+        except ValueError:
+            continue
+    return dates
 
 
 def _extract_lat_lon_from_text(text: str) -> Optional[Tuple[float, float]]:
@@ -173,11 +193,8 @@ def _build_weather_query_from_payload(
         payload.get("start_date") or payload.get("start")
     )
     end_date = _parse_payload_date(payload.get("end_date") or payload.get("end"))
-    if not region:
-        if lat is not None and lon is not None:
-            region = f"{lat},{lon}"
-        else:
-            return None
+    if not region and lat is not None and lon is not None:
+        region = f"{lat},{lon}"
     year = _parse_year(payload.get("year"))
     if year is None:
         year = _parse_year(start_date) or _parse_year(end_date)
@@ -185,7 +202,9 @@ def _build_weather_query_from_payload(
         year = start_date.year
     elif end_date is not None:
         year = end_date.year
-    data: Dict[str, object] = {"region": region}
+    data: Dict[str, object] = {}
+    if region:
+        data["region"] = region
     if lat is not None:
         data["lat"] = lat
     if lon is not None:
@@ -217,24 +236,26 @@ def normalize_weather_prompt(
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
+        dates = _extract_dates_from_text(text)
+        start_date = dates[0] if len(dates) >= 1 else None
+        end_date = dates[1] if len(dates) >= 2 else None
         lat_lon = _extract_lat_lon_from_text(text)
-        if lat_lon:
-            lat, lon = lat_lon
-            region = f"{lat},{lon}"
+        if start_date and end_date:
+            lat = lon = None
+            if lat_lon:
+                lat, lon = lat_lon
             try:
                 query = WeatherQueryInput(
-                    region=region,
+                    start_date=start_date,
+                    end_date=end_date,
                     lat=lat,
                     lon=lon,
-                    year=date.today().year,
+                    year=start_date.year,
                 )
             except Exception:
                 return text, None
         else:
-            try:
-                query = WeatherQueryInput(region=text, year=date.today().year)
-            except Exception:
-                return text, None
+            return text, None
         canonical = json.dumps(
             query.model_dump(mode="json"),
             ensure_ascii=False,
@@ -500,14 +521,29 @@ def _summarize_weather_series(series: WeatherSeries) -> str:
 
 
 def _resolve_query_range(query: WeatherQueryInput) -> Tuple[date, date]:
-    base_year = query.year
-    if query.start_date:
-        base_year = query.start_date.year
-    elif query.end_date:
-        base_year = query.end_date.year
-    start = query.start_date or date(base_year, 1, 1)
-    end = query.end_date or date(base_year, 12, 31)
-    return start, end
+    return query.start_date, query.end_date
+
+
+def _build_date_followup(
+    *,
+    prompt: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> ToolInvocation:
+    draft: Dict[str, object] = {}
+    if start_date:
+        draft["start_date"] = start_date.isoformat()
+    if end_date:
+        draft["end_date"] = end_date.isoformat()
+    return ToolInvocation(
+        name="weather_lookup",
+        message="需要提供起始日期和结束日期（YYYY-MM-DD），且最多 30 天。",
+        data={
+            "missing_fields": ["start_date", "end_date"],
+            "draft": draft,
+            "followup_count": 0,
+        },
+    )
 
 
 def _lookup_91weather(
@@ -709,7 +745,7 @@ def _build_series_from_rows(
     start_date = points[0].timestamp.date()
     end_date = points[-1].timestamp.date()
     return WeatherSeries(
-        region=region or f"farm:{farm_id}",
+        region=f"farm:{farm_id}",
         granularity="daily",
         start_date=start_date,
         end_date=end_date,
@@ -725,14 +761,7 @@ def lookup_farm_weather_by_user(
     end_date: date,
     region: Optional[str] = None,
 ) -> ToolInvocation:
-    cfg = get_config()
-    farm_id = cfg.default_farm_id
-    if not farm_id:
-        return ToolInvocation(
-            name="growth_weather_lookup",
-            message="未配置 DEFAULT_FARM_ID，无法查询农场气象数据。",
-            data={},
-        )
+    farm_id = "1"
     rows = _query_farm_weather_rows(farm_id, start_date, end_date)
     series = _build_series_from_rows(farm_id, rows, region=region)
     if not series:
@@ -754,49 +783,20 @@ def lookup_weather(
     cache_prompt: Optional[str] = None,
     query: Optional[WeatherQueryInput] = None,
 ) -> ToolInvocation:
-    cfg = get_config()
-    provider = normalize_provider(cfg.weather_provider)
     text = prompt or ""
     if cache_prompt is None or query is None:
         cache_prompt, query = normalize_weather_prompt(text)
-    if provider in {"91weather", "external"}:
-        return _lookup_91weather(query, api_url=cfg.weather_api_url)
-    if query:
-        start, end = _resolve_query_range(query)
-        granularity = query.granularity or "daily"
-        region = query.region
-        total_days = max(1, (end - start).days + 1)
-    else:
-        start = date.today()
-        end = start + timedelta(days=2)
-        granularity = "daily"
-        region = text or "unknown"
-        total_days = 3
-    points: List[WeatherDataPoint] = []
-    for offset in range(total_days):
-        current = start + timedelta(days=offset)
-        points.append(
-            WeatherDataPoint(
-                timestamp=datetime.combine(current, time.min),
-                temperature=20 + offset,
-                temperature_max=26 + offset,
-                temperature_min=16 + offset,
-                humidity=60 + offset * 2,
-                precipitation=0.5 * offset,
-                wind_speed=2.0 + 0.3 * offset,
-                condition="sunny" if offset < 2 else "cloudy",
-            )
+    if query is None:
+        dates = _extract_dates_from_text(text)
+        start_date = dates[0] if len(dates) >= 1 else None
+        end_date = dates[1] if len(dates) >= 2 else None
+        return _build_date_followup(
+            prompt=text, start_date=start_date, end_date=end_date
         )
-    series = WeatherSeries(
-        region=region,
-        granularity=granularity,
+    start, end = _resolve_query_range(query)
+    return lookup_farm_weather_by_user(
+        user_id=None,
         start_date=start,
         end_date=end,
-        points=points,
-        source="mock",
-    )
-    return ToolInvocation(
-        name="weather_lookup",
-        message="已返回模拟气象数据。",
-        data=series.model_dump(mode="json"),
+        region=None,
     )

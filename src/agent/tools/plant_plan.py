@@ -136,7 +136,11 @@ def plant_plan_delete(prompt: str) -> ToolInvocation:
         return ToolInvocation(
             name="plant_plan_delete",
             message="请提供要删除的 plant_season_id。",
-            data={"missing_fields": ["plant_season_id"]},
+            data={
+                "missing_fields": ["plant_season_id"],
+                "draft": {"plant_season_id": None},
+                "query": prompt,
+            },
         )
     try:
         response = delete_crop_calendar_plan(plan_id)
