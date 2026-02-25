@@ -2,7 +2,9 @@ receivers:
   otlp:
     protocols:
       grpc:
+        endpoint: 127.0.0.1:4319
       http:
+        endpoint: 127.0.0.1:4320
 
 processors:
   batch:
@@ -18,15 +20,16 @@ exporters:
     endpoint: tempo:4317
     tls:
       insecure: true
-  loki:
-    endpoint: http://loki:3100/loki/api/v1/push
 
 service:
+  telemetry:
+    metrics:
+      level: none
   pipelines:
     logs:
       receivers: [otlp]
       processors: [batch]
-      exporters: [loki, file]
+      exporters: [file]
     traces:
       receivers: [otlp]
       processors: [batch]

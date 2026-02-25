@@ -73,6 +73,32 @@ Optional (only if other machines send OTLP directly):
 - Chainlit: `http://<server-ip>:8001`
 - Grafana: `http://<server-ip>:3000` (default `admin/admin`)
 
+Note:
+- `/health` only checks API process/config status and does **not** perform a real LLM request.
+- Verifying only `OPENAI_API_BASE` network connectivity is **not sufficient**.
+
+### 5) Verify LLM API (recommended)
+On the server, validate the LLM endpoint with a real OpenAI-compatible request (base URL + API key + model).
+
+Quick check (list models):
+```bash
+curl -sS "$OPENAI_API_BASE/models" \
+  -H "Authorization: Bearer $OPENAI_API_KEY"
+```
+
+Recommended check (real chat completion):
+```bash
+curl -sS "$OPENAI_API_BASE/chat/completions" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"ping"}],"max_tokens":5}'
+```
+
+Success criteria:
+- Endpoint is reachable from the server (DNS/TLS/network OK)
+- `OPENAI_API_KEY` is valid
+- The provider supports the configured model (default in code: `gpt-4.1-mini`)
+
 ## Port Conflicts
 
 If a port is already used, change only the **left side** of the mapping in
