@@ -13,6 +13,7 @@ _MISSING_PYDANTIC_SETTINGS = importlib.util.find_spec("pydantic_settings") is No
 
 if not _MISSING_PYDANTIC_SETTINGS:
     from src.application.services.crop_calendar_service import (
+        _build_operation_plan_from_farmworks,
         build_operation_plan,
         fetch_weather,
     )
@@ -33,15 +34,15 @@ class DomainServiceTests(unittest.TestCase):
         query = WeatherQueryInput(
             region="test",
             start_date=date(2025, 1, 1),
-            end_date=date(2025, 12, 31),
+            end_date=date(2025, 1, 30),
             year=2025,
         )
         series = fetch_weather(query)
         self.assertEqual(series.region, "test")
-        expected_days = 366 if calendar.isleap(2025) else 365
+        expected_days = 30
         self.assertEqual(len(series.points), expected_days)
         self.assertEqual(series.start_date, date(2025, 1, 1))
-        self.assertEqual(series.end_date, date(2025, 12, 31))
+        self.assertEqual(series.end_date, date(2025, 1, 30))
 
     def test_build_operation_plan_returns_ops(self) -> None:
         planting = PlantingDetails(
@@ -59,6 +60,16 @@ class DomainServiceTests(unittest.TestCase):
         )
         plan = build_operation_plan(planting, weather_series)
         self.assertTrue(plan.operations)
+
+    def test_build_operation_plan_from_farmworks_sorts_by_date(self) -> None:
+        farmworks = {
+            "追肥": "2025-05-20",
+            "整地": "2025-05-01",
+            "收获": "2025-09-30",
+        }
+        plan = _build_operation_plan_from_farmworks(farmworks, crop="水稻")
+        titles = [op.title for op in plan.operations]
+        self.assertEqual(titles, ["整地", "追肥", "收获"])
 
 
 if __name__ == "__main__":

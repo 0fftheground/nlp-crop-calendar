@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import date, datetime, time, timedelta
 from typing import Callable, Dict, List, Optional, TypedDict
 
@@ -555,21 +556,31 @@ def _build_operation_plan_from_farmworks(
     crop: str,
     plant_season_id: Optional[object] = None,
 ) -> OperationPlanResult:
-    ops: List[OperationItem] = []
+    ops_with_sort_keys: List[tuple[Optional[date], int, OperationItem]] = []
     if isinstance(farmworks, dict):
-        for title, date_text in farmworks.items():
+        for idx, (title, date_text) in enumerate(farmworks.items()):
             if not title:
                 continue
             date_str = str(date_text) if date_text is not None else ""
-            ops.append(
-                OperationItem(
-                    stage=str(title),
-                    title=str(title),
-                    description=date_str,
-                    window=None,
-                    priority="medium",
-                )
+            op = OperationItem(
+                stage=str(title),
+                title=str(title),
+                description=date_str,
+                window=None,
+                priority="medium",
             )
+            ops_with_sort_keys.append((_extract_operation_sort_date(date_str), idx, op))
+    ops = [
+        item
+        for _, _, item in sorted(
+            ops_with_sort_keys,
+            key=lambda row: (
+                row[0] is None,
+                row[0] or date.max,
+                row[1],
+            ),
+        )
+    ]
     summary = f"{crop} 农事方案"
     metadata: Dict[str, object] = {"source": "external"}
     if plant_season_id is not None:
@@ -580,6 +591,25 @@ def _build_operation_plan_from_farmworks(
         operations=ops,
         metadata=metadata,
     )
+
+
+def _extract_operation_sort_date(text: str) -> Optional[date]:
+    if not text:
+        return None
+    value = str(text).strip()
+    if not value:
+        return None
+    # Accept common formats from external APIs, e.g. 2026-03-01 / 2026/3/1 / 2026年3月1日
+    match = re.search(
+        r"(20\d{2})\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})",
+        value,
+    )
+    if not match:
+        return None
+    try:
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
 
 
 def request_crop_calendar_plan(
