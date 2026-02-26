@@ -88,6 +88,79 @@ def _is_capability_help_prompt(prompt: str) -> bool:
     return any(item in text for item in fuzzy_hits)
 
 
+def _format_weather_tool_details(
+    tool_name: str, data: object, base_message: str = ""
+) -> str:
+    if tool_name not in {"weather_lookup", "growth_weather_lookup"}:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    lines: list[str] = []
+    region = data.get("region")
+    start_date = data.get("start_date")
+    end_date = data.get("end_date")
+    points = data.get("points")
+    if region or start_date or end_date:
+        meta = []
+        if region:
+            meta.append(f"区域：{region}")
+        if start_date and end_date:
+            meta.append(f"时间：{start_date} ~ {end_date}")
+        elif start_date:
+            meta.append(f"开始：{start_date}")
+        elif end_date:
+            meta.append(f"结束：{end_date}")
+        if meta:
+            lines.append("，".join(meta))
+    if isinstance(points, list):
+        lines.append(f"天数：{len(points)}")
+        preview = points[:7]
+        if preview:
+            lines.append("逐日预览：")
+        for item in preview:
+            if not isinstance(item, dict):
+                continue
+            ts = str(item.get("timestamp") or "")[:10]
+            tmax = item.get("temperature_max")
+            tmin = item.get("temperature_min")
+            tavg = item.get("temperature")
+            rain = item.get("precipitation")
+            segs = []
+            if tmax is not None and tmin is not None:
+                segs.append(f"{tmin}~{tmax}°C")
+            elif tavg is not None:
+                segs.append(f"{tavg}°C")
+            if rain is not None:
+                segs.append(f"降水 {rain}mm")
+            if not segs and item.get("condition"):
+                segs.append(str(item.get("condition")))
+            line = f"- {ts}" if ts else "- "
+            if segs:
+                line += " " + "，".join(segs)
+            lines.append(line.rstrip())
+        if len(points) > len(preview):
+            lines.append(f"... 其余 {len(points) - len(preview)} 天已省略")
+    detail_text = "\n".join([line for line in lines if line])
+    if not detail_text:
+        return ""
+    if base_message and detail_text in base_message:
+        return ""
+    return detail_text
+
+
+def _format_tool_response_message(tool: dict) -> str:
+    tool_name = str(tool.get("name") or "")
+    message_text = str(tool.get("message") or "").strip()
+    data = tool.get("data")
+    content = f"工具 `{tool_name}` 已执行："
+    if message_text:
+        content += f"\n{message_text}"
+    detail_text = _format_weather_tool_details(tool_name, data, base_message=message_text)
+    if detail_text:
+        content += f"\n\n{detail_text}"
+    return content
+
+
 def _trust_env_for_backend(url: str) -> bool:
     host = urlparse(url).hostname
     if host in {"localhost", "127.0.0.1", "::1"}:
@@ -261,8 +334,7 @@ async def on_message(message: cl.Message):
     mode = data.get("mode")
     if mode == "tool" and data.get("tool"):
         tool = data["tool"]
-        message_text = tool.get("message") or ""
-        content = f"工具 `{tool.get('name')}` 已执行：\n{message_text}"
+        content = _format_tool_response_message(tool)
         await cl.Message(content=content).send()
         return
     if mode == "none":
