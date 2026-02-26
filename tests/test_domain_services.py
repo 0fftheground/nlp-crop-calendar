@@ -17,6 +17,7 @@ if not _MISSING_PYDANTIC_SETTINGS:
         build_operation_plan,
         fetch_weather,
     )
+    from src.domain.planting import extract_planting_details
     from src.infra.config import get_config
     from src.schemas import PlantingDetails, WeatherQueryInput, WeatherSeries
 
@@ -70,6 +71,17 @@ class DomainServiceTests(unittest.TestCase):
         plan = _build_operation_plan_from_farmworks(farmworks, crop="水稻")
         titles = [op.title for op in plan.operations]
         self.assertEqual(titles, ["整地", "追肥", "收获"])
+
+    def test_extract_planting_details_prefers_specific_culti_type(self) -> None:
+        draft = extract_planting_details("4月20日播种，一季晚稻")
+        self.assertEqual(draft.culti_type, "一季晚稻")
+
+    def test_extract_planting_details_upgrades_llm_culti_type_alias(self) -> None:
+        draft = extract_planting_details(
+            "一季晚稻",
+            llm_extract=lambda _: {"culti_type": "晚稻"},
+        )
+        self.assertEqual(draft.culti_type, "一季晚稻")
 
 
 if __name__ == "__main__":

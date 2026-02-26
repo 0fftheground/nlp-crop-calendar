@@ -16,12 +16,13 @@ CROP_KEYWORDS = ["水稻", "小麦", "玉米", "大豆", "油菜", "棉花", "�
 CULTI_TYPE_KEYWORDS = {
     "早稻": "早稻",
     "中稻": "中稻",
+    "一季晚稻": "一季晚稻",
+    "双季晚稻": "双季晚稻",
+    "双季早稻": "双季早稻",
     "晚稻": "晚稻",
     "单季稻": "单季稻",
     "一季稻": "一季稻",
     "双季稻": "双季稻",
-    "双季早稻": "双季早稻",
-    "双季晚稻": "双季晚稻",
     "再生稻": "再生稻",
 }
 METHOD_KEYWORDS = {
@@ -122,7 +123,9 @@ def _apply_heuristics(
     variety_resolver: Optional[VarietyResolver],
 ) -> None:
     if "culti_type" not in data:
-        for key, value in CULTI_TYPE_KEYWORDS.items():
+        for key, value in sorted(
+            CULTI_TYPE_KEYWORDS.items(), key=lambda item: len(item[0]), reverse=True
+        ):
             if key in prompt:
                 data["culti_type"] = value
                 break
@@ -170,6 +173,32 @@ def _normalize_variety_field(
     current = current.strip()
     if candidate != current and candidate in prompt and current not in prompt:
         data["variety"] = candidate
+
+
+def _normalize_culti_type_field(data: Dict[str, object], prompt: str) -> None:
+    if not prompt:
+        return
+    current = data.get("culti_type")
+    if not isinstance(current, str) or not current.strip():
+        return
+    current = current.strip()
+    matched_value = None
+    matched_key = None
+    for key, value in sorted(
+        CULTI_TYPE_KEYWORDS.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        if key in prompt:
+            matched_key = key
+            matched_value = value
+            break
+    if not matched_value:
+        return
+    if matched_value == current:
+        return
+    # Prefer the more specific phrase from the user's latest follow-up answer.
+    if current in prompt and matched_key and len(matched_key) <= len(current):
+        return
+    data["culti_type"] = matched_value
 
 
 def _sanitize_crop_field(
@@ -228,6 +257,7 @@ def extract_planting_details(
         data.update(raw_payload)
         _apply_heuristics(data, prompt, variety_resolver)
         _normalize_variety_field(data, prompt, variety_resolver)
+        _normalize_culti_type_field(data, prompt)
         _sanitize_crop_field(data, prompt, variety_resolver)
         _apply_rice_default(data)
         data.pop("variety", None)
@@ -235,6 +265,7 @@ def extract_planting_details(
         return PlantingDetailsDraft(**data)
 
     _apply_heuristics(data, prompt, variety_resolver)
+    _normalize_culti_type_field(data, prompt)
     _sanitize_crop_field(data, prompt, variety_resolver)
     _apply_rice_default(data)
     data.pop("variety", None)
