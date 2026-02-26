@@ -3,7 +3,7 @@
 This guide covers two paths:
 
 1. Local startup (development on your machine)
-2. Server deployment (full stack + observability)
+2. Server deployment (base stack / full stack + observability)
 
 The current setup assumes **external Postgres** for data and cache.
 
@@ -46,6 +46,12 @@ Required:
 - `AGRI_DB_URL`
 - `CACHE_DB_URL`
 - `BACKEND_URL=http://api:8000`
+
+Base stack only (recommended first step):
+- `OTEL_TRACES_EXPORTER=none`
+- `OTEL_LOGS_EXPORTER=none`
+
+If enabling OTEL collector / observability:
 - `OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317`
 - `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`
 
@@ -53,31 +59,36 @@ Optional (but recommended):
 - `CHAINLIT_AUTH_*` (enable login)
 - `PUBLIC_BASE_URL=http://<server-ip>:8000` (only if you need absolute URLs in responses)
 
-### 2) Start full stack (API + Chainlit + Observability)
+### 2) Start base stack (API + Chainlit)
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+docker-compose -f docker-compose.yml up -d --build
 ```
 
-### 3) Open ports on the server
+### 3) Start full stack (API + Chainlit + Observability)
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+```
+
+### 4) Open ports on the server
 Allow inbound traffic:
 - `8000` (API)
 - `8001` (Chainlit)
-- `3000` (Grafana)
+- `3000` (Grafana, only if observability stack is enabled)
 
 Optional (only if other machines send OTLP directly):
 - `4317` (OTLP gRPC)
 - `4318` (OTLP HTTP)
 
-### 4) Verify
+### 5) Verify
 - API health: `http://<server-ip>:8000/health`
 - Chainlit: `http://<server-ip>:8001`
-- Grafana: `http://<server-ip>:3000` (default `admin/admin`)
+- Grafana: `http://<server-ip>:3000` (default `admin/admin`, only if enabled)
 
 Note:
 - `/health` only checks API process/config status and does **not** perform a real LLM request.
 - Verifying only `OPENAI_API_BASE` network connectivity is **not sufficient**.
 
-### 5) Verify LLM API (recommended)
+### 6) Verify LLM API (recommended)
 On the server, validate the LLM endpoint with a real OpenAI-compatible request (base URL + API key + model).
 
 Quick check (list models):

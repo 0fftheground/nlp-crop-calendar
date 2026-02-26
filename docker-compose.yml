@@ -14,9 +14,9 @@ services:
       - "8000"
     ports:
       - "8000:8000"
-    depends_on:
-      otel-collector:
-        condition: service_started
+    # depends_on:
+    #   otel-collector:
+    #     condition: service_started
     restart: unless-stopped
     healthcheck:
       test:
@@ -60,17 +60,17 @@ services:
       retries: 5
       start_period: 10s
 
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
-    container_name: otel-collector
-    volumes:
-      - ./otel-collector.yaml:/etc/otelcol/config.yaml
-      - otel-data:/otel-data
-    command: ["--config", "/etc/otelcol/config.yaml"]
-    environment:
-      OTEL_LOG_PATH: /otel-data/otel-logs.json
-      OTEL_TRACES_PATH: /otel-data/otel-traces.json
-    restart: unless-stopped
+  # otel-collector:
+  #   image: docker.1ms.run/otel/opentelemetry-collector-contrib:0.143.0
+  #   container_name: otel-collector
+  #   volumes:
+  #     - ./otel-collector.yaml:/etc/otelcol/config.yaml
+  #     - otel-data:/otel-data
+  #   command: ["--config", "/etc/otelcol/config.yaml"]
+  #   environment:
+  #     OTEL_LOG_PATH: /otel-data/otel-logs.json
+  #     OTEL_TRACES_PATH: /otel-data/otel-traces.json
+  #   restart: unless-stopped
 
 volumes:
   otel-data:

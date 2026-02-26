@@ -1,6 +1,6 @@
 services:
   tempo:
-    image: grafana/tempo:latest
+    image: docker.1ms.run/grafana/tempo:2.9.0
     container_name: tempo
     command: ["-config.file=/etc/tempo.yml"]
     volumes:
@@ -9,7 +9,7 @@ services:
     restart: unless-stopped
 
   loki:
-    image: grafana/loki:latest
+    image: docker.1ms.run/grafana/loki:3.6.3
     container_name: loki
     command: ["-config.file=/etc/loki-config.yaml"]
     volumes:
@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:latest
+    image: docker.1ms.run/grafana/grafana:12.3.1
     container_name: grafana
     ports:
       - "3000:3000"

@@ -14,6 +14,80 @@ _SESSION_ID_KEY = "session_id"
 _CLIENT_ID_KEY = "client_id"
 _USER_ID_KEY = "user_id"
 
+
+def _build_capability_guide() -> str:
+    return """欢迎来到农事助手！
+
+我目前支持两类能力：`workflow`（多步骤流程）和 `tool`（单点查询/操作）。
+
+当前限制：
+- 创建/保存种植计划仅支持默认农场（`DEFAULT_FARM_ID`），暂不支持前端指定农场。
+
+可直接参考下面示例提问：
+
+## Workflow（复杂任务）
+
+1. 完整种植计划（`crop_calendar_workflow`）
+- 示例：`请基于默认农场，按水稻品种南粳9108、5月20日插秧生成完整农事计划。`
+- 示例：`帮我给默认农场做一份水稻种植计划。`（信息不足时我会继续追问）
+
+2. 生育期查询（`growth_stage_query_workflow`）
+- 示例：`查询计划id=123的生育期预测结果。`
+- 示例：`帮我查一下默认农场里南粳9108相关计划的生育期。`（可能会让你选择计划）
+
+## Tool（单点查询/操作）
+
+1. 天气查询（`weather_lookup`）
+- 示例：`查询默认农场2026-03-01到2026-03-07的天气。`
+
+2. 品种信息查询（`variety_lookup`）
+- 示例：`南粳9108的生育期、抗性和适宜种植区域是什么？`
+
+3. 查看启用计划（`plant_plan_list_active`）
+- 示例：`列出默认农场当前启用的种植计划。`
+
+4. 删除种植计划（`plant_plan_delete`）
+- 示例：`删除种植计划 plant_season_id=123`
+
+5. 清除历史经验（`memory_clear`）
+- 示例：`清除历史经验记录`
+
+提问建议：
+- 尽量提供：`地区 / 作物 / 品种 / 播种或插秧日期 / 种植方式`
+- 查询类请求尽量给出：`计划ID` 或明确的时间范围
+- 如需生成/保存计划，默认写入系统配置的默认农场
+"""
+
+
+def _is_capability_help_prompt(prompt: str) -> bool:
+    text = (prompt or "").strip().lower()
+    if not text:
+        return False
+    exact_hits = {
+        "help",
+        "功能",
+        "示例",
+        "例子",
+        "帮助",
+        "你能提供哪些功能",
+        "你能做什么",
+        "你能干什么",
+        "支持哪些功能",
+        "支持什么功能",
+    }
+    if text in exact_hits:
+        return True
+    fuzzy_hits = (
+        "能提供哪些功能",
+        "支持哪些功能",
+        "有哪些功能",
+        "可以做什么",
+        "可用功能",
+        "示例提问",
+    )
+    return any(item in text for item in fuzzy_hits)
+
+
 def _trust_env_for_backend(url: str) -> bool:
     host = urlparse(url).hostname
     if host in {"localhost", "127.0.0.1", "::1"}:
@@ -141,7 +215,7 @@ def auth_callback(username: str, password: str) -> Optional[cl.User]:
 async def start():
     cl.user_session.set("history", [])
     _ensure_session_ids()
-    await cl.Message(content="欢迎来到农事助手！").send()
+    await cl.Message(content=_build_capability_guide()).send()
 
 
 @cl.on_chat_resume
@@ -155,6 +229,9 @@ async def on_message(message: cl.Message):
     prompt = message.content.strip()
     if not prompt:
         await cl.Message(content="请输入有效的问题。").send()
+        return
+    if _is_capability_help_prompt(prompt):
+        await cl.Message(content=_build_capability_guide()).send()
         return
 
     status_msg = await cl.Message(content="正在分析，请稍候...").send()
