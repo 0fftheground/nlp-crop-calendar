@@ -353,7 +353,7 @@ def _extract_region_candidates(records: List[Dict[str, object]]) -> List[str]:
 
 
 def _build_region_followup(
-    prompt: str,
+    query: str,
     *,
     variety: str,
     region_candidates: List[str],
@@ -370,14 +370,14 @@ def _build_region_followup(
         name="variety_lookup",
         message=message,
         data={
-            "query": prompt,
+            "query": query,
             "variety": variety,
             "region_candidates": region_candidates,
             "missing_fields": ["approval_region"],
             "draft": {
                 "variety": variety,
                 "region_candidates": region_candidates,
-                "query": prompt,
+                "query": query,
             },
             "followup_count": 0,
             "source": "candidate",
@@ -1016,7 +1016,7 @@ def lookup_variety(prompt: str) -> ToolInvocation:
             and len(region_candidates) > 1
         ):
             return _build_region_followup(
-                prompt, variety=variety, region_candidates=region_candidates
+                query_source, variety=variety, region_candidates=region_candidates
             )
         if region_choice is None and region_tokens and llm_selected_index is None:
             scored = [

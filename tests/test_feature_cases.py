@@ -51,16 +51,21 @@ class FeatureCaseTests(unittest.TestCase):
         get_tool_result_cache.cache_clear()
 
     def test_weather_lookup_returns_series(self) -> None:
-        payload = json.dumps({"region": "长沙", "year": 2025})
+        payload = json.dumps(
+            {
+                "region": "长沙",
+                "start_date": "2025-01-01",
+                "end_date": "2025-01-03",
+            }
+        )
         result = weather_lookup(payload)
-        self.assertEqual(result.name, "weather_lookup")
+        self.assertEqual(result.name, "growth_weather_lookup")
         data = result.data or {}
-        self.assertEqual(data.get("region"), "长沙")
+        self.assertEqual(data.get("region"), "farm:1")
         points = data.get("points") or []
-        expected_days = 366 if calendar.isleap(2025) else 365
-        self.assertEqual(len(points), expected_days)
+        self.assertEqual(len(points), 3)
         self.assertEqual(data.get("start_date"), "2025-01-01")
-        self.assertEqual(data.get("end_date"), "2025-12-31")
+        self.assertEqual(data.get("end_date"), "2025-01-03")
 
     def test_variety_lookup_requires_exact_name(self) -> None:
         prompt = json.dumps(
@@ -73,12 +78,92 @@ class FeatureCaseTests(unittest.TestCase):
             return_value=(records, raw_records),
         ), patch(
             "src.application.services.variety_service.retrieve_variety_candidates",
-            return_value=[],
+            return_value=["美香占2号"],
         ):
             result = variety_service.lookup_variety(prompt)
         self.assertEqual(result.name, "variety_lookup")
-        self.assertIn("补充完整品种名称", result.message)
+        self.assertIn("未找到完全匹配的品种", result.message)
+        self.assertIn("美香占2号", result.message)
         self.assertEqual(result.data.get("missing_fields"), ["variety"])
+
+    def test_variety_followup_region_choice_keeps_selected_variety(self) -> None:
+        original_query = "帮我查询品种美香占"
+        candidate_followup_prompt = json.dumps(
+            {
+                "user_id": "u1",
+                "query": original_query,
+                "followup": {
+                    "prompt": "1",
+                    "draft": {
+                        "candidates": [
+                            "美香占2号",
+                            "华两优美香新占",
+                            "荃优美香银占3号",
+                            "Q两优银泰香占",
+                            "荃优美香丝苗1号",
+                        ]
+                    },
+                    "missing_fields": ["variety"],
+                    "followup_count": 0,
+                },
+            },
+            ensure_ascii=False,
+        )
+
+        def fake_lookup(prompt, *, limit=5, confirmed_candidate=None):
+            prompt_text = str(prompt)
+            if confirmed_candidate == "美香占2号":
+                records = [
+                    {"品种名称": "美香占2号", "审定区域": "湖南", "审定年份": "2020"},
+                    {"品种名称": "美香占2号", "审定区域": "芜湖", "审定年份": "2021"},
+                ]
+                raw = [
+                    {"variety_name": "美香占2号", "approval_region": "湖南"},
+                    {"variety_name": "美香占2号", "approval_region": "芜湖"},
+                ]
+                return records, raw
+            # Simulate the old bug trigger: nested candidate JSON pollutes the next query.
+            if "荃优美香丝苗1号" in prompt_text:
+                records = [{"品种名称": "荃优美香丝苗1号", "审定区域": "湖南"}]
+                raw = [{"variety_name": "荃优美香丝苗1号", "approval_region": "湖南"}]
+                return records, raw
+            records = [
+                {"品种名称": "美香占2号", "审定区域": "湖南", "审定年份": "2020"},
+                {"品种名称": "美香占2号", "审定区域": "芜湖", "审定年份": "2021"},
+            ]
+            raw = [
+                {"variety_name": "美香占2号", "approval_region": "湖南"},
+                {"variety_name": "美香占2号", "approval_region": "芜湖"},
+            ]
+            return records, raw
+
+        with patch(
+            "src.application.services.variety_service._lookup_variety_records",
+            side_effect=fake_lookup,
+        ):
+            step1 = variety_service.lookup_variety(candidate_followup_prompt)
+            self.assertEqual(step1.name, "variety_lookup")
+            self.assertIn("请选择要查看的区域", step1.message)
+            self.assertEqual(step1.data.get("query"), original_query)
+
+            region_followup_prompt = json.dumps(
+                {
+                    "user_id": "u1",
+                    "query": step1.data.get("query"),
+                    "followup": {
+                        "prompt": "1",
+                        "draft": step1.data.get("draft"),
+                        "missing_fields": step1.data.get("missing_fields"),
+                        "followup_count": 1,
+                    },
+                },
+                ensure_ascii=False,
+            )
+            step2 = variety_service.lookup_variety(region_followup_prompt)
+
+        self.assertEqual(step2.name, "variety_lookup")
+        self.assertIn("已返回品种 美香占2号 的审定信息", step2.message)
+        self.assertEqual((step2.data or {}).get("variety"), "美香占2号")
 
     def test_growth_stage_prediction_output(self) -> None:
         draft = PlantingDetailsDraft(
@@ -105,7 +190,7 @@ class FeatureCaseTests(unittest.TestCase):
             "src.agent.workflows.growth_stage_graph.resolve_planting_from_plan_id",
             return_value=planting,
         ), patch(
-            "src.agent.workflows.growth_stage_graph.predict_growth_stage_from_plan_id",
+            "src.agent.workflows.growth_stage_graph.query_growth_stage_from_plan_id",
             return_value=growth_payload,
         ):
             graph = build_growth_stage_graph()
@@ -118,8 +203,8 @@ class FeatureCaseTests(unittest.TestCase):
             )
         message = state.get("message", "")
         self.assertIn("种植信息", message)
-        self.assertIn("三叶一心: 2025-05-01", message)
-        self.assertIn("成熟期: 2025-08-09", message)
+        self.assertIn("三叶一心：2025-05-01", message)
+        self.assertIn("成熟期：2025-08-09", message)
         self.assertNotIn("积温", message)
         self.assertNotIn("气象信息", message)
         self.assertNotIn("品种信息", message)
