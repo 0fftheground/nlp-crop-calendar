@@ -12,6 +12,7 @@ from .growth_stage_service import query_growth_stage_from_db
 from ...infra.config import get_config
 from ...infra.postgres import fetch_all, quote_identifier
 from ...infra.tool_provider import normalize_provider
+from ...observability.logging_utils import log_event, summarize_text
 from ...schemas import (
     FarmWorkRecommendInput,
     GrowthStageResult,
@@ -514,15 +515,6 @@ def _build_crop_calendar_payload(
     sowing_method = _normalize_sowing_method_code(planting.planting_method)
     if sowing_method is None:
         raise RuntimeError("无法解析 sowing_method 代码。")
-    method_value = (
-        planting.planting_method.value
-        if hasattr(planting.planting_method, "value")
-        else str(planting.planting_method)
-    )
-    if method_value in {"transplanting", "插秧", "移栽", "机插", "抛秧"} and not (
-        planting.transplant_date
-    ):
-        raise RuntimeError("移栽方式需提供移栽日期。")
     culti_type_code = None
     if planting.culti_type:
         culti_type_code = _normalize_culti_type_code(planting.culti_type)
@@ -631,6 +623,11 @@ def request_crop_calendar_plan(
     if not cfg.crop_calendar_api_url:
         raise RuntimeError("缺少 CROP_CALENDAR_API_URL，无法调用外部计算接口。")
     payload = _build_crop_calendar_payload(planting)
+    log_event(
+        "crop_calendar_api_request",
+        url=cfg.crop_calendar_api_url,
+        payload=payload,
+    )
     headers = {"Content-Type": "application/json"}
     if cfg.crop_calendar_api_key:
         headers["Authorization"] = f"Bearer {cfg.crop_calendar_api_key}"
@@ -643,14 +640,62 @@ def request_crop_calendar_plan(
                 headers=headers,
             )
             response.raise_for_status()
-            raw = response.json()
+    except httpx.HTTPStatusError as exc:
+        resp = exc.response
+        status_code = resp.status_code if resp is not None else None
+        response_text = summarize_text(
+            resp.text if resp is not None else str(exc), limit=1200
+        )
+        log_event(
+            "crop_calendar_api_http_error",
+            url=cfg.crop_calendar_api_url,
+            status_code=status_code,
+            payload=payload,
+            response_text=response_text,
+        )
+        raise RuntimeError(
+            f"外部计算接口请求失败(status={status_code}): {response_text}"
+        ) from exc
     except Exception as exc:
+        log_event(
+            "crop_calendar_api_request_error",
+            url=cfg.crop_calendar_api_url,
+            payload=payload,
+            error=str(exc),
+        )
         raise RuntimeError(f"外部计算接口请求失败: {exc}") from exc
+    try:
+        raw = response.json()
+    except Exception as exc:
+        raw_text = summarize_text(response.text or "", limit=1200)
+        log_event(
+            "crop_calendar_api_parse_error",
+            url=cfg.crop_calendar_api_url,
+            status_code=response.status_code,
+            payload=payload,
+            response_text=raw_text,
+        )
+        raise RuntimeError("外部计算接口返回格式未识别。") from exc
+    log_event(
+        "crop_calendar_api_response",
+        url=cfg.crop_calendar_api_url,
+        status_code=response.status_code,
+        response_summary=summarize_text(
+            json.dumps(raw, ensure_ascii=False, default=str), limit=1200
+        ),
+    )
     if not isinstance(raw, dict):
         raise RuntimeError("外部计算接口返回格式未识别。")
     code = str(raw.get("code", "")).strip()
     if code and code != "0":
         msg = raw.get("msg") or "计算接口返回失败。"
+        log_event(
+            "crop_calendar_api_business_error",
+            url=cfg.crop_calendar_api_url,
+            payload=payload,
+            code=code,
+            msg=str(msg),
+        )
         raise RuntimeError(str(msg))
     data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
     plant_season_id = data.get("plant_season_id")

@@ -120,14 +120,12 @@ def llm_extract_planting(
 def build_fallback_planting(draft: PlantingDetailsDraft) -> PlantingDetails:
     today = date.today()
     method = draft.planting_method or "direct_seeding"
-    is_transplant = str(method) in {"transplanting", "插秧", "移栽", "机插", "抛秧"}
     sowing_date = draft.sowing_date or today
-    transplant_date = draft.transplant_date or (sowing_date if is_transplant else None)
     return PlantingDetails(
         crop=draft.crop or "水稻",
         variety=draft.variety,
         culti_type=draft.culti_type,
         planting_method=method,
         sowing_date=sowing_date,
-        transplant_date=transplant_date,
+        transplant_date=draft.transplant_date,
     )

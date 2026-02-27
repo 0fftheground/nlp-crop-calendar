@@ -113,6 +113,9 @@ def _append_transplant_date_if_needed(
     missing_fields: list[str],
 ) -> list[str]:
     if _requires_transplant_date(draft, prompt) and not draft.transplant_date:
+        assumptions = list(getattr(draft, "assumptions", []) or [])
+        if any(item.startswith("transplant_date: 用户不知道") for item in assumptions):
+            return missing_fields
         if "transplant_date" not in missing_fields:
             missing_fields.append("transplant_date")
     return missing_fields
@@ -414,6 +417,15 @@ def _extract_node(state: GraphState) -> GraphState:
                 unknown_fields=fillable_fields,
                 fallback=fallback,
             )
+        if "transplant_date" in unknown_fields:
+            assumptions = list(draft.assumptions or [])
+            marker = "transplant_date: 用户不知道，使用空值"
+            if marker not in assumptions:
+                assumptions.append(marker)
+            draft = draft.model_copy(update={"assumptions": assumptions})
+            unfillable_fields = [
+                field for field in unfillable_fields if field != "transplant_date"
+            ]
         missing_fields = list_missing_required_fields(draft)
         for field in unfillable_fields:
             if field not in missing_fields:

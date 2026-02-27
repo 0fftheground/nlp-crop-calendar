@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 _MISSING_PYDANTIC_SETTINGS = importlib.util.find_spec("pydantic_settings") is None
 
 if not _MISSING_PYDANTIC_SETTINGS:
+    from src.agent.workflows.common import build_fallback_planting
     from src.application.services.crop_calendar_service import (
         _build_crop_calendar_payload,
         _build_operation_plan_from_farmworks,
@@ -21,7 +22,12 @@ if not _MISSING_PYDANTIC_SETTINGS:
     )
     from src.domain.planting import extract_planting_details
     from src.infra.config import get_config
-    from src.schemas import PlantingDetails, WeatherQueryInput, WeatherSeries
+    from src.schemas import (
+        PlantingDetails,
+        PlantingDetailsDraft,
+        WeatherQueryInput,
+        WeatherSeries,
+    )
 
 
 @unittest.skipUnless(
@@ -85,7 +91,7 @@ class DomainServiceTests(unittest.TestCase):
         )
         self.assertEqual(draft.culti_type, "一季晚稻")
 
-    def test_build_crop_calendar_payload_requires_transplant_date(self) -> None:
+    def test_build_crop_calendar_payload_allows_empty_transplant_date(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"
         get_config.cache_clear()
         planting = PlantingDetails(
@@ -99,9 +105,18 @@ class DomainServiceTests(unittest.TestCase):
             "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
             return_value=1001,
         ):
-            with self.assertRaises(RuntimeError) as exc:
-                _build_crop_calendar_payload(planting)
-        self.assertIn("移栽方式需提供移栽日期", str(exc.exception))
+            payload = _build_crop_calendar_payload(planting)
+        self.assertEqual(payload.get("transp_date"), "")
+
+    def test_build_fallback_planting_keeps_transplant_date_empty(self) -> None:
+        draft = PlantingDetailsDraft(
+            crop="水稻",
+            planting_method="transplanting",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=None,
+        )
+        planting = build_fallback_planting(draft)
+        self.assertIsNone(planting.transplant_date)
 
 
 if __name__ == "__main__":
