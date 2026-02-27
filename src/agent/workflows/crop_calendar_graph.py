@@ -40,6 +40,7 @@ from ...observability.otel import (
 from ...schemas import (
     OperationPlanResult,
     PlantingDetails,
+    PlantingDetailsDraft,
     Recommendation,
     WorkflowResponse,
 )
@@ -88,7 +89,7 @@ def _optional_fields_for_prompt(state: GraphState) -> list[str]:
     optional: list[str] = []
     if not (draft and getattr(draft, "culti_type", None)):
         optional.append("culti_type")
-    if _requires_transplant_date(draft, prompt) and not (
+    if not _requires_transplant_date(draft, prompt) and not (
         draft and draft.transplant_date
     ):
         optional.append("transplant_date")
@@ -104,6 +105,17 @@ def _requires_transplant_date(draft: Optional[PlantingDetailsDraft], prompt: str
                 return True
     text = prompt or ""
     return any(token in text for token in ("插秧", "移栽", "机插", "抛秧"))
+
+
+def _append_transplant_date_if_needed(
+    draft: PlantingDetailsDraft,
+    prompt: str,
+    missing_fields: list[str],
+) -> list[str]:
+    if _requires_transplant_date(draft, prompt) and not draft.transplant_date:
+        if "transplant_date" not in missing_fields:
+            missing_fields.append("transplant_date")
+    return missing_fields
 
 
 def _build_missing_question(
@@ -277,6 +289,7 @@ def _extract_node(state: GraphState) -> GraphState:
     if draft.variety is not None:
         draft = draft.model_copy(update={"variety": None})
     missing_fields = list_missing_required_fields(draft)
+    missing_fields = _append_transplant_date_if_needed(draft, prompt, missing_fields)
     is_followup = bool(prior_draft and prior_missing)
     # Resolve variety selection from the previous candidate list.
     resolved_from_followup = False
@@ -285,6 +298,9 @@ def _extract_node(state: GraphState) -> GraphState:
         if resolved:
             draft = draft.model_copy(update={"variety": resolved})
             missing_fields = list_missing_required_fields(draft)
+            missing_fields = _append_transplant_date_if_needed(
+                draft, prompt, missing_fields
+            )
             resolved_from_followup = True
     variety_candidates: List[str] = []
     prompt_candidates: List[str] = []
@@ -301,6 +317,9 @@ def _extract_node(state: GraphState) -> GraphState:
             if draft.variety != exact_variety:
                 draft = draft.model_copy(update={"variety": exact_variety})
             missing_fields = list_missing_required_fields(draft)
+            missing_fields = _append_transplant_date_if_needed(
+                draft, prompt, missing_fields
+            )
         else:
             prompt_candidates = retrieve_variety_candidates(prompt, limit=5)
             if prompt_candidates:
@@ -313,6 +332,9 @@ def _extract_node(state: GraphState) -> GraphState:
                 # LLM-only variety without DB evidence -> clear and re-ask.
                 draft = draft.model_copy(update={"variety": None})
                 missing_fields = list_missing_required_fields(draft)
+                missing_fields = _append_transplant_date_if_needed(
+                    draft, prompt, missing_fields
+                )
     if draft.variety:
         if not _is_known_variety(draft.variety):
             if not variety_candidates:
@@ -368,6 +390,7 @@ def _extract_node(state: GraphState) -> GraphState:
             fallback=fallback,
         )
         missing_fields = list_missing_required_fields(draft)
+        missing_fields = _append_transplant_date_if_needed(draft, prompt, missing_fields)
     elif missing_fields and followup_count >= 2:
         fallback = build_fallback_planting(draft)
         draft = merge_planting_answers(
@@ -376,6 +399,7 @@ def _extract_node(state: GraphState) -> GraphState:
             fallback=fallback,
         )
         missing_fields = list_missing_required_fields(draft)
+        missing_fields = _append_transplant_date_if_needed(draft, prompt, missing_fields)
 
     state = add_trace(
         state, f"extract missing={missing_fields} followup_count={followup_count}"

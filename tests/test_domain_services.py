@@ -5,6 +5,7 @@ import sys
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -13,6 +14,7 @@ _MISSING_PYDANTIC_SETTINGS = importlib.util.find_spec("pydantic_settings") is No
 
 if not _MISSING_PYDANTIC_SETTINGS:
     from src.application.services.crop_calendar_service import (
+        _build_crop_calendar_payload,
         _build_operation_plan_from_farmworks,
         build_operation_plan,
         fetch_weather,
@@ -82,6 +84,24 @@ class DomainServiceTests(unittest.TestCase):
             llm_extract=lambda _: {"culti_type": "晚稻"},
         )
         self.assertEqual(draft.culti_type, "一季晚稻")
+
+    def test_build_crop_calendar_payload_requires_transplant_date(self) -> None:
+        os.environ["DEFAULT_FARM_ID"] = "1"
+        get_config.cache_clear()
+        planting = PlantingDetails(
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="transplanting",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=None,
+        )
+        with patch(
+            "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
+            return_value=1001,
+        ):
+            with self.assertRaises(RuntimeError) as exc:
+                _build_crop_calendar_payload(planting)
+        self.assertIn("移栽方式需提供移栽日期", str(exc.exception))
 
 
 if __name__ == "__main__":

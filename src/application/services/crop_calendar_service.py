@@ -514,6 +514,15 @@ def _build_crop_calendar_payload(
     sowing_method = _normalize_sowing_method_code(planting.planting_method)
     if sowing_method is None:
         raise RuntimeError("无法解析 sowing_method 代码。")
+    method_value = (
+        planting.planting_method.value
+        if hasattr(planting.planting_method, "value")
+        else str(planting.planting_method)
+    )
+    if method_value in {"transplanting", "插秧", "移栽", "机插", "抛秧"} and not (
+        planting.transplant_date
+    ):
+        raise RuntimeError("移栽方式需提供移栽日期。")
     culti_type_code = None
     if planting.culti_type:
         culti_type_code = _normalize_culti_type_code(planting.culti_type)
