@@ -15,6 +15,8 @@ _MISSING_PYDANTIC_SETTINGS = importlib.util.find_spec("pydantic_settings") is No
 
 if not _MISSING_PYDANTIC_SETTINGS:
     from src.agent.tools.weather import weather_lookup
+    from src.agent.workflows.crop_calendar_graph import _extract_node
+    from src.agent.workflows.crop_calendar_graph import build_crop_calendar_graph
     from src.agent.workflows.growth_stage_graph import build_growth_stage_graph
     from src.application.services import variety_service
     from src.infra.config import get_config
@@ -208,6 +210,66 @@ class FeatureCaseTests(unittest.TestCase):
         self.assertNotIn("积温", message)
         self.assertNotIn("气象信息", message)
         self.assertNotIn("品种信息", message)
+
+    def test_crop_calendar_unknown_variety_does_not_raise_500(self) -> None:
+        draft = PlantingDetailsDraft(
+            crop="水稻",
+            planting_method="direct_seeding",
+            sowing_date=date(2025, 4, 20),
+        )
+        with patch(
+            "src.agent.workflows.crop_calendar_graph.extract_planting_details",
+            return_value=draft,
+        ), patch(
+            "src.agent.workflows.crop_calendar_graph.find_exact_variety_in_text",
+            return_value=None,
+        ), patch(
+            "src.agent.workflows.crop_calendar_graph.retrieve_variety_candidates",
+            return_value=[],
+        ):
+            graph = build_crop_calendar_graph()
+            state = graph.invoke(
+                {
+                    "user_prompt": "品种不知道",
+                    "trace": [],
+                    "user_id": "u1",
+                }
+            )
+        self.assertIn("variety", state.get("missing_fields", []))
+        self.assertIn("品种", state.get("message", ""))
+
+    def test_crop_calendar_followup_keeps_existing_variety(self) -> None:
+        prior = PlantingDetailsDraft(
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="transplanting",
+            sowing_date=date(2025, 5, 1),
+            culti_type="中稻",
+        )
+        followup = PlantingDetailsDraft(transplant_date=date(2025, 5, 20))
+        with patch(
+            "src.agent.workflows.crop_calendar_graph.extract_planting_details",
+            return_value=followup,
+        ), patch(
+            "src.agent.workflows.crop_calendar_graph.find_exact_variety_in_text",
+            return_value=None,
+        ), patch(
+            "src.agent.workflows.crop_calendar_graph.retrieve_variety_candidates",
+            return_value=[],
+        ):
+            state = _extract_node(
+                {
+                    "user_prompt": "移栽日期2025-05-20",
+                    "planting_draft": prior.model_dump(mode="json"),
+                    "missing_fields": ["transplant_date"],
+                    "followup_count": 0,
+                    "trace": [],
+                    "pending_options": [],
+                }
+            )
+        draft = PlantingDetailsDraft.model_validate(state.get("planting_draft"))
+        self.assertEqual(draft.variety, "美香占2号")
+        self.assertNotIn("variety", state.get("missing_fields", []))
 
 
 if __name__ == "__main__":

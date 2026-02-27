@@ -286,8 +286,6 @@ def _extract_node(state: GraphState) -> GraphState:
         followup_count += 1
     else:
         draft = fresh_draft
-    if draft.variety is not None:
-        draft = draft.model_copy(update={"variety": None})
     missing_fields = list_missing_required_fields(draft)
     missing_fields = _append_transplant_date_if_needed(draft, prompt, missing_fields)
     is_followup = bool(prior_draft and prior_missing)
@@ -384,20 +382,38 @@ def _extract_node(state: GraphState) -> GraphState:
     unknown_fields = infer_unknown_fields(prompt, missing_fields, CROP_FIELD_LABELS)
     if unknown_fields:
         fallback = build_fallback_planting(draft)
-        draft = merge_planting_answers(
-            draft,
-            unknown_fields=unknown_fields,
-            fallback=fallback,
-        )
+        fillable_fields = [
+            field
+            for field in unknown_fields
+            if getattr(fallback, field, None) is not None
+        ]
+        unfillable_fields = [
+            field for field in unknown_fields if field not in fillable_fields
+        ]
+        if fillable_fields:
+            draft = merge_planting_answers(
+                draft,
+                unknown_fields=fillable_fields,
+                fallback=fallback,
+            )
         missing_fields = list_missing_required_fields(draft)
+        for field in unfillable_fields:
+            if field not in missing_fields:
+                missing_fields.append(field)
         missing_fields = _append_transplant_date_if_needed(draft, prompt, missing_fields)
     elif missing_fields and followup_count >= 2:
         fallback = build_fallback_planting(draft)
-        draft = merge_planting_answers(
-            draft,
-            unknown_fields=missing_fields,
-            fallback=fallback,
-        )
+        fillable_fields = [
+            field
+            for field in missing_fields
+            if getattr(fallback, field, None) is not None
+        ]
+        if fillable_fields:
+            draft = merge_planting_answers(
+                draft,
+                unknown_fields=fillable_fields,
+                fallback=fallback,
+            )
         missing_fields = list_missing_required_fields(draft)
         missing_fields = _append_transplant_date_if_needed(draft, prompt, missing_fields)
 
