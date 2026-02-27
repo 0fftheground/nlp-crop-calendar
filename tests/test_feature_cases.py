@@ -271,6 +271,40 @@ class FeatureCaseTests(unittest.TestCase):
         self.assertEqual(draft.variety, "美香占2号")
         self.assertNotIn("variety", state.get("missing_fields", []))
 
+    def test_crop_calendar_followup_date_maps_to_transplant_date(self) -> None:
+        prior = PlantingDetailsDraft(
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="transplanting",
+            sowing_date=date(2025, 5, 1),
+            culti_type="中稻",
+        )
+        followup = PlantingDetailsDraft(sowing_date=date(2025, 5, 28))
+        with patch(
+            "src.agent.workflows.crop_calendar_graph.extract_planting_details",
+            return_value=followup,
+        ), patch(
+            "src.agent.workflows.crop_calendar_graph.find_exact_variety_in_text",
+            return_value=None,
+        ), patch(
+            "src.agent.workflows.crop_calendar_graph.retrieve_variety_candidates",
+            return_value=[],
+        ):
+            state = _extract_node(
+                {
+                    "user_prompt": "2025-05-28",
+                    "planting_draft": prior.model_dump(mode="json"),
+                    "missing_fields": ["transplant_date"],
+                    "followup_count": 1,
+                    "trace": [],
+                    "pending_options": [],
+                }
+            )
+        draft = PlantingDetailsDraft.model_validate(state.get("planting_draft"))
+        self.assertEqual(draft.sowing_date, date(2025, 5, 1))
+        self.assertEqual(draft.transplant_date, date(2025, 5, 28))
+        self.assertNotIn("transplant_date", state.get("missing_fields", []))
+
 
 if __name__ == "__main__":
     unittest.main()

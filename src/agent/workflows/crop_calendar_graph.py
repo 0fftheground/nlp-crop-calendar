@@ -118,6 +118,23 @@ def _append_transplant_date_if_needed(
     return missing_fields
 
 
+def _normalize_followup_date_field(
+    fresh_draft: PlantingDetailsDraft, prior_missing: list[str]
+) -> PlantingDetailsDraft:
+    # When only transplant_date is missing, users often reply with a bare date.
+    # Heuristic extraction may put that date into sowing_date; remap it here.
+    if (
+        len(prior_missing) == 1
+        and prior_missing[0] == "transplant_date"
+        and fresh_draft.transplant_date is None
+        and fresh_draft.sowing_date is not None
+    ):
+        return fresh_draft.model_copy(
+            update={"transplant_date": fresh_draft.sowing_date, "sowing_date": None}
+        )
+    return fresh_draft
+
+
 def _build_missing_question(
     state: GraphState, missing_fields: list[str]
 ) -> str:
@@ -278,6 +295,7 @@ def _extract_node(state: GraphState) -> GraphState:
     except Exception as exc:
         state = add_trace(state, f"llm_extract_failed={exc}")
         fresh_draft = extract_planting_details(prompt)
+    fresh_draft = _normalize_followup_date_field(fresh_draft, prior_missing)
 
     # Follow-up: merge newly extracted answers into the prior draft.
     if prior_draft and prior_missing:
