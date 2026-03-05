@@ -15,6 +15,7 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 
 ## Core Modules
 - `src/infra/config.py` - Reads `.env` and exposes `AppConfig`.
+- `src/infra/db_catalog.py` - Central DB table metadata and region-lookup source resolution.
 - `src/infra/llm.py` - Creates `ChatOpenAI` for the planner and extractor models.
 - `src/infra/llm_extract.py` - Common wrapper for structured extraction.
 - `src/infra/cache_keys.py` - Utility for generating cache keys from `PlantingDetails`.
@@ -28,9 +29,13 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 - `src/schemas/models.py` - Shared schemas (`UserRequest`, `WorkflowResponse`, `ToolInvocation`, `HandleResponse`), `UserRequest` supports `session_id` and optional `user_id`.
 - `src/agent/planner.py` - LLM planner that outputs `ActionPlan` (tool/workflow/none) using tool/workflow lists and pending context (prompt in `src/prompts/planner.py`).
 - `src/agent/tools/registry.py` - Tool registration and execution (variety/weather/growth-stage/memory).
-- `src/agent/router.py` - Executes planner decisions, dispatches tools/workflows, and updates follow-up state.
+- `src/agent/router.py` - Orchestrator that composes intent routing, pending management, and execution.
+- `src/agent/intent_router.py` - Intent planning/routing (rules/fast path/LLM planner).
+- `src/agent/pending_manager.py` - Pending follow-up state lifecycle.
+- `src/agent/plan_executor.py` - Tool/workflow execution and validation path.
 - `src/application/services/*` - Application-layer services (variety/weather/recommendation/crop calendar/planting extraction) used by tools and workflows.
-- `src/domain/planting.py` - Domain logic for planting extraction/validation and heuristic rules.
+- `src/application/ports.py` / `src/application/adapters.py` - App-level Port/Adapter boundary for config/sql/http dependencies.
+- `src/domain/planting.py` + `src/domain/planting_models.py` - Domain logic and models for planting extraction/validation.
 - `src/agent/workflows/state.py` / `crop_calendar_graph.py` / `growth_stage_graph.py` - LangGraph state definition and workflow implementation.
 - `src/api/server.py` - FastAPI routes and dependency cache.
 - `chainlit_app.py` - UI client.
@@ -47,10 +52,21 @@ Growth-stage workflow specifics:
 - Maps `sowing_method` / `culti_type` / `stage_name` via `agri_code_dict` categories (`sowingmtd` / `culti_type` / `growth_stage`).
 
 ## Routing Logic
-- `src/agent/router.RequestRouter` uses `PlannerRunner` to output `ActionPlan` (tool/workflow/none) and executes the action.
+- `src/agent/router.RequestRouter` orchestrates three collaborators:
+  - `IntentRouter` (plan generation),
+  - `PendingManager` (follow-up state),
+  - `PlanExecutor` (action execution).
 - Tools are invoked via `execute_tool`; workflows execute the corresponding LangGraph. `HandleResponse.mode` tells the frontend "tool / workflow / none"; `tool.data` or `plan.recommendations` carry results.
 - Tool handlers in `src/agent/tools/registry.py` return `ToolInvocation` (structured `name/message/data`) for UI rendering.
 - Pending state is persisted in the pending store (memory/sqlite/postgres optional) with TTL; pending summaries are injected into the planner to decide follow-up or switch to new questions.
+
+## Config Governance
+- Environment-level config (DB URL/API keys/providers) stays in `.env`/`AppConfig`.
+- DB object metadata (table names/region lookup sources) is centrally resolved by `src/infra/db_catalog.py`.
+- Preferred env overrides are JSON-based:
+  - `DB_TABLE_OVERRIDES`
+  - `DB_REGION_LOOKUP_CANDIDATES`
+- Legacy table keys remain backward-compatible fallbacks.
 
 ## Crop Calendar Workflow (Current)
 `src/agent/workflows/crop_calendar_graph.py` is the active main flow, replacing the earlier monolithic pipeline:

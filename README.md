@@ -15,7 +15,10 @@ This project requires a real OpenAI-compatible LLM API (no mock LLM).
 ## Main Components
 - `chainlit_app.py`: Chat frontend
 - `src/api/server.py`: FastAPI app (`/health`, `/api/v1/handle`)
-- `src/agent/router.py`: Planner + executor + follow-up state handling
+- `src/agent/router.py`: Request orchestration
+- `src/agent/intent_router.py`: Intent planning/routing
+- `src/agent/pending_manager.py`: Follow-up state management
+- `src/agent/plan_executor.py`: Tool/workflow execution
 - `src/agent/workflows/`: Crop calendar / growth-stage workflows
 - `src/application/services/`: Business services
 - `src/agent/tools/`: Thin tool adapters
@@ -57,6 +60,17 @@ Common optional values:
 Notes:
 - If `EXTRACTOR_API_KEY` is empty, extraction falls back to `OPENAI_API_KEY`.
 - `/health` does not perform a real LLM request; it only checks API status/config.
+
+## DB Config Strategy
+
+Database table metadata is now managed centrally. Prefer:
+
+- `DB_TABLE_OVERRIDES` (JSON object):
+  - Example: `{"variety":"agri_rice_variety","weather":"agri_weather","growth_stage_forecast":"agri_growth_stage_forecast","planting_plan":"agri_plant_plan"}`
+- `DB_REGION_LOOKUP_CANDIDATES` (JSON array):
+  - Example: `[{"table":"agri_region","id_column":"region_id","name_column":"region_name"}]`
+
+Legacy env keys (such as `VARIETY_DB_TABLE`, `WEATHER_DB_TABLE`) are still supported as fallback, but no longer recommended for new deployments.
 
 ## Docker Deployment (Server)
 
@@ -119,4 +133,3 @@ python -m unittest
 ## More Docs
 - Deployment details: `DEPLOY.md`
 - Technical details: `TECHNICAL_DETAILS.md`
-
