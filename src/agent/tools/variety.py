@@ -10,7 +10,7 @@ from .registry import auto_register_tool, _get_cached_tool_result, _store_tool_r
 @auto_register_tool(
     "variety_lookup",
     description=(
-        "查询水稻品种基础信息。仅用于用户明确询问品种特性/抗性/生育期等单点信息；"
+        "查询水稻品种基础信息。仅用于用户明确询问品种审定信息、适种区域以及生育期等单点信息；"
         "不用于完整种植方案。"
     ),
 )

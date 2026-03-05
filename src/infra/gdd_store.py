@@ -3,9 +3,8 @@ from __future__ import annotations
 from typing import Dict, List
 
 from .config import get_config
+from .db_catalog import TABLE_KEY_GROWTH_STAGE_FORECAST, resolve_db_table
 from .postgres import fetch_all, quote_identifier
-
-GDD_TABLE_NAME = "gdd_stages"
 
 
 def _get_gdd_db_url() -> str | None:
@@ -14,8 +13,7 @@ def _get_gdd_db_url() -> str | None:
 
 
 def _get_gdd_db_table() -> str:
-    cfg = get_config()
-    return cfg.growth_stage_db_table or GDD_TABLE_NAME
+    return resolve_db_table(get_config(), TABLE_KEY_GROWTH_STAGE_FORECAST)
 
 
 def _require_db_url() -> str:

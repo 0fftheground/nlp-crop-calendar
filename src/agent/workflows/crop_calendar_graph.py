@@ -17,12 +17,14 @@ from ...application.services.crop_calendar_service import (
     resolve_sowing_method_code,
     set_crop_calendar_active,
 )
-from ...application.services.planting_service import extract_planting_details
+from ...application.services.planting_service import (
+    extract_planting_details,
+    normalize_and_validate_planting,
+)
 from ...domain.planting import (
     MissingPlantingInfoError,
     list_missing_required_fields,
     merge_planting_answers,
-    normalize_and_validate_planting,
 )
 from ...infra.cache_keys import build_planting_cache_key
 from ...infra.tool_cache import get_tool_result_cache

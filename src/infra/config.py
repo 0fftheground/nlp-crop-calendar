@@ -1,3 +1,4 @@
+import json
 from functools import lru_cache
 from typing import Optional
 
@@ -68,14 +69,20 @@ class AppConfig(BaseSettings):
     variety_api_key: Optional[str] = Field(
         default=None, validation_alias="VARIETY_API_KEY"
     )
-    variety_db_table: str = Field(
-        default="variety_approvals", validation_alias="VARIETY_DB_TABLE"
+    db_table_overrides: dict[str, str] = Field(
+        default_factory=dict, validation_alias="DB_TABLE_OVERRIDES"
+    )
+    db_region_lookup_candidates: list[dict[str, str]] = Field(
+        default_factory=list, validation_alias="DB_REGION_LOOKUP_CANDIDATES"
+    )
+    variety_db_table: Optional[str] = Field(
+        default=None, validation_alias="VARIETY_DB_TABLE"
     )
     weather_provider: str = Field(
         default="mock", validation_alias="WEATHER_PROVIDER"
     )
-    weather_db_table: str = Field(
-        default="agri_weather", validation_alias="WEATHER_DB_TABLE"
+    weather_db_table: Optional[str] = Field(
+        default=None, validation_alias="WEATHER_DB_TABLE"
     )
     weather_api_url: Optional[str] = Field(
         default=None, validation_alias="WEATHER_API_URL"
@@ -104,13 +111,22 @@ class AppConfig(BaseSettings):
     growth_stage_api_key: Optional[str] = Field(
         default=None, validation_alias="GROWTH_STAGE_API_KEY"
     )
-    growth_stage_db_table: str = Field(
-        default="agri_growth_stage_forecast",
+    growth_stage_db_table: Optional[str] = Field(
+        default=None,
         validation_alias="GROWTH_STAGE_DB_TABLE",
     )
-    planting_plan_db_table: str = Field(
-        default="agri_plant_plan",
+    planting_plan_db_table: Optional[str] = Field(
+        default=None,
         validation_alias="PLANTING_PLAN_DB_TABLE",
+    )
+    region_db_table: Optional[str] = Field(
+        default=None, validation_alias="REGION_DB_TABLE"
+    )
+    region_db_id_column: str = Field(
+        default="region_id", validation_alias="REGION_DB_ID_COLUMN"
+    )
+    region_db_name_column: str = Field(
+        default="region_name", validation_alias="REGION_DB_NAME_COLUMN"
     )
     crop_calendar_provider: str = Field(
         default="mock",
@@ -233,6 +249,44 @@ class AppConfig(BaseSettings):
     @classmethod
     def normalize_pending_store(cls, value: str) -> str:
         return value.lower() if value else value
+
+    @field_validator("db_table_overrides", mode="before")
+    @classmethod
+    def parse_db_table_overrides(cls, value: object) -> dict[str, str] | object:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return value
+            if isinstance(parsed, dict):
+                return parsed
+            return {}
+        return value
+
+    @field_validator("db_region_lookup_candidates", mode="before")
+    @classmethod
+    def parse_db_region_lookup_candidates(
+        cls, value: object
+    ) -> list[dict[str, str]] | object:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return value
+            if isinstance(parsed, list):
+                return parsed
+            return []
+        return value
 
     @model_validator(mode="after")
     def build_agri_db_url(self) -> "AppConfig":

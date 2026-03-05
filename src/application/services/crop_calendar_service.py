@@ -6,11 +6,18 @@ import re
 from datetime import date, datetime, time, timedelta
 from typing import Callable, Dict, List, Optional, TypedDict
 
-import httpx
-
 from .growth_stage_service import query_growth_stage_from_db
-from ...infra.config import get_config
-from ...infra.postgres import fetch_all, quote_identifier
+from ..adapters import (
+    DEFAULT_CONFIG_ADAPTER,
+    DEFAULT_HTTP_ADAPTER,
+    DEFAULT_SQL_ADAPTER,
+)
+from ..ports import ConfigPort, HttpPort, SqlPort
+from ...infra.db_catalog import (
+    TABLE_KEY_VARIETY,
+    resolve_db_table,
+    resolve_region_lookup_sources,
+)
 from ...infra.tool_provider import normalize_provider
 from ...observability.logging_utils import log_event, summarize_text
 from ...schemas import (
@@ -25,8 +32,58 @@ from ...schemas import (
     WeatherQueryInput,
     WeatherSeries,
 )
-from ...domain.planting import merge_planting_answers, normalize_and_validate_planting
-from .planting_service import extract_planting_details
+from ...domain.planting import merge_planting_answers
+from .planting_service import (
+    extract_planting_details,
+    normalize_and_validate_planting,
+)
+
+
+_CONFIG_PORT: ConfigPort = DEFAULT_CONFIG_ADAPTER
+_SQL_PORT: SqlPort = DEFAULT_SQL_ADAPTER
+_HTTP_PORT: HttpPort = DEFAULT_HTTP_ADAPTER
+
+
+def configure_crop_calendar_ports(
+    *,
+    config_port: Optional[ConfigPort] = None,
+    sql_port: Optional[SqlPort] = None,
+    http_port: Optional[HttpPort] = None,
+) -> None:
+    global _CONFIG_PORT, _SQL_PORT, _HTTP_PORT
+    if config_port is not None:
+        _CONFIG_PORT = config_port
+    if sql_port is not None:
+        _SQL_PORT = sql_port
+    if http_port is not None:
+        _HTTP_PORT = http_port
+
+
+def _cfg():
+    return _CONFIG_PORT.get()
+
+
+def _fetch_all(url: str, sql: str, params: tuple[object, ...] = ()) -> list[dict]:
+    return _SQL_PORT.fetch_all(url, sql, params)
+
+
+def _qid(name: str) -> str:
+    return _SQL_PORT.quote_identifier(name)
+
+
+def _post_json(
+    url: str,
+    *,
+    payload: dict,
+    headers: Optional[dict[str, str]] = None,
+    timeout: float = 10.0,
+):
+    return _HTTP_PORT.post(
+        url,
+        json_payload=payload,
+        headers=headers,
+        timeout=timeout,
+    )
 
 
 class CropCalendarArtifacts(TypedDict):
@@ -53,7 +110,7 @@ def derive_weather_range(
     """
     Infer the weather query year based on sowing/transplanting dates.
     """
-    cfg = get_config()
+    cfg = _cfg()
     region = default_region or cfg.default_region
     if not region:
         raise ValueError("查询气象必须提供地区信息。")
@@ -102,7 +159,7 @@ def assemble_weather_series(
 
 
 def _default_weather_series(planting: PlantingDetails) -> WeatherSeries:
-    cfg = get_config()
+    cfg = _cfg()
     return WeatherSeries(
         region=cfg.default_region or "unknown",
         granularity="daily",
@@ -120,7 +177,7 @@ def query_growth_stage(
     Helper wrapper that prepares PredictGrowthStageInput for the query service.
     """
     if weather_series is None:
-        cfg = get_config()
+        cfg = _cfg()
         weather_series = WeatherSeries(
             region=cfg.default_region or "unknown",
             granularity="daily",
@@ -205,7 +262,7 @@ def query_growth_stage_gdd(input: PredictGrowthStageInput) -> GrowthStageResult:
 
 
 def get_farm_weather(input: WeatherQueryInput) -> WeatherSeries:
-    cfg = get_config()
+    cfg = _cfg()
     base_year = input.year
     if input.start_date:
         base_year = input.start_date.year
@@ -290,10 +347,21 @@ def _mock_crop_calendar_plan(
 
 _CODE_MAP_CACHE: Dict[str, Dict[int, str]] = {}
 _CODE_REVERSE_CACHE: Dict[str, Dict[str, int]] = {}
+_REGION_SUFFIX_RE = re.compile(r"(特别行政区|自治区|自治州|省|市|州|盟|地区|区|县)$")
+_REGION_CODE_CATEGORIES = (
+    "region",
+    "region_id",
+    "area",
+    "district",
+    "city",
+    "county",
+    "plant_region",
+    "planting_region",
+)
 
 
 def _require_db_url() -> str:
-    cfg = get_config()
+    cfg = _cfg()
     if not cfg.agri_db_url:
         raise RuntimeError("缺少 AGRI_DB_URL，无法读取品种或码表数据。")
     return cfg.agri_db_url
@@ -302,7 +370,7 @@ def _require_db_url() -> str:
 def _fetch_code_map(category: str) -> Dict[int, str]:
     url = _require_db_url()
     try:
-        rows = fetch_all(
+        rows = _fetch_all(
             url,
             "SELECT code, code_name FROM agri_code_dict "
             "WHERE category = %s AND is_active = true",
@@ -356,14 +424,169 @@ def _resolve_code(category: str, value: object) -> Optional[int]:
     return reverse.get(text)
 
 
+def _normalize_region_token(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[，。；、,.!！?？\s]+", "", text)
+    return text
+
+
+def _region_text_variants(value: object) -> List[str]:
+    normalized = _normalize_region_token(value)
+    if not normalized:
+        return []
+    variants = [normalized]
+    trimmed = _REGION_SUFFIX_RE.sub("", normalized)
+    if trimmed and trimmed not in variants:
+        variants.append(trimmed)
+    return variants
+
+
+def _pick_region_code_from_mapping(
+    mapping: Dict[int, str], region_text: object
+) -> Optional[int]:
+    variants = _region_text_variants(region_text)
+    if not variants:
+        return None
+    best_code: Optional[int] = None
+    best_score = -1
+    for code, name in mapping.items():
+        name_norm = _normalize_region_token(name)
+        if not name_norm:
+            continue
+        name_trim = _REGION_SUFFIX_RE.sub("", name_norm)
+        for candidate in (name_norm, name_trim):
+            if not candidate:
+                continue
+            score = -1
+            if any(v == candidate for v in variants):
+                score = 100 + len(candidate)
+            elif any(v in candidate for v in variants):
+                score = 60 + min(len(v) for v in variants if v in candidate)
+            elif any(candidate in v for v in variants):
+                score = 50 + len(candidate)
+            if score > best_score:
+                best_score = score
+                best_code = code
+    return best_code
+
+
+def _resolve_region_id_from_code_dict(region_text: object) -> Optional[int]:
+    variants = _region_text_variants(region_text)
+    if not variants:
+        return None
+    for category in _REGION_CODE_CATEGORIES:
+        mapping = _get_code_map(category)
+        if not mapping:
+            continue
+        code = _pick_region_code_from_mapping(mapping, variants[0])
+        if code is not None:
+            return code
+    return None
+
+
+def _coerce_region_id_value(value: object) -> Optional[object]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    return text
+
+
+def _query_region_id_by_table(
+    table: str, id_column: str, name_column: str, region_text: str
+) -> Optional[object]:
+    url = _require_db_url()
+    table_name = _qid(table)
+    id_col = _qid(id_column)
+    name_col = _qid(name_column)
+    variants = _region_text_variants(region_text)
+    if not variants:
+        return None
+    for variant in variants:
+        try:
+            sql = (
+                f"SELECT {id_col} AS region_id, {name_col} AS region_name "
+                f"FROM {table_name} "
+                f"WHERE CAST({name_col} AS TEXT) ILIKE %s "
+                "LIMIT 20"
+            )
+            rows = _fetch_all(url, sql, (f"%{variant}%",))
+        except Exception:
+            continue
+        if not rows:
+            continue
+        best_score = -1
+        best_id: Optional[object] = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            region_name = row.get("region_name")
+            region_id = _coerce_region_id_value(row.get("region_id"))
+            if region_id is None:
+                continue
+            name_norm = _normalize_region_token(region_name)
+            if not name_norm:
+                continue
+            score = 0
+            if name_norm == variant:
+                score = 100 + len(name_norm)
+            elif variant in name_norm:
+                score = 70 + len(variant)
+            elif name_norm in variant:
+                score = 60 + len(name_norm)
+            if score > best_score:
+                best_score = score
+                best_id = region_id
+        if best_id is not None:
+            return best_id
+    return None
+
+
+def _resolve_region_id_from_region_table(region_text: object) -> Optional[object]:
+    variants = _region_text_variants(region_text)
+    if not variants:
+        return None
+    for source in resolve_region_lookup_sources(_cfg()):
+        region_id = _query_region_id_by_table(
+            source.table,
+            source.id_column,
+            source.name_column,
+            variants[0],
+        )
+        if region_id is not None:
+            return region_id
+    return None
+
+
+def _resolve_region_id_for_payload(value: object) -> Optional[object]:
+    direct = _coerce_region_id_value(value)
+    if isinstance(direct, int):
+        return direct
+    if not direct:
+        return None
+    resolved = _resolve_region_id_from_code_dict(direct)
+    if resolved is not None:
+        return resolved
+    return _resolve_region_id_from_region_table(direct)
+
+
 def _fetch_variety_id_by_name(variety_name: str) -> Optional[object]:
     if not variety_name:
         return None
     url = _require_db_url()
-    table = get_config().variety_db_table or "agri_rice_variety"
+    table = resolve_db_table(_cfg(), TABLE_KEY_VARIETY)
     try:
-        sql = f"SELECT id FROM {quote_identifier(table)} WHERE name = %s LIMIT 1"
-        rows = fetch_all(url, sql, (variety_name,))
+        sql = f"SELECT id FROM {_qid(table)} WHERE name = %s LIMIT 1"
+        rows = _fetch_all(url, sql, (variety_name,))
     except Exception:
         return None
     if not rows:
@@ -504,9 +727,22 @@ def _coerce_operation_plan(
 def _build_crop_calendar_payload(
     planting: PlantingDetails,
 ) -> Dict[str, object]:
-    cfg = get_config()
-    if not cfg.default_farm_id:
-        raise RuntimeError("缺少 DEFAULT_FARM_ID，无法生成种植计划。")
+    cfg = _cfg()
+    region_raw = planting.region_id
+    resolved_region_id = _resolve_region_id_for_payload(region_raw)
+    if region_raw and resolved_region_id is None:
+        raise RuntimeError(f"未匹配到区域 region_id: {region_raw}")
+    farm_id: Optional[int] = None
+    if resolved_region_id is None:
+        # User-provided farm_id is intentionally ignored for now.
+        # Only default farm_id is supported when region is not provided.
+        farm_id_raw = cfg.default_farm_id
+        if not farm_id_raw:
+            raise RuntimeError("缺少 DEFAULT_FARM_ID，无法生成种植计划。")
+        try:
+            farm_id = int(str(farm_id_raw).strip())
+        except Exception as exc:
+            raise RuntimeError(f"farm_id 非法: {farm_id_raw}") from exc
     if not planting.variety:
         raise RuntimeError("缺少品种信息，无法生成种植计划。")
     variety_id = _fetch_variety_id_by_name(planting.variety)
@@ -518,8 +754,7 @@ def _build_crop_calendar_payload(
     culti_type_code = None
     if planting.culti_type:
         culti_type_code = _normalize_culti_type_code(planting.culti_type)
-    return {
-        "farm_id": int(cfg.default_farm_id),
+    payload: Dict[str, object] = {
         "sowing_date": planting.sowing_date.isoformat(),
         "variety_id": variety_id,
         "sowing_method": sowing_method,
@@ -530,6 +765,11 @@ def _build_crop_calendar_payload(
         ),
         "culti_type": culti_type_code if culti_type_code is not None else "",
     }
+    if resolved_region_id is not None:
+        payload["region_id"] = resolved_region_id
+    elif farm_id is not None:
+        payload["farm_id"] = farm_id
+    return payload
 
 
 def _build_growth_stage_result(
@@ -616,7 +856,7 @@ def _extract_operation_sort_date(text: str) -> Optional[date]:
 def request_crop_calendar_plan(
     planting: PlantingDetails,
 ) -> CropCalendarPlanResult:
-    cfg = get_config()
+    cfg = _cfg()
     provider = normalize_provider(cfg.crop_calendar_provider)
     if provider not in {"external", "api", "http"}:
         return _mock_crop_calendar_plan(planting)
@@ -633,30 +873,30 @@ def request_crop_calendar_plan(
         headers["Authorization"] = f"Bearer {cfg.crop_calendar_api_key}"
         headers["X-API-KEY"] = cfg.crop_calendar_api_key
     try:
-        with httpx.Client(timeout=10.0, trust_env=False) as client:
-            response = client.post(
-                cfg.crop_calendar_api_url,
-                json=payload,
-                headers=headers,
-            )
-            response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        resp = exc.response
-        status_code = resp.status_code if resp is not None else None
-        response_text = summarize_text(
-            resp.text if resp is not None else str(exc), limit=1200
-        )
-        log_event(
-            "crop_calendar_api_http_error",
-            url=cfg.crop_calendar_api_url,
-            status_code=status_code,
+        response = _post_json(
+            cfg.crop_calendar_api_url,
             payload=payload,
-            response_text=response_text,
+            headers=headers,
+            timeout=10.0,
         )
-        raise RuntimeError(
-            f"外部计算接口请求失败(status={status_code}): {response_text}"
-        ) from exc
+        response.raise_for_status()
     except Exception as exc:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            status_code = getattr(resp, "status_code", None)
+            response_text = summarize_text(
+                getattr(resp, "text", str(exc)), limit=1200
+            )
+            log_event(
+                "crop_calendar_api_http_error",
+                url=cfg.crop_calendar_api_url,
+                status_code=status_code,
+                payload=payload,
+                response_text=response_text,
+            )
+            raise RuntimeError(
+                f"外部计算接口请求失败(status={status_code}): {response_text}"
+            ) from exc
         log_event(
             "crop_calendar_api_request_error",
             url=cfg.crop_calendar_api_url,
@@ -716,7 +956,7 @@ def request_crop_calendar_plan(
 def set_crop_calendar_active(
     plant_season_id: object, *, is_active: bool = True
 ) -> Dict[str, object]:
-    cfg = get_config()
+    cfg = _cfg()
     if not cfg.crop_calendar_save_api_url:
         raise RuntimeError(
             "缺少 CROP_CALENDAR_SAVE_API_URL，无法保存种植计划。"
@@ -730,14 +970,14 @@ def set_crop_calendar_active(
         headers["Authorization"] = f"Bearer {cfg.crop_calendar_api_key}"
         headers["X-API-KEY"] = cfg.crop_calendar_api_key
     try:
-        with httpx.Client(timeout=10.0, trust_env=False) as client:
-            response = client.post(
-                cfg.crop_calendar_save_api_url,
-                json=payload,
-                headers=headers,
-            )
-            response.raise_for_status()
-            raw = response.json()
+        response = _post_json(
+            cfg.crop_calendar_save_api_url,
+            payload=payload,
+            headers=headers,
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        raw = response.json()
     except Exception as exc:
         raise RuntimeError(f"保存接口请求失败: {exc}") from exc
     if not isinstance(raw, dict):
@@ -766,7 +1006,7 @@ def _derive_crop_calendar_delete_url(cfg) -> Optional[str]:
 def delete_crop_calendar_plan(
     plant_season_id: object,
 ) -> Dict[str, object]:
-    cfg = get_config()
+    cfg = _cfg()
     delete_url = _derive_crop_calendar_delete_url(cfg)
     if not delete_url:
         raise RuntimeError(
@@ -778,10 +1018,14 @@ def delete_crop_calendar_plan(
         headers["Authorization"] = f"Bearer {cfg.crop_calendar_api_key}"
         headers["X-API-KEY"] = cfg.crop_calendar_api_key
     try:
-        with httpx.Client(timeout=10.0, trust_env=False) as client:
-            response = client.post(delete_url, json=payload, headers=headers)
-            response.raise_for_status()
-            raw = response.json()
+        response = _post_json(
+            delete_url,
+            payload=payload,
+            headers=headers,
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        raw = response.json()
     except Exception as exc:
         raise RuntimeError(f"删除接口请求失败: {exc}") from exc
     if not isinstance(raw, dict):

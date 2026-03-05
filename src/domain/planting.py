@@ -4,8 +4,7 @@ import re
 from datetime import date
 from typing import Callable, Dict, List, Optional
 
-from ..observability.logging_utils import log_event
-from ..schemas import PlantingDetails, PlantingDetailsDraft
+from .planting_models import PlantingDetails, PlantingDetailsDraft
 
 
 DEFAULT_CROP = "水稻"
@@ -34,6 +33,12 @@ METHOD_KEYWORDS = {
     "机插": "transplanting",
 }
 DATE_PATTERN = re.compile(r"(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})")
+REGION_EXPLICIT_PATTERN = re.compile(
+    r"(?:在|于|到)([\u4e00-\u9fa5]{2,20}?)(?:种植|播种|插秧|育秧|栽培|种|进行)",
+)
+REGION_SUFFIX_PATTERN = re.compile(
+    r"([\u4e00-\u9fa5]{2,20}(?:特别行政区|自治区|自治州|省|市|州|盟|地区|区|县))"
+)
 VarietyResolver = Callable[[str], List[str]]
 
 
@@ -122,6 +127,12 @@ def _apply_heuristics(
     prompt: str,
     variety_resolver: Optional[VarietyResolver],
 ) -> None:
+    if "region_id" not in data:
+        region_hint = _extract_region_hint(prompt)
+        if region_hint:
+            # Keep user-provided region text here; downstream service resolves it to region_id.
+            data["region_id"] = region_hint
+
     if "culti_type" not in data:
         for key, value in sorted(
             CULTI_TYPE_KEYWORDS.items(), key=lambda item: len(item[0]), reverse=True
@@ -155,6 +166,47 @@ def _apply_heuristics(
         variety = _infer_variety_from_prompt(prompt, variety_resolver)
         if variety:
             data["variety"] = variety
+
+
+def _extract_region_hint(prompt: str) -> Optional[str]:
+    text = str(prompt or "").strip()
+    if not text:
+        return None
+    match = REGION_EXPLICIT_PATTERN.search(text)
+    if match:
+        candidate = _sanitize_region_text(match.group(1))
+        if candidate:
+            return candidate
+    matches = REGION_SUFFIX_PATTERN.findall(text)
+    if matches:
+        candidate = _sanitize_region_text(matches[-1])
+        if candidate:
+            return candidate
+    return None
+
+
+def _sanitize_region_text(value: object) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"[，。；、,.!！?？\s]+", "", text)
+    if not text:
+        return None
+    invalid_tokens = {
+        "这里",
+        "当地",
+        "本地",
+        "该地",
+        "那边",
+        "这边",
+    }
+    if text in invalid_tokens:
+        return None
+    if text in CROP_KEYWORDS:
+        return None
+    if len(text) > 20:
+        return None
+    return text
 
 
 def _normalize_variety_field(
@@ -290,11 +342,6 @@ def normalize_and_validate_planting(draft: object) -> PlantingDetails:
         raise MissingPlantingInfoError(missing)
 
     try:
-        planting = draft.to_canonical()
-        log_event(
-            "normalized_planting",
-            planting=planting.model_dump(mode="json"),
-        )
-        return planting
+        return draft.to_canonical()
     except ValueError as exc:
         raise ValueError(f"种植信息校验失败: {exc}") from exc

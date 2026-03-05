@@ -6,10 +6,11 @@ from typing import Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 
+from ..adapters import DEFAULT_CONFIG_ADAPTER, DEFAULT_SQL_ADAPTER
+from ..ports import ConfigPort, SqlPort
 from ...domain.planting import DEFAULT_CROP
-from ...infra.config import get_config
+from ...infra.db_catalog import TABLE_KEY_VARIETY, resolve_db_table
 from ...infra.llm import get_chat_model
-from ...infra.postgres import fetch_all, quote_identifier
 from ...infra.variety_db_schema import (
     VARIETY_PG_COLUMN_MAP,
     VARIETY_PG_NAME_COLUMN,
@@ -28,7 +29,34 @@ from ...prompts.variety_match import (
 from ...schemas.models import ToolInvocation
 
 
-VARIETY_DB_TABLE = "variety_approvals"
+_CONFIG_PORT: ConfigPort = DEFAULT_CONFIG_ADAPTER
+_SQL_PORT: SqlPort = DEFAULT_SQL_ADAPTER
+
+
+def configure_variety_ports(
+    *,
+    config_port: Optional[ConfigPort] = None,
+    sql_port: Optional[SqlPort] = None,
+) -> None:
+    global _CONFIG_PORT, _SQL_PORT
+    if config_port is not None:
+        _CONFIG_PORT = config_port
+    if sql_port is not None:
+        _SQL_PORT = sql_port
+
+
+def _cfg():
+    return _CONFIG_PORT.get()
+
+
+def _fetch_all(url: str, sql: str, params: tuple[object, ...] = ()) -> list[dict]:
+    return _SQL_PORT.fetch_all(url, sql, params)
+
+
+def _qid(name: str) -> str:
+    return _SQL_PORT.quote_identifier(name)
+
+
 VARIETY_DB_FIELD_LABELS = {
     "variety_name": "品种名称",
     "approval_year": "审定年份",
@@ -138,15 +166,14 @@ def _infer_crop_and_variety(prompt: str) -> Tuple[str, str]:
 
 
 def _require_db_url() -> str:
-    cfg = get_config()
+    cfg = _cfg()
     if not cfg.agri_db_url:
         raise RuntimeError("缺少 AGRI_DB_URL，无法读取品种数据。")
     return cfg.agri_db_url
 
 
 def _get_variety_db_table() -> str:
-    cfg = get_config()
-    return cfg.variety_db_table or VARIETY_DB_TABLE
+    return resolve_db_table(_cfg(), TABLE_KEY_VARIETY)
 
 
 def _normalize_variety_prompt(prompt: str) -> str:
@@ -484,7 +511,7 @@ def _build_pg_select_list() -> str:
     columns = []
     for alias, column in VARIETY_PG_COLUMN_MAP.items():
         columns.append(
-            f"{quote_identifier(column)} AS {quote_identifier(alias)}"
+            f"{_qid(column)} AS {_qid(alias)}"
         )
     return ", ".join(columns)
 
@@ -496,8 +523,8 @@ def _query_variety_db_by_name_pg(
     name: str,
     limit: int,
 ) -> List[Dict[str, object]]:
-    name_col = quote_identifier(VARIETY_PG_NAME_COLUMN)
-    rows = fetch_all(
+    name_col = _qid(VARIETY_PG_NAME_COLUMN)
+    rows = _fetch_all(
         url,
         f"SELECT {select_list} FROM {table_ident} "
         f"WHERE {name_col} = %s",
@@ -505,7 +532,7 @@ def _query_variety_db_by_name_pg(
     )
     if rows:
         return rows
-    rows = fetch_all(
+    rows = _fetch_all(
         url,
         f"SELECT {select_list} FROM {table_ident} "
         f"WHERE {name_col} ILIKE %s LIMIT %s",
@@ -513,7 +540,7 @@ def _query_variety_db_by_name_pg(
     )
     if rows:
         return rows
-    return fetch_all(
+    return _fetch_all(
         url,
         f"SELECT {select_list} FROM {table_ident} "
         f"WHERE {name_col} ILIKE %s LIMIT %s",
@@ -528,8 +555,8 @@ def _query_variety_db_by_prompt_pg(
     prompt: str,
     limit: int,
 ) -> List[Dict[str, object]]:
-    name_col = quote_identifier(VARIETY_PG_NAME_COLUMN)
-    return fetch_all(
+    name_col = _qid(VARIETY_PG_NAME_COLUMN)
+    return _fetch_all(
         url,
         f"SELECT {select_list} FROM {table_ident} "
         f"WHERE %s ILIKE '%' || {name_col} || '%' "
@@ -547,9 +574,9 @@ def _query_variety_db_by_fuzzy_tokens_pg(
 ) -> List[Dict[str, object]]:
     if not tokens:
         return []
-    name_col = quote_identifier(VARIETY_PG_NAME_COLUMN)
+    name_col = _qid(VARIETY_PG_NAME_COLUMN)
     for token in tokens:
-        rows = fetch_all(
+        rows = _fetch_all(
             url,
             f"SELECT {select_list} FROM {table_ident} "
             f"WHERE {name_col} ILIKE %s LIMIT %s",
@@ -574,7 +601,7 @@ def _lookup_variety_records_postgres(
     variety_name = confirmed_candidate or _extract_variety(normalized_prompt)
     table = _get_variety_db_table()
     try:
-        table_ident = quote_identifier(table)
+        table_ident = _qid(table)
         select_list = _build_pg_select_list()
         rows: List[Dict[str, object]] = []
         if variety_name:

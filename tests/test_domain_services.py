@@ -91,6 +91,10 @@ class DomainServiceTests(unittest.TestCase):
         )
         self.assertEqual(draft.culti_type, "一季晚稻")
 
+    def test_extract_planting_details_infers_region_hint(self) -> None:
+        draft = extract_planting_details("我想在湖南省种植水稻，5月1日播种")
+        self.assertEqual(draft.region_id, "湖南省")
+
     def test_build_crop_calendar_payload_allows_empty_transplant_date(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"
         get_config.cache_clear()
@@ -117,6 +121,99 @@ class DomainServiceTests(unittest.TestCase):
         )
         planting = build_fallback_planting(draft)
         self.assertIsNone(planting.transplant_date)
+
+    def test_planting_draft_to_canonical_keeps_farm_and_region_id(self) -> None:
+        draft = PlantingDetailsDraft(
+            farm_id="88",
+            region_id="320100",
+            crop="水稻",
+            planting_method="direct_seeding",
+            sowing_date=date(2025, 5, 1),
+        )
+        planting = draft.to_canonical()
+        self.assertEqual(planting.farm_id, "88")
+        self.assertEqual(planting.region_id, "320100")
+
+    def test_build_crop_calendar_payload_uses_default_farm_id(self) -> None:
+        os.environ["DEFAULT_FARM_ID"] = "1"
+        get_config.cache_clear()
+        planting = PlantingDetails(
+            farm_id="99",
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="transplanting",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=None,
+        )
+        with patch(
+            "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
+            return_value=1001,
+        ):
+            payload = _build_crop_calendar_payload(planting)
+        self.assertEqual(payload.get("farm_id"), 1)
+
+    def test_build_crop_calendar_payload_prefers_region_id(self) -> None:
+        os.environ["DEFAULT_FARM_ID"] = "1"
+        get_config.cache_clear()
+        planting = PlantingDetails(
+            farm_id="99",
+            region_id="320100",
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="transplanting",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=None,
+        )
+        with patch(
+            "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
+            return_value=1001,
+        ):
+            payload = _build_crop_calendar_payload(planting)
+        self.assertEqual(payload.get("region_id"), 320100)
+        self.assertNotIn("farm_id", payload)
+
+    def test_build_crop_calendar_payload_resolves_region_name(self) -> None:
+        os.environ["DEFAULT_FARM_ID"] = "1"
+        get_config.cache_clear()
+        planting = PlantingDetails(
+            region_id="湖南省",
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="transplanting",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=None,
+        )
+        with patch(
+            "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
+            return_value=1001,
+        ), patch(
+            "src.application.services.crop_calendar_service._resolve_region_id_for_payload",
+            return_value=430000,
+        ):
+            payload = _build_crop_calendar_payload(planting)
+        self.assertEqual(payload.get("region_id"), 430000)
+        self.assertNotIn("farm_id", payload)
+
+    def test_build_crop_calendar_payload_errors_when_region_unmatched(self) -> None:
+        os.environ["DEFAULT_FARM_ID"] = "1"
+        get_config.cache_clear()
+        planting = PlantingDetails(
+            region_id="火星基地",
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="transplanting",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=None,
+        )
+        with patch(
+            "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
+            return_value=1001,
+        ), patch(
+            "src.application.services.crop_calendar_service._resolve_region_id_for_payload",
+            return_value=None,
+        ):
+            with self.assertRaises(RuntimeError):
+                _build_crop_calendar_payload(planting)
 
 
 if __name__ == "__main__":

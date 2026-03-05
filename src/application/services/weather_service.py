@@ -5,12 +5,16 @@ import re
 from datetime import date, datetime, time, timedelta
 from typing import Dict, Optional, Tuple, List
 
-import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ...infra.config import get_config
+from ..adapters import (
+    DEFAULT_CONFIG_ADAPTER,
+    DEFAULT_HTTP_ADAPTER,
+    DEFAULT_SQL_ADAPTER,
+)
+from ..ports import ConfigPort, HttpPort, SqlPort
+from ...infra.db_catalog import TABLE_KEY_WEATHER, resolve_db_table
 from ...infra.llm import get_chat_model
-from ...infra.postgres import fetch_all, quote_identifier
 from ...observability.llm_usage import (
     apply_span_attributes,
     build_llm_input_token_attrs,
@@ -23,6 +27,53 @@ from ...schemas.models import (
     WeatherQueryInput,
     WeatherSeries,
 )
+
+
+_CONFIG_PORT: ConfigPort = DEFAULT_CONFIG_ADAPTER
+_SQL_PORT: SqlPort = DEFAULT_SQL_ADAPTER
+_HTTP_PORT: HttpPort = DEFAULT_HTTP_ADAPTER
+
+
+def configure_weather_ports(
+    *,
+    config_port: Optional[ConfigPort] = None,
+    sql_port: Optional[SqlPort] = None,
+    http_port: Optional[HttpPort] = None,
+) -> None:
+    global _CONFIG_PORT, _SQL_PORT, _HTTP_PORT
+    if config_port is not None:
+        _CONFIG_PORT = config_port
+    if sql_port is not None:
+        _SQL_PORT = sql_port
+    if http_port is not None:
+        _HTTP_PORT = http_port
+
+
+def _cfg():
+    return _CONFIG_PORT.get()
+
+
+def _fetch_all(url: str, sql: str, params: tuple[object, ...] = ()) -> list[dict]:
+    return _SQL_PORT.fetch_all(url, sql, params)
+
+
+def _qid(name: str) -> str:
+    return _SQL_PORT.quote_identifier(name)
+
+
+def _get_http(
+    url: str,
+    *,
+    params: Optional[dict[str, object]] = None,
+    headers: Optional[dict[str, str]] = None,
+    timeout: float = 10.0,
+):
+    return _HTTP_PORT.get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=timeout,
+    )
 
 
 def _parse_year(value: object) -> Optional[int]:
@@ -149,10 +200,9 @@ def _geocode_with_amap(
     url = geocode_url or "https://restapi.amap.com/v3/geocode/geo"
     params = {"key": api_key, "address": address}
     try:
-        with httpx.Client(timeout=10.0, trust_env=False) as client:
-            response = client.get(url, params=params)
-            response.raise_for_status()
-            payload = response.json()
+        response = _get_http(url, params=params, timeout=10.0)
+        response.raise_for_status()
+        payload = response.json()
     except Exception:
         return None
     if not isinstance(payload, dict):
@@ -483,7 +533,7 @@ def _summarize_weather_series(series: WeatherSeries) -> str:
             "主要天气: " + "、".join([item[0] for item in stats["conditions"]])
         )
     template_summary = "；".join(summary_parts)
-    cfg = get_config()
+    cfg = _cfg()
     mode = (cfg.weather_summary_mode or "template").lower()
     if mode != "llm":
         return template_summary
@@ -551,7 +601,7 @@ def _lookup_91weather(
     *,
     api_url: Optional[str],
 ) -> ToolInvocation:
-    cfg = get_config()
+    cfg = _cfg()
     if not query or query.lat is None or query.lon is None:
         if query and query.region:
             geocode = _geocode_with_amap(
@@ -571,10 +621,9 @@ def _lookup_91weather(
     url = api_url or "https://data-api.91weather.com/Zoomlion/higf_day_plus"
     params = {"lat": query.lat, "lon": query.lon}
     try:
-        with httpx.Client(timeout=10.0, trust_env=False) as client:
-            response = client.get(url, params=params)
-            response.raise_for_status()
-            payload = response.json()
+        response = _get_http(url, params=params, timeout=10.0)
+        response.raise_for_status()
+        payload = response.json()
     except Exception as exc:
         return ToolInvocation(
             name="weather_lookup",
@@ -605,7 +654,7 @@ def lookup_goso_weather(
     *,
     api_url: Optional[str] = None,
 ) -> ToolInvocation:
-    cfg = get_config()
+    cfg = _cfg()
     if not query or not query.region:
         return ToolInvocation(
             name="growth_weather_lookup",
@@ -643,10 +692,9 @@ def lookup_goso_weather(
         "end": end.strftime("%Y%m%d"),
     }
     try:
-        with httpx.Client(timeout=10.0, trust_env=False) as client:
-            response = client.get(url, params=params)
-            response.raise_for_status()
-            payload = response.json()
+        response = _get_http(url, params=params, timeout=10.0)
+        response.raise_for_status()
+        payload = response.json()
     except Exception as exc:
         return ToolInvocation(
             name="growth_weather_lookup",
@@ -669,15 +717,14 @@ def lookup_goso_weather(
 
 
 def _require_db_url() -> str:
-    cfg = get_config()
+    cfg = _cfg()
     if not cfg.agri_db_url:
         raise RuntimeError("缺少 AGRI_DB_URL，无法读取气象数据。")
     return cfg.agri_db_url
 
 
 def _get_weather_table() -> str:
-    cfg = get_config()
-    return cfg.weather_db_table or "agri_weather"
+    return resolve_db_table(_cfg(), TABLE_KEY_WEATHER)
 
 
 def _normalize_weather_date(value: object) -> Optional[date]:
@@ -702,9 +749,9 @@ def _query_farm_weather_rows(
     farm_id: str, start_date: date, end_date: date
 ) -> List[Dict[str, object]]:
     url = _require_db_url()
-    table = quote_identifier(_get_weather_table())
-    col_date = quote_identifier("date")
-    col_farm = quote_identifier("farm_id")
+    table = _qid(_get_weather_table())
+    col_date = _qid("date")
+    col_farm = _qid("farm_id")
     sql = (
         f"SELECT {col_date} AS date, "
         "tmax, tmin, tavg, wins, pre, rh "
@@ -712,7 +759,7 @@ def _query_farm_weather_rows(
         f"WHERE {col_farm} = %s AND {col_date} >= %s AND {col_date} <= %s "
         f"ORDER BY {col_date} ASC"
     )
-    return fetch_all(url, sql, (farm_id, start_date, end_date))
+    return _fetch_all(url, sql, (farm_id, start_date, end_date))
 
 
 def _build_series_from_rows(

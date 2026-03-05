@@ -4,8 +4,14 @@ import json
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
-from ...infra.config import get_config
-from ...infra.postgres import fetch_all, quote_identifier
+from ..adapters import DEFAULT_CONFIG_ADAPTER, DEFAULT_SQL_ADAPTER
+from ..ports import ConfigPort, SqlPort
+from ...infra.db_catalog import (
+    TABLE_KEY_GROWTH_STAGE_FORECAST,
+    TABLE_KEY_PLANTING_PLAN,
+    TABLE_KEY_VARIETY,
+    resolve_db_table,
+)
 from ...schemas import (
     GrowthStageResult,
     PlantingDetails,
@@ -85,26 +91,51 @@ _FORECAST_STAGE_DATE_COLUMNS = (
 )
 
 
+_CONFIG_PORT: ConfigPort = DEFAULT_CONFIG_ADAPTER
+_SQL_PORT: SqlPort = DEFAULT_SQL_ADAPTER
+
+
+def configure_growth_stage_ports(
+    *,
+    config_port: Optional[ConfigPort] = None,
+    sql_port: Optional[SqlPort] = None,
+) -> None:
+    global _CONFIG_PORT, _SQL_PORT
+    if config_port is not None:
+        _CONFIG_PORT = config_port
+    if sql_port is not None:
+        _SQL_PORT = sql_port
+
+
+def _cfg():
+    return _CONFIG_PORT.get()
+
+
+def _fetch_all(url: str, sql: str, params: tuple[object, ...] = ()) -> list[dict]:
+    return _SQL_PORT.fetch_all(url, sql, params)
+
+
+def _qid(name: str) -> str:
+    return _SQL_PORT.quote_identifier(name)
+
+
 def _require_db_url() -> str:
-    cfg = get_config()
+    cfg = _cfg()
     if not cfg.agri_db_url:
         raise RuntimeError("缺少 AGRI_DB_URL，无法读取生育期预测结果数据。")
     return cfg.agri_db_url
 
 
 def _get_growth_stage_table() -> str:
-    cfg = get_config()
-    return cfg.growth_stage_db_table or "agri_growth_stage_forecast"
+    return resolve_db_table(_cfg(), TABLE_KEY_GROWTH_STAGE_FORECAST)
 
 
 def _get_planting_plan_table() -> str:
-    cfg = get_config()
-    return cfg.planting_plan_db_table or "agri_plant_plan"
+    return resolve_db_table(_cfg(), TABLE_KEY_PLANTING_PLAN)
 
 
 def _get_variety_table() -> str:
-    cfg = get_config()
-    return cfg.variety_db_table or "agri_rice_variety"
+    return resolve_db_table(_cfg(), TABLE_KEY_VARIETY)
 
 
 def _split_schema_table(table: str) -> Tuple[str, str]:
@@ -126,7 +157,7 @@ def _resolve_column(
 def _get_table_columns(url: str, table: str) -> List[str]:
     schema, name = _split_schema_table(table)
     try:
-        rows = fetch_all(
+        rows = _fetch_all(
             url,
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_schema = %s AND table_name = %s",
@@ -181,7 +212,7 @@ def _fetch_code_map(category: str) -> Dict[int, str]:
             "SELECT code, code_name FROM agri_code_dict "
             "WHERE category = %s AND is_active = true"
         )
-        rows = fetch_all(url, sql, (category,))
+        rows = _fetch_all(url, sql, (category,))
     except Exception:
         return {}
     mapping: Dict[int, str] = {}
@@ -288,9 +319,9 @@ def _fetch_variety_name(variety_id: object) -> Optional[str]:
     table = _get_variety_table()
     try:
         sql = (
-            f"SELECT name FROM {quote_identifier(table)} WHERE id = %s LIMIT 1"
+            f"SELECT name FROM {_qid(table)} WHERE id = %s LIMIT 1"
         )
-        rows = fetch_all(url, sql, (variety_id,))
+        rows = _fetch_all(url, sql, (variety_id,))
     except Exception:
         return None
     if not rows:
@@ -309,9 +340,9 @@ def _fetch_variety_id_by_name(variety_name: str) -> Optional[object]:
     table = _get_variety_table()
     try:
         sql = (
-            f"SELECT id FROM {quote_identifier(table)} WHERE name = %s LIMIT 1"
+            f"SELECT id FROM {_qid(table)} WHERE name = %s LIMIT 1"
         )
-        rows = fetch_all(url, sql, (variety_name,))
+        rows = _fetch_all(url, sql, (variety_name,))
     except Exception:
         return None
     if not rows:
@@ -518,14 +549,14 @@ def _fetch_planting_plan_row(
             order_column = candidate
             break
 
-    sql = f"SELECT * FROM {quote_identifier(table)} WHERE " + " AND ".join(
+    sql = f"SELECT * FROM {_qid(table)} WHERE " + " AND ".join(
         conditions
     )
     if order_column:
-        sql += f" ORDER BY {quote_identifier(order_column)} DESC"
+        sql += f" ORDER BY {_qid(order_column)} DESC"
     sql += " LIMIT 1"
     try:
-        rows = fetch_all(url, sql, tuple(params))
+        rows = _fetch_all(url, sql, tuple(params))
     except Exception as exc:
         raise RuntimeError(f"种植计划查询失败: {exc}") from exc
     return (rows[0] if rows else {}), id_col, columns
@@ -541,7 +572,7 @@ def _build_plan_conditions(
     if value:
         col = _resolve_column(columns, _PLAN_NAME_COLUMNS)
         if col:
-            conditions.append(f"{quote_identifier(col)} ILIKE %s")
+            conditions.append(f"{_qid(col)} ILIKE %s")
             params.append(f"%{value}%")
 
     value = filters.get("variety")
@@ -554,19 +585,19 @@ def _build_plan_conditions(
                 else _fetch_variety_id_by_name(str(value))
             )
             if variety_id is not None:
-                conditions.append(f"{quote_identifier(variety_id_col)} = %s")
+                conditions.append(f"{_qid(variety_id_col)} = %s")
                 params.append(variety_id)
         else:
             col = _resolve_column(columns, _PLAN_VARIETY_COLUMNS)
             if col:
-                conditions.append(f"{quote_identifier(col)} = %s")
+                conditions.append(f"{_qid(col)} = %s")
                 params.append(value)
 
     value = filters.get("crop")
     if value:
         col = _resolve_column(columns, _PLAN_CROP_COLUMNS)
         if col:
-            conditions.append(f"{quote_identifier(col)} = %s")
+            conditions.append(f"{_qid(col)} = %s")
             params.append(value)
 
     value = filters.get("culti_type")
@@ -575,10 +606,10 @@ def _build_plan_conditions(
         if col:
             code = _name_to_code("culti_type", value)
             if code is not None:
-                conditions.append(f"{quote_identifier(col)} = %s")
+                conditions.append(f"{_qid(col)} = %s")
                 params.append(code)
             elif isinstance(value, (int, float)):
-                conditions.append(f"{quote_identifier(col)} = %s")
+                conditions.append(f"{_qid(col)} = %s")
                 params.append(int(value))
 
     value = filters.get("planting_method")
@@ -587,21 +618,21 @@ def _build_plan_conditions(
         if col:
             normalized = _normalize_plan_method_for_filter(value)
             if normalized:
-                conditions.append(f"{quote_identifier(col)} = %s")
+                conditions.append(f"{_qid(col)} = %s")
                 params.append(normalized)
 
     value = filters.get("sowing_date")
     if value:
         col = _resolve_column(columns, _PLAN_SOWING_DATE_COLUMNS)
         if col:
-            conditions.append(f"{quote_identifier(col)} = %s")
+            conditions.append(f"{_qid(col)} = %s")
             params.append(value)
 
     value = filters.get("transplant_date")
     if value:
         col = _resolve_column(columns, _PLAN_TRANSPLANT_DATE_COLUMNS)
         if col:
-            conditions.append(f"{quote_identifier(col)} = %s")
+            conditions.append(f"{_qid(col)} = %s")
             params.append(value)
 
     if not conditions:
@@ -629,15 +660,15 @@ def search_planting_plans(
             order_column = candidate
             break
 
-    sql = f"SELECT * FROM {quote_identifier(table)} WHERE " + " AND ".join(
+    sql = f"SELECT * FROM {_qid(table)} WHERE " + " AND ".join(
         conditions
     )
     if order_column:
-        sql += f" ORDER BY {quote_identifier(order_column)} DESC"
+        sql += f" ORDER BY {_qid(order_column)} DESC"
     sql += " LIMIT %s"
     params.append(max(1, int(limit)))
     try:
-        rows = fetch_all(url, sql, tuple(params))
+        rows = _fetch_all(url, sql, tuple(params))
     except Exception as exc:
         raise RuntimeError(f"种植计划查询失败: {exc}") from exc
     return rows or [], id_col, columns
@@ -664,17 +695,17 @@ def list_active_planting_plans(
             break
 
     sql = (
-        f"SELECT * FROM {quote_identifier(table)} "
-        f"WHERE {quote_identifier('is_active')} IS TRUE"
+        f"SELECT * FROM {_qid(table)} "
+        f"WHERE {_qid('is_active')} IS TRUE"
     )
     if order_column:
-        sql += f" ORDER BY {quote_identifier(order_column)} DESC"
+        sql += f" ORDER BY {_qid(order_column)} DESC"
     params: Tuple[object, ...] = ()
     if limit is not None:
         sql += " LIMIT %s"
         params = (max(1, int(limit)),)
     try:
-        rows = fetch_all(url, sql, params)
+        rows = _fetch_all(url, sql, params)
     except Exception as exc:
         raise RuntimeError(f"种植计划查询失败: {exc}") from exc
     return rows or [], id_col, columns
@@ -692,12 +723,12 @@ def _fetch_planting_plan_row_by_id(
     if not id_col:
         raise RuntimeError("种植计划表缺少 id/plan_id 字段。")
     sql = (
-        f"SELECT * FROM {quote_identifier(table)} "
-        f"WHERE {quote_identifier(id_col)} = %s "
+        f"SELECT * FROM {_qid(table)} "
+        f"WHERE {_qid(id_col)} = %s "
         "LIMIT 1"
     )
     try:
-        rows = fetch_all(url, sql, (plan_id,))
+        rows = _fetch_all(url, sql, (plan_id,))
     except Exception as exc:
         raise RuntimeError(f"种植计划查询失败: {exc}") from exc
     return (rows[0] if rows else {}), id_col, columns
@@ -728,13 +759,13 @@ def _fetch_growth_stage_rows_by_plan_id(
             break
 
     sql = (
-        f"SELECT * FROM {quote_identifier(table)} "
-        f"WHERE {quote_identifier(plan_id_col)} = %s"
+        f"SELECT * FROM {_qid(table)} "
+        f"WHERE {_qid(plan_id_col)} = %s"
     )
     if order_column:
-        sql += f" ORDER BY {quote_identifier(order_column)} DESC"
+        sql += f" ORDER BY {_qid(order_column)} DESC"
     try:
-        rows = fetch_all(url, sql, (plan_id,))
+        rows = _fetch_all(url, sql, (plan_id,))
     except Exception as exc:
         raise RuntimeError(f"生育期预测结果查询失败: {exc}") from exc
     return rows, columns

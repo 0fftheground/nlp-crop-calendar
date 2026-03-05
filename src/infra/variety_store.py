@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import get_config
+from .db_catalog import TABLE_KEY_VARIETY, resolve_db_table
 from .postgres import fetch_all, quote_identifier
 from .variety_db_schema import VARIETY_PG_NAME_COLUMN
 
 
 _TOKEN_SPLIT_RE = re.compile(r"[，,。；;、\s]+")
-_VARIETY_DB_TABLE = "variety_approvals"
 _VARIETY_QUERY_STOPWORDS = {
     "水稻",
     "小麦",
@@ -54,7 +54,7 @@ def _get_variety_db_url() -> Optional[str]:
 
 def _get_variety_db_table() -> str:
     cfg = get_config()
-    return cfg.variety_db_table or _VARIETY_DB_TABLE
+    return resolve_db_table(cfg, TABLE_KEY_VARIETY)
 
 
 def _require_db_url() -> str:
