@@ -39,6 +39,7 @@ class GraphState(TypedDict, total=False):
     options: List[str]
     pending_message: Optional[str]
     plant_season_id: Optional[object]
+    resolved_region_id: Optional[object]
     plan_id: Optional[object]
     plan_filters: Optional[Dict[str, object]]
     variety_candidates: List[str]

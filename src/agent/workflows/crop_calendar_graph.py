@@ -588,6 +588,8 @@ def _recommend_node(state: GraphState) -> GraphState:
     plan = plan_result["operation_plan"]
     growth_stage = plan_result["growth_stage"]
     plant_season_id = plan_result.get("plant_season_id")
+    resolved_region_id = plan_result.get("resolved_region_id")
+    should_ask_save = plant_season_id is not None and resolved_region_id is None
     raw_payload = plan_result.get("raw") or {}
     raw_data = raw_payload.get("data") if isinstance(raw_payload, dict) else {}
     farmworks_payload = (
@@ -616,7 +618,7 @@ def _recommend_node(state: GraphState) -> GraphState:
     growth_lines = _format_growth_stage_lines(growth_stage.stages)
     if growth_lines:
         message = f"{message}\n{growth_lines}"
-    if plant_season_id is not None:
+    if should_ask_save:
         message = f"{message}\n是否保存该方案？请回复“是/否”。"
     state = add_trace(state, "recommend complete")
     # 成功结果写入缓存，避免同一 planting 重复调用外部服务。
@@ -631,10 +633,10 @@ def _recommend_node(state: GraphState) -> GraphState:
     state = add_trace(state, "calendar_cached")
     state.update(
         build_workflow_followup_update(
-            missing_fields=["save_confirmation"] if plant_season_id is not None else [],
+            missing_fields=["save_confirmation"] if should_ask_save else [],
             pending_message=(
                 "是否保存该方案？请回复“是/否”。"
-                if plant_season_id is not None
+                if should_ask_save
                 else None
             ),
             options=[],
@@ -642,9 +644,11 @@ def _recommend_node(state: GraphState) -> GraphState:
                 "recommendations": recommendations,
                 "growth_stage": growth_stage,
                 "plant_season_id": plant_season_id,
+                "resolved_region_id": resolved_region_id,
                 "message": message,
                 "data": {
                     "plant_season_id": plant_season_id,
+                    "resolved_region_id": resolved_region_id,
                     "farmworks": farmworks_payload,
                     "growth_stages": growth_stages_payload,
                 },

@@ -10,7 +10,7 @@ This project requires a real OpenAI-compatible LLM API (no mock LLM).
 ## What It Does
 - Simple requests: planner picks a single tool (e.g. weather / variety)
 - Complex crop-calendar requests: LangGraph workflow runs fixed steps (extract planting info -> follow-up -> query services -> generate result)
-- Growth-stage queries: workflow resolves planting plan and reads prediction results from Postgres
+- Growth-stage queries: workflow resolves planting plan and growth-stage result through business APIs
 
 ## Main Components
 - `chainlit_app.py`: Chat frontend
@@ -19,6 +19,7 @@ This project requires a real OpenAI-compatible LLM API (no mock LLM).
 - `src/agent/intent_router.py`: Intent planning/routing
 - `src/agent/pending_manager.py`: Follow-up state management
 - `src/agent/plan_executor.py`: Tool/workflow execution
+- `src/agent/followup.py`: Shared follow-up contract/accessors/builders
 - `src/agent/workflows/`: Crop calendar / growth-stage workflows
 - `src/application/services/`: Business services
 - `src/agent/tools/`: Thin tool adapters
@@ -56,21 +57,21 @@ Common optional values:
 - `OPENAI_API_BASE` (OpenAI-compatible gateway/proxy base URL, usually ends with `/v1`)
 - `PUBLIC_BASE_URL`
 - `AMAP_API_KEY` (if using geocoding / weather flows that need it)
+- `BUSINESS_API_BASE_URL` / `BUSINESS_API_KEY` (required for planting plan / growth-stage / farm weather business APIs)
 
 Notes:
 - If `EXTRACTOR_API_KEY` is empty, extraction falls back to `OPENAI_API_KEY`.
 - `/health` does not perform a real LLM request; it only checks API status/config.
+- Current business-data access for planting plans, growth-stage results, and farm weather is API-first only; there is no DB fallback for those paths.
 
 ## DB Config Strategy
 
 Database table metadata is now managed centrally. Prefer:
 
-- `DB_TABLE_OVERRIDES` (JSON object):
-  - Example: `{"variety":"agri_rice_variety","weather":"agri_weather","growth_stage_forecast":"agri_growth_stage_forecast","planting_plan":"agri_plant_plan"}`
 - `DB_REGION_LOOKUP_CANDIDATES` (JSON array):
-  - Example: `[{"table":"agri_region","id_column":"region_id","name_column":"region_name"}]`
+  - Example: `[{"table":"public.agri_region","id_column":"id","name_column":"name"}]`
 
-Legacy env keys (such as `VARIETY_DB_TABLE`, `WEATHER_DB_TABLE`) are still supported as fallback, but no longer recommended for new deployments.
+Legacy env keys such as `VARIETY_DB_TABLE` are still supported as fallback, but no longer recommended for new deployments.
 
 ## Docker Deployment (Server)
 
@@ -121,6 +122,8 @@ More deployment details:
 ## Development Notes
 - Planner logic: `src/agent/planner.py`, `src/agent/router.py`
 - Workflow state/nodes: `src/agent/workflows/state.py`, `src/agent/workflows/*.py`
+- Follow-up state contract: `src/agent/followup.py` and `src/agent/pending_manager.py`
+  - Unified keys are `draft`, `options`, `missing_fields`, `followup_count`, `pending_message`
 - Prompts and user-facing workflow copy: `src/prompts/`
 - Infrastructure adapters (LLM, DB, cache, config): `src/infra/`
 

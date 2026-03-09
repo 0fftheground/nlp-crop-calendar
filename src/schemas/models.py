@@ -127,7 +127,7 @@ class WeatherQueryInput(BaseModel):
         default=None,
         min_length=1,
         max_length=64,
-        description="市级行政区或站点名称（已忽略，默认使用农场气象）。",
+        description="区域名称；weather_lookup 会先按区域表匹配 region_id，再调用天气接口。",
     )
     lat: Optional[float] = Field(
         default=None,

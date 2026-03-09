@@ -1,28 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping
+from typing import Iterable
 
 from .config import AppConfig
 
 
 TABLE_KEY_VARIETY = "variety"
-TABLE_KEY_WEATHER = "weather"
-TABLE_KEY_GROWTH_STAGE_FORECAST = "growth_stage_forecast"
-TABLE_KEY_PLANTING_PLAN = "planting_plan"
 
 DEFAULT_DB_TABLES: dict[str, str] = {
     TABLE_KEY_VARIETY: "agri_rice_variety",
-    TABLE_KEY_WEATHER: "agri_weather",
-    TABLE_KEY_GROWTH_STAGE_FORECAST: "agri_growth_stage_forecast",
-    TABLE_KEY_PLANTING_PLAN: "agri_plant_plan",
 }
 
 LEGACY_TABLE_FIELDS: dict[str, str] = {
     TABLE_KEY_VARIETY: "variety_db_table",
-    TABLE_KEY_WEATHER: "weather_db_table",
-    TABLE_KEY_GROWTH_STAGE_FORECAST: "growth_stage_db_table",
-    TABLE_KEY_PLANTING_PLAN: "planting_plan_db_table",
 }
 
 
@@ -34,7 +25,7 @@ class RegionLookupSource:
 
 
 DEFAULT_REGION_LOOKUP_SOURCES: tuple[RegionLookupSource, ...] = (
-    RegionLookupSource("agri_region", "region_id", "region_name"),
+    RegionLookupSource("public.agri_region", "id", "name"),
     RegionLookupSource("agri_region_dict", "region_id", "region_name"),
     RegionLookupSource("region_dict", "id", "name"),
     RegionLookupSource("sys_region", "id", "name"),
@@ -45,28 +36,10 @@ def _clean_text(value: object) -> str:
     return str(value or "").strip()
 
 
-def _normalize_table_overrides(
-    overrides: Mapping[str, object] | None,
-) -> dict[str, str]:
-    if not overrides:
-        return {}
-    normalized: dict[str, str] = {}
-    for key, value in overrides.items():
-        key_text = _clean_text(key).lower()
-        value_text = _clean_text(value)
-        if key_text and value_text:
-            normalized[key_text] = value_text
-    return normalized
-
-
 def resolve_db_table(config: AppConfig, key: str) -> str:
     key_text = _clean_text(key).lower()
     if not key_text:
         raise ValueError("table key is required")
-
-    overrides = _normalize_table_overrides(config.db_table_overrides)
-    if key_text in overrides:
-        return overrides[key_text]
 
     legacy_field = LEGACY_TABLE_FIELDS.get(key_text)
     if legacy_field:

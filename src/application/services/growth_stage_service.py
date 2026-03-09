@@ -686,7 +686,7 @@ def query_growth_stage_from_plan_id(plan_id: object) -> GrowthStageResult:
     return _query_growth_stage_from_plan_id_api(plan_id)
 
 
-def query_growth_stage_from_db(
+def query_growth_stage_from_planting(
     input: PredictGrowthStageInput,
 ) -> GrowthStageResult:
     filters = _build_plan_filters(input.planting)

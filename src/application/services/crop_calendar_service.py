@@ -6,7 +6,7 @@ import re
 from datetime import date, datetime, time, timedelta
 from typing import Callable, Dict, List, Optional, TypedDict
 
-from .growth_stage_service import query_growth_stage_from_db
+from .growth_stage_service import query_growth_stage_from_planting
 from ..adapters import (
     DEFAULT_CONFIG_ADAPTER,
     DEFAULT_HTTP_ADAPTER,
@@ -97,6 +97,7 @@ class CropCalendarPlanResult(TypedDict):
     operation_plan: OperationPlanResult
     growth_stage: GrowthStageResult
     plant_season_id: Optional[object]
+    resolved_region_id: Optional[object]
     raw: Dict[str, object]
 
 
@@ -174,7 +175,7 @@ def query_growth_stage(
             source="synthetic",
         )
     request = PredictGrowthStageInput(planting=planting, weatherSeries=weather_series)
-    return query_growth_stage_from_db(request)
+    return query_growth_stage_from_planting(request)
 
 
 def build_operation_plan(
@@ -656,7 +657,7 @@ def _coerce_operation_items(payload: object) -> List[OperationItem]:
 
 def _build_crop_calendar_payload(
     planting: PlantingDetails,
-) -> Dict[str, object]:
+) -> tuple[Dict[str, object], Optional[object]]:
     cfg = _cfg()
     region_raw = planting.region_id
     resolved_region_id = _resolve_region_id_for_payload(region_raw)
@@ -699,7 +700,7 @@ def _build_crop_calendar_payload(
         payload["region_id"] = resolved_region_id
     elif farm_id is not None:
         payload["farm_id"] = farm_id
-    return payload
+    return payload, resolved_region_id
 
 
 def _build_growth_stage_result(
@@ -792,7 +793,7 @@ def request_crop_calendar_plan(
         return _mock_crop_calendar_plan(planting)
     if not cfg.crop_calendar_api_url:
         raise RuntimeError("缺少 CROP_CALENDAR_API_URL，无法调用外部计算接口。")
-    payload = _build_crop_calendar_payload(planting)
+    payload, resolved_region_id = _build_crop_calendar_payload(planting)
     log_event(
         "crop_calendar_api_request",
         url=cfg.crop_calendar_api_url,
@@ -879,6 +880,7 @@ def request_crop_calendar_plan(
         "operation_plan": operation_plan,
         "growth_stage": growth_stage,
         "plant_season_id": plant_season_id,
+        "resolved_region_id": resolved_region_id,
         "raw": raw,
     }
 

@@ -31,7 +31,7 @@ def _to_json_payload(model: BaseModel) -> str:
 
 
 WEATHER_FIELD_LABELS = {
-    "region": "地区(已忽略，默认农场)",
+    "region": "地区",
     "lat": "纬度",
     "lon": "经度",
     "start_date": "起始日期(YYYY-MM-DD)",

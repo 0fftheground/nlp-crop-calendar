@@ -9,7 +9,7 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 3. **Planner Router (`src/agent/router.py`)** calls the LLM planner to choose tool/workflow/none, then executes and persists follow-up state by `session_id`.
 4. **LangGraph (`src/agent/workflows/crop_calendar_graph.py`/`src/agent/workflows/growth_stage_graph.py`)**
    - The crop calendar workflow implements extraction -> follow-up -> external crop calendar API -> recommendation output.
-   - The growth-stage workflow implements extraction -> follow-up -> DB lookup (plant plan + forecast) -> response formatting.
+   - The growth-stage workflow implements extraction -> follow-up -> business API lookup (planting plan + growth-stage result) -> response formatting.
    - Extraction uses an LLM (structured output) with heuristic fallback; missing fields are asked up to 2 times, and any remaining fields are filled with defaults.
    - Crop calendar recommendations are generated via the external crop calendar API when configured; weather/variety tools are used for their standalone queries.
 
@@ -32,6 +32,7 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 - `src/agent/router.py` - Orchestrator that composes intent routing, pending management, and execution.
 - `src/agent/intent_router.py` - Intent planning/routing (rules/fast path/LLM planner).
 - `src/agent/pending_manager.py` - Pending follow-up state lifecycle.
+- `src/agent/followup.py` - Shared follow-up contract, accessors, renderers, and payload builders.
 - `src/agent/plan_executor.py` - Tool/workflow execution and validation path.
 - `src/application/services/*` - Application-layer services (variety/weather/recommendation/crop calendar/planting extraction) used by tools and workflows.
 - `src/application/ports.py` / `src/application/adapters.py` - App-level Port/Adapter boundary for config/sql/http dependencies.
@@ -39,16 +40,64 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 - `src/agent/workflows/state.py` / `crop_calendar_graph.py` / `growth_stage_graph.py` - LangGraph state definition and workflow implementation.
 - `src/api/server.py` - FastAPI routes and dependency cache.
 - `chainlit_app.py` - UI client.
-- 品种与生育期预测数据通过 Postgres 读取（`AGRI_DB_URL`，或由 `AGRI_DB_HOST/PORT/NAME/USER/PASSWORD/SSLMODE` 拼接）。
+- 品种与区域辅助查询仍可通过 Postgres 读取（`AGRI_DB_URL`，或由 `AGRI_DB_HOST/PORT/NAME/USER/PASSWORD/SSLMODE` 拼接）；种植计划、生育期结果、农场天气业务数据改由 HTTP business API 获取。
+
+## Agent Module Map
+- `src/agent/router.py`
+  - Top-level request entry for the agent layer.
+  - Wires together rule engine, fast intent, LLM planner, pending manager, and executor.
+- `src/agent/intent_router.py`
+  - Decision layer for intent routing.
+  - Combines rule hits, fast-intent results, planner output, and a small in-memory cache.
+- `src/agent/intent_rules.py`
+  - Rule-engine implementation for `resources/intent_rules.json`.
+  - Supports `priority`, `any`, `all`, `regex`, `negative`, and hot-reload by file mtime.
+- `src/agent/fast_intent.py`
+  - Lightweight intent classifier used as a high-confidence fast path before the full planner.
+  - Returns `tool/workflow/none` plus confidence and optional structured input.
+- `src/agent/planner.py`
+  - Main LLM planner.
+  - Builds the full routing prompt from tool/workflow specs and pending summary, and normalizes model output into `ActionPlan`.
+- `src/agent/input_specs.py`
+  - Canonical input-schema registry for tools and workflows.
+  - Defines which Pydantic model each action uses, required fields, field labels, and how validated input is converted back into prompt/json payloads.
+- `src/agent/pending_manager.py`
+  - Persistence-facing lifecycle manager for follow-up state.
+  - Decides whether a user turn should resume pending work or start a new topic.
+- `src/agent/followup.py`
+  - Shared protocol layer for follow-up payloads.
+  - Centralizes accessors, option parsing, message rendering, pending summaries, and builder helpers for tool/workflow follow-up state.
+- `src/agent/plan_executor.py`
+  - Executes the selected action after routing.
+  - Applies input validation, resumes pending tool/workflow runs, and invokes the concrete tool or LangGraph workflow.
+- `src/agent/tools/registry.py`
+  - Tool registration, dispatch, tracing, and cache interaction.
+  - Hides follow-up tool responses from tool-result cache reuse.
+- `src/agent/tools/weather.py`, `src/agent/tools/variety.py`, `src/agent/tools/plant_plan.py`, `src/agent/tools/memory.py`
+  - Thin adapters around application services.
+  - Keep tool-layer logic minimal and return canonical `ToolInvocation`.
+- `src/agent/workflows/state.py`
+  - Shared LangGraph state contract.
+- `src/agent/workflows/common.py`
+  - Workflow-shared helpers such as draft coercion, fallback planting defaults, and LLM extraction wrapper functions.
+- `src/agent/workflows/crop_calendar_graph.py`
+  - Main crop-calendar workflow graph.
+- `src/agent/workflows/growth_stage_graph.py`
+  - Growth-stage query workflow graph.
+- `src/agent/workflows/registry.py`
+  - Workflow registration/lookup used by the router/executor layer.
 
 ## LangGraph Details
 - `StateGraph` is the orchestration skeleton; crop calendar uses `extract`/`ask`/`context`/`recommend`, growth-stage uses `extract`/`ask`/`predict`.
-- `GraphState` key fields: `planting_draft`, `missing_fields`, `followup_count`, `weather_info`, `variety_info`, `recommendation_info`.
+- `GraphState` key fields: `draft`, `options`, `missing_fields`, `followup_count`, `weather_info`, `variety_info`, `recommendation_info`.
 - Follow-up logic: if missing fields exist, go to `ask`; user replies are merged with the existing draft, up to two rounds; remaining missing fields are filled with defaults before entering `context`.
+- Follow-up state contract is unified across tools and workflows:
+  - canonical keys are `draft`, `options`, `missing_fields`, `followup_count`, `pending_message`
+  - `PendingManager`, planner summaries, tool cache skip-rules, and workflow ask nodes all consume that shared contract via `src/agent/followup.py`
 - Crop calendar workflow has cache hooks keyed by `PlantingDetails` (currently disabled via `tool_cache`).
 
 Growth-stage workflow specifics:
-- Parses user variety/plan info, queries `agri_plant_plan`; if multiple matches, asks the user to pick one, then reads `agri_growth_stage_forecast`.
+- Parses user variety/plan info, queries business APIs for planting plans; if multiple matches, asks the user to pick one, then fetches the growth-stage result API by `plan_id`.
 - Maps `sowing_method` / `culti_type` / `stage_name` via `agri_code_dict` categories (`sowingmtd` / `culti_type` / `growth_stage`).
 
 ## Routing Logic
@@ -63,10 +112,12 @@ Growth-stage workflow specifics:
 ## Config Governance
 - Environment-level config (DB URL/API keys/providers) stays in `.env`/`AppConfig`.
 - DB object metadata (table names/region lookup sources) is centrally resolved by `src/infra/db_catalog.py`.
-- Preferred env overrides are JSON-based:
-  - `DB_TABLE_OVERRIDES`
-  - `DB_REGION_LOOKUP_CANDIDATES`
-- Legacy table keys remain backward-compatible fallbacks.
+- Business API endpoints for planting plans / growth-stage / farm weather are configured via:
+  - `BUSINESS_API_BASE_URL`
+  - `BUSINESS_API_KEY`
+  - optional explicit endpoint overrides such as `PLANTING_PLAN_SEARCH_API_URL`, `PLANTING_PLAN_ACTIVE_API_URL`, `PLANTING_PLAN_DETAIL_API_URL`, `FARM_WEATHER_API_URL`
+- Region lookup sources can be configured via `DB_REGION_LOOKUP_CANDIDATES`.
+- Legacy table fallback currently only remains for `VARIETY_DB_TABLE`.
 
 ## Crop Calendar Workflow (Current)
 `src/agent/workflows/crop_calendar_graph.py` is the active main flow, replacing the earlier monolithic pipeline:
@@ -79,6 +130,7 @@ Growth-stage workflow specifics:
 
 ## Tool Notes
 - Tools/services support `mock`/`local` providers; variety lookup reads Postgres via `AGRI_DB_URL` when `VARIETY_PROVIDER=local`. Weather can use `WEATHER_PROVIDER=91weather` for external forecasts.
+- Planting plan search, growth-stage result lookup, and farm weather business-data access now use HTTP business APIs only; those paths no longer keep DB fallback branches.
 - Tool cache is currently disabled (no-op implementation).
 - Variety matching strategy: first recall all approval records by variety name, score using user location and "approval region/suitable region" rules; if multiple high-score records exist, an LLM chooses the best.
  - Historical weather data is fetched via `goso_day` inside the crop calendar workflow.

@@ -473,9 +473,9 @@ def _growth_predict_node(state: GraphState) -> GraphState:
     try:
         result = query_growth_stage_from_plan_id(plan_id)
         provider_response = result.model_dump(mode="json")
-        state = add_trace(state, "growth_stage_db ok")
+        state = add_trace(state, "growth_stage_api ok")
     except Exception as exc:
-        state = add_trace(state, f"growth_stage_db failed={exc}")
+        state = add_trace(state, f"growth_stage_api failed={exc}")
         trace = list(state.get("trace") or [])
         workflow_payload["trace"] = trace
         state.update(
