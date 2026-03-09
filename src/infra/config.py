@@ -60,6 +60,24 @@ class AppConfig(BaseSettings):
     default_farm_id: Optional[str] = Field(
         default=None, validation_alias="DEFAULT_FARM_ID"
     )
+    business_api_base_url: Optional[str] = Field(
+        default=None, validation_alias="BUSINESS_API_BASE_URL"
+    )
+    business_api_key: Optional[str] = Field(
+        default=None, validation_alias="BUSINESS_API_KEY"
+    )
+    planting_plan_search_api_url: Optional[str] = Field(
+        default=None, validation_alias="PLANTING_PLAN_SEARCH_API_URL"
+    )
+    planting_plan_active_api_url: Optional[str] = Field(
+        default=None, validation_alias="PLANTING_PLAN_ACTIVE_API_URL"
+    )
+    planting_plan_detail_api_url: Optional[str] = Field(
+        default=None, validation_alias="PLANTING_PLAN_DETAIL_API_URL"
+    )
+    farm_weather_api_url: Optional[str] = Field(
+        default=None, validation_alias="FARM_WEATHER_API_URL"
+    )
     variety_provider: str = Field(
         default="local", validation_alias="VARIETY_PROVIDER"
     )

@@ -322,28 +322,11 @@ class PlanExecutor:
     ) -> WorkflowResponse:
         initial_state = {"user_prompt": prompt, "trace": [], "user_id": memory_id}
         pending = self._pending_manager.get(session_id)
-        if pending and pending.get("workflow_name") == workflow_name:
-            initial_state.update(
-                {
-                    "planting_draft": pending.get("planting_draft"),
-                    "missing_fields": pending.get("missing_fields"),
-                    "followup_count": pending.get("followup_count", 0),
-                    "pending_options": pending.get("options") or [],
-                    "pending_message": pending.get("pending_message"),
-                    "future_sowing_date_warning": pending.get(
-                        "future_sowing_date_warning", False
-                    ),
-                    "plant_season_id": pending.get("plant_season_id"),
-                    "variety_tool_query": pending.get("variety_tool_query"),
-                    "variety_tool_draft": pending.get("variety_tool_draft"),
-                    "variety_tool_missing_fields": pending.get(
-                        "variety_tool_missing_fields"
-                    ),
-                    "variety_tool_followup_count": pending.get(
-                        "variety_tool_followup_count", 0
-                    ),
-                }
+        initial_state.update(
+            self._pending_manager.build_workflow_resume_state(
+                pending, workflow_name
             )
+        )
         span_attrs = {"workflow.name": workflow_name}
         span_attrs.update(
             build_span_attributes(
@@ -394,17 +377,11 @@ class PlanExecutor:
                 message=TOOL_FOLLOWUP_MISSING_NAME_MESSAGE,
                 data={},
             )
-        followup_payload = {
-            "user_id": memory_id,
-            "query": pending.get("query"),
-            "followup": {
-                "prompt": prompt,
-                "draft": pending.get("draft") or {},
-                "missing_fields": pending.get("missing_fields") or [],
-                "followup_count": pending.get("followup_count", 0),
-            },
-        }
-        followup_prompt = json.dumps(followup_payload, ensure_ascii=False, default=str)
+        followup_prompt = self._pending_manager.build_tool_followup_prompt(
+            prompt=prompt,
+            pending=pending,
+            memory_id=memory_id,
+        )
         result = execute_tool_fn(tool_name, followup_prompt)
         if not result:
             self._pending_manager.delete(session_id)

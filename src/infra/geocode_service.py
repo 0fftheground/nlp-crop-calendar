@@ -94,14 +94,3 @@ def geocode_with_amap(address: str, *, raw_region: Optional[str] = None) -> Opti
     }
     set_geocode_cached(address, None, result)
     return result
-
-
-def annotate_geocode_gdd_region(address: str, gdd_region: str) -> None:
-    if not address or not gdd_region:
-        return
-    cached = get_geocode_cached(address)
-    if not cached:
-        return
-    updated = dict(cached)
-    updated["gdd_region"] = gdd_region
-    set_geocode_cached(address, None, updated)

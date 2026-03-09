@@ -12,6 +12,7 @@ from ...application.services.growth_stage_service import (
     extract_plan_name_from_row,
     list_active_planting_plans,
 )
+from ..followup import build_tool_followup_invocation
 from ...schemas.models import ToolInvocation
 from .registry import auto_register_tool
 
@@ -36,6 +37,7 @@ def _parse_payload(prompt: str) -> Optional[Dict[str, Any]]:
 
 
 def _extract_plan_id(prompt: str) -> Optional[str]:
+    """优先从 JSON payload 取计划 ID，失败后再回退到文本正则提取。"""
     if not prompt:
         return None
     payload = _parse_payload(prompt)
@@ -61,6 +63,7 @@ def _extract_plan_id(prompt: str) -> Optional[str]:
     description="查询全部启用的种植计划（is_active=true）。",
 )
 def plant_plan_list_active(prompt: str) -> ToolInvocation:
+    """列出当前启用计划，并附带前 5 条可读预览供人工核查。"""
     _ = prompt
     rows, id_col, columns = list_active_planting_plans(limit=None)
     plans: List[Dict[str, object]] = []
@@ -131,16 +134,15 @@ def plant_plan_list_active(prompt: str) -> ToolInvocation:
     description="删除种植计划。需要提供 plant_season_id。",
 )
 def plant_plan_delete(prompt: str) -> ToolInvocation:
+    """删除指定计划；缺少 plan_id 时返回追问态而不是直接报错。"""
     plan_id = _extract_plan_id(prompt)
     if not plan_id:
-        return ToolInvocation(
+        return build_tool_followup_invocation(
             name="plant_plan_delete",
             message="请提供要删除的 plant_season_id。",
-            data={
-                "missing_fields": ["plant_season_id"],
-                "draft": {"plant_season_id": None},
-                "query": prompt,
-            },
+            missing_fields=["plant_season_id"],
+            draft={"plant_season_id": None},
+            query=prompt,
         )
     try:
         response = delete_crop_calendar_plan(plan_id)

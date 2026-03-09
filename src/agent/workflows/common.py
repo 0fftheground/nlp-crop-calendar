@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from ...infra.llm_extract import llm_structured_extract
 from ...prompts.planting_extract import build_planting_extract_prompt
-from ...schemas import PlantingDetails, PlantingDetailsDraft, WeatherSeries
+from ...schemas import PlantingDetails, PlantingDetailsDraft
 
 
 UNKNOWN_MARKERS = ["不知道", "不清楚", "不确定", "记不清", "不记得", "忘了"]
@@ -56,40 +56,6 @@ def coerce_planting_draft(value: object) -> Optional[PlantingDetailsDraft]:
             except Exception:
                 return None
     return None
-
-
-def coerce_weather_series(
-    data: Dict[str, object], *, region: str, source: str = "workflow"
-) -> WeatherSeries:
-    if data:
-        try:
-            return WeatherSeries.model_validate(data)
-        except Exception:
-            pass
-    return WeatherSeries(
-        region=region or "unknown",
-        granularity="daily",
-        start_date=None,
-        end_date=None,
-        points=[],
-        source=source,
-    )
-
-
-def summarize_weather_series(weather_series: WeatherSeries) -> Dict[str, object]:
-    return {
-        "region": weather_series.region,
-        "start_date": (
-            weather_series.start_date.isoformat()
-            if weather_series.start_date
-            else None
-        ),
-        "end_date": (
-            weather_series.end_date.isoformat() if weather_series.end_date else None
-        ),
-        "points": len(weather_series.points),
-        "source": weather_series.source,
-    }
 
 
 def infer_unknown_fields(

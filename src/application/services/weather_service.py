@@ -10,10 +10,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ..adapters import (
     DEFAULT_CONFIG_ADAPTER,
     DEFAULT_HTTP_ADAPTER,
-    DEFAULT_SQL_ADAPTER,
 )
-from ..ports import ConfigPort, HttpPort, SqlPort
-from ...infra.db_catalog import TABLE_KEY_WEATHER, resolve_db_table
+from ..ports import ConfigPort, HttpPort
+from ...agent.followup import build_tool_followup_invocation
 from ...infra.llm import get_chat_model
 from ...observability.llm_usage import (
     apply_span_attributes,
@@ -30,35 +29,23 @@ from ...schemas.models import (
 
 
 _CONFIG_PORT: ConfigPort = DEFAULT_CONFIG_ADAPTER
-_SQL_PORT: SqlPort = DEFAULT_SQL_ADAPTER
 _HTTP_PORT: HttpPort = DEFAULT_HTTP_ADAPTER
 
 
 def configure_weather_ports(
     *,
     config_port: Optional[ConfigPort] = None,
-    sql_port: Optional[SqlPort] = None,
     http_port: Optional[HttpPort] = None,
 ) -> None:
-    global _CONFIG_PORT, _SQL_PORT, _HTTP_PORT
+    global _CONFIG_PORT, _HTTP_PORT
     if config_port is not None:
         _CONFIG_PORT = config_port
-    if sql_port is not None:
-        _SQL_PORT = sql_port
     if http_port is not None:
         _HTTP_PORT = http_port
 
 
 def _cfg():
     return _CONFIG_PORT.get()
-
-
-def _fetch_all(url: str, sql: str, params: tuple[object, ...] = ()) -> list[dict]:
-    return _SQL_PORT.fetch_all(url, sql, params)
-
-
-def _qid(name: str) -> str:
-    return _SQL_PORT.quote_identifier(name)
 
 
 def _get_http(
@@ -74,6 +61,15 @@ def _get_http(
         headers=headers,
         timeout=timeout,
     )
+
+
+def _build_api_headers(*, api_key: Optional[str] = None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    token = str(api_key or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-API-KEY"] = token
+    return headers
 
 
 def _parse_year(value: object) -> Optional[int]:
@@ -467,14 +463,11 @@ def _build_lat_lon_followup(query: Optional[WeatherQueryInput]) -> ToolInvocatio
     draft: Dict[str, object] = {}
     if query:
         draft = query.model_dump(mode="json")
-    return ToolInvocation(
+    return build_tool_followup_invocation(
         name="weather_lookup",
         message="需要经纬度才能调用外部气象接口，请补充纬度(lat)与经度(lon)。",
-        data={
-            "missing_fields": ["lat", "lon"],
-            "draft": draft,
-            "followup_count": 0,
-        },
+        missing_fields=["lat", "lon"],
+        draft=draft,
     )
 
 
@@ -585,14 +578,12 @@ def _build_date_followup(
         draft["start_date"] = start_date.isoformat()
     if end_date:
         draft["end_date"] = end_date.isoformat()
-    return ToolInvocation(
+    return build_tool_followup_invocation(
         name="weather_lookup",
         message="需要提供起始日期和结束日期（YYYY-MM-DD），且最多 30 天。",
-        data={
-            "missing_fields": ["start_date", "end_date"],
-            "draft": draft,
-            "followup_count": 0,
-        },
+        missing_fields=["start_date", "end_date"],
+        draft=draft,
+        query=prompt,
     )
 
 
@@ -716,52 +707,6 @@ def lookup_goso_weather(
     )
 
 
-def _require_db_url() -> str:
-    cfg = _cfg()
-    if not cfg.agri_db_url:
-        raise RuntimeError("缺少 AGRI_DB_URL，无法读取气象数据。")
-    return cfg.agri_db_url
-
-
-def _get_weather_table() -> str:
-    return resolve_db_table(_cfg(), TABLE_KEY_WEATHER)
-
-
-def _normalize_weather_date(value: object) -> Optional[date]:
-    if value is None:
-        return None
-    if isinstance(value, date):
-        return value
-    if isinstance(value, datetime):
-        return value.date()
-    text = str(value).strip()
-    if not text:
-        return None
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-def _query_farm_weather_rows(
-    farm_id: str, start_date: date, end_date: date
-) -> List[Dict[str, object]]:
-    url = _require_db_url()
-    table = _qid(_get_weather_table())
-    col_date = _qid("date")
-    col_farm = _qid("farm_id")
-    sql = (
-        f"SELECT {col_date} AS date, "
-        "tmax, tmin, tavg, wins, pre, rh "
-        f"FROM {table} "
-        f"WHERE {col_farm} = %s AND {col_date} >= %s AND {col_date} <= %s "
-        f"ORDER BY {col_date} ASC"
-    )
-    return _fetch_all(url, sql, (farm_id, start_date, end_date))
-
-
 def _build_series_from_rows(
     farm_id: str,
     rows: List[Dict[str, object]],
@@ -772,7 +717,7 @@ def _build_series_from_rows(
         return None
     points: List[WeatherDataPoint] = []
     for row in rows:
-        day = _normalize_weather_date(row.get("date"))
+        day = _parse_forecast_date(row.get("date"))
         if day is None:
             continue
         points.append(
@@ -801,6 +746,72 @@ def _build_series_from_rows(
     )
 
 
+def _get_farm_weather_api_url() -> Optional[str]:
+    cfg = _cfg()
+    raw = getattr(cfg, "farm_weather_api_url", None)
+    if raw:
+        return str(raw).strip()
+    base = str(getattr(cfg, "business_api_base_url", None) or "").strip().rstrip("/")
+    if not base:
+        return None
+    return f"{base}/weather/farm"
+
+
+def _lookup_farm_weather_by_api(
+    *,
+    farm_id: str,
+    start_date: date,
+    end_date: date,
+    region: Optional[str] = None,
+) -> Optional[WeatherSeries]:
+    cfg = _cfg()
+    url = _get_farm_weather_api_url()
+    if not url:
+        raise RuntimeError("缺少农场天气接口地址。")
+    params: dict[str, object] = {
+        "farm_id": farm_id,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+    }
+    if region:
+        text = str(region).strip()
+        if text:
+            params["region_id"] = text
+    response = _get_http(
+        url,
+        params=params,
+        headers=_build_api_headers(
+            api_key=getattr(cfg, "weather_api_key", None)
+            or getattr(cfg, "business_api_key", None)
+        ),
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("农场天气接口返回格式未识别。")
+    code = str(payload.get("code", "")).strip()
+    if code and code != "0":
+        raise RuntimeError(str(payload.get("msg") or "农场天气接口返回失败。"))
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    api_farm_id = data.get("farm_id")
+    points = data.get("points")
+    if not isinstance(points, list):
+        return None
+    rows = []
+    for item in points:
+        if not isinstance(item, dict):
+            continue
+        rows.append(dict(item))
+    farm_label = str(api_farm_id if api_farm_id is not None else farm_id)
+    series = _build_series_from_rows(farm_label, rows, region=region)
+    if series is None:
+        return None
+    return series.model_copy(update={"source": "business_api"})
+
+
 def lookup_farm_weather_by_user(
     *,
     user_id: Optional[str],
@@ -808,9 +819,22 @@ def lookup_farm_weather_by_user(
     end_date: date,
     region: Optional[str] = None,
 ) -> ToolInvocation:
-    farm_id = "1"
-    rows = _query_farm_weather_rows(farm_id, start_date, end_date)
-    series = _build_series_from_rows(farm_id, rows, region=region)
+    del user_id
+    cfg = _cfg()
+    farm_id = str(getattr(cfg, "default_farm_id", None) or "1").strip() or "1"
+    try:
+        series = _lookup_farm_weather_by_api(
+            farm_id=farm_id,
+            start_date=start_date,
+            end_date=end_date,
+            region=region,
+        )
+    except Exception as exc:
+        return ToolInvocation(
+            name="growth_weather_lookup",
+            message=f"查询农场气象数据失败: {exc}",
+            data={},
+        )
     if not series:
         return ToolInvocation(
             name="growth_weather_lookup",

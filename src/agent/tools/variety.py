@@ -15,6 +15,7 @@ from .registry import auto_register_tool, _get_cached_tool_result, _store_tool_r
     ),
 )
 def variety_lookup(prompt: str) -> ToolInvocation:
+    """先按 provider+prompt 查缓存，未命中时再查品种服务。"""
     cfg = get_config()
     provider = normalize_provider(cfg.variety_provider)
     cached = _get_cached_tool_result("variety_lookup", provider, prompt)

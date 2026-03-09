@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ..adapters import DEFAULT_CONFIG_ADAPTER, DEFAULT_SQL_ADAPTER
 from ..ports import ConfigPort, SqlPort
+from ...agent.followup import build_tool_followup_invocation, get_followup_draft
 from ...domain.planting import DEFAULT_CROP
 from ...infra.db_catalog import TABLE_KEY_VARIETY, resolve_db_table
 from ...infra.llm import get_chat_model
@@ -114,7 +115,7 @@ def _extract_query_source(prompt: str) -> str:
                 return value.strip()
         followup = payload.get("followup")
         if isinstance(followup, dict):
-            draft = followup.get("draft")
+            draft = get_followup_draft(followup)
             if isinstance(draft, dict):
                 for key in ("query", "prompt"):
                     value = draft.get(key)
@@ -197,7 +198,7 @@ def _normalize_variety_prompt(prompt: str) -> str:
             value = followup.get("prompt")
             if isinstance(value, str) and value.strip():
                 candidates.append(value.strip())
-        draft = followup.get("draft")
+        draft = get_followup_draft(followup)
         if isinstance(draft, dict):
             for key in ("variety", "crop", "query", "prompt"):
                 value = draft.get(key)
@@ -263,7 +264,7 @@ def _resolve_followup_candidate(payload: dict) -> Optional[str]:
     answer = followup.get("prompt")
     if not isinstance(answer, str):
         return None
-    draft = followup.get("draft")
+    draft = get_followup_draft(followup)
     if not isinstance(draft, dict):
         return None
     candidates = draft.get("candidates") or draft.get("variety_candidates")
@@ -328,7 +329,7 @@ def _extract_region_hint(prompt: str) -> Optional[str]:
             return value.strip()
     followup = payload.get("followup")
     if isinstance(followup, dict):
-        draft = followup.get("draft")
+        draft = get_followup_draft(followup)
         if isinstance(draft, dict):
             value = draft.get("region")
             if isinstance(value, str) and value.strip():
@@ -346,7 +347,7 @@ def _resolve_followup_record(payload: dict) -> Optional[int]:
     answer = answer.strip()
     if not answer:
         return None
-    draft = followup.get("draft")
+    draft = get_followup_draft(followup)
     if not isinstance(draft, dict):
         return None
     record_candidates = draft.get("record_candidates")
@@ -393,21 +394,20 @@ def _build_region_followup(
         f"{options}\n"
         "回复序号/区域名称，或回复“全部”查看所有区域。"
     )
-    return ToolInvocation(
+    return build_tool_followup_invocation(
         name="variety_lookup",
         message=message,
-        data={
-            "query": query,
+        missing_fields=["approval_region"],
+        draft={
             "variety": variety,
             "region_candidates": region_candidates,
-            "missing_fields": ["approval_region"],
-            "draft": {
-                "variety": variety,
-                "region_candidates": region_candidates,
-                "query": query,
-            },
-            "followup_count": 0,
-            "source": "candidate",
+            "query": query,
+        },
+        query=query,
+        source="candidate",
+        extra={
+            "variety": variety,
+            "region_candidates": region_candidates,
         },
     )
 
@@ -444,25 +444,24 @@ def _build_record_followup(
         f"{options}\n"
         "回复序号确认要使用的审定记录。"
     )
-    return ToolInvocation(
+    return build_tool_followup_invocation(
         name="variety_lookup",
         message=message,
-        data={
+        missing_fields=["approval_record"],
+        draft={
+            "variety": variety,
+            "record_candidates": record_candidates,
+            "records": records,
+            "raw_records": raw_records,
             "query": prompt,
+        },
+        query=prompt,
+        source="record_selection",
+        extra={
             "variety": variety,
             "record_candidates": record_candidates,
             "matches": records,
             "raw_matches": raw_records,
-            "missing_fields": ["approval_record"],
-            "draft": {
-                "variety": variety,
-                "record_candidates": record_candidates,
-                "records": records,
-                "raw_records": raw_records,
-                "query": prompt,
-            },
-            "followup_count": 0,
-            "source": "record_selection",
         },
     )
 
@@ -647,7 +646,7 @@ def _is_region_followup(payload: Optional[dict]) -> bool:
     followup = payload.get("followup")
     if not isinstance(followup, dict):
         return False
-    draft = followup.get("draft")
+    draft = get_followup_draft(followup)
     if not isinstance(draft, dict):
         return False
     return bool(draft.get("region_candidates"))
@@ -659,7 +658,7 @@ def _is_record_followup(payload: Optional[dict]) -> bool:
     followup = payload.get("followup")
     if not isinstance(followup, dict):
         return False
-    draft = followup.get("draft")
+    draft = get_followup_draft(followup)
     if not isinstance(draft, dict):
         return False
     return bool(draft.get("record_candidates"))
@@ -920,7 +919,7 @@ def lookup_variety(prompt: str) -> ToolInvocation:
         )
         if is_record_followup and isinstance(payload_data, dict):
             followup = payload_data.get("followup")
-            draft = followup.get("draft") if isinstance(followup, dict) else {}
+            draft = get_followup_draft(followup) or {}
             if not isinstance(draft, dict):
                 draft = {}
             record_index = _resolve_followup_record(payload_data)
@@ -1211,17 +1210,14 @@ def _build_variety_followup(prompt: str) -> Optional[ToolInvocation]:
         f"{options}\n"
         "请回复序号或品种名称。"
     )
-    return ToolInvocation(
+    return build_tool_followup_invocation(
         name="variety_lookup",
         message=message,
-        data={
-            "query": normalized_prompt,
-            "candidates": candidates,
-            "missing_fields": ["variety"],
-            "draft": {"candidates": candidates},
-            "followup_count": 0,
-            "source": "candidate",
-        },
+        missing_fields=["variety"],
+        draft={"candidates": candidates},
+        query=normalized_prompt,
+        source="candidate",
+        extra={"candidates": candidates},
     )
 
 
@@ -1239,31 +1235,25 @@ def _build_variety_followup_with_candidates(
         f"{options}\n"
         "请回复序号或品种名称。"
     )
-    return ToolInvocation(
+    return build_tool_followup_invocation(
         name="variety_lookup",
         message=message,
-        data={
-            "query": query,
-            "candidates": cleaned,
-            "missing_fields": ["variety"],
-            "draft": {"candidates": cleaned},
-            "followup_count": 0,
-            "source": "candidate",
-        },
+        missing_fields=["variety"],
+        draft={"candidates": cleaned},
+        query=query,
+        source="candidate",
+        extra={"candidates": cleaned},
     )
 
 
 def _build_variety_open_followup(prompt: str) -> ToolInvocation:
     normalized_prompt = _normalize_variety_prompt(prompt) or prompt
     message = "未找到完全匹配的品种，请补充完整品种名称。"
-    return ToolInvocation(
+    return build_tool_followup_invocation(
         name="variety_lookup",
         message=message,
-        data={
-            "query": normalized_prompt,
-            "missing_fields": ["variety"],
-            "draft": {"query": normalized_prompt},
-            "followup_count": 0,
-            "source": "candidate",
-        },
+        missing_fields=["variety"],
+        draft={"query": normalized_prompt},
+        query=normalized_prompt,
+        source="candidate",
     )

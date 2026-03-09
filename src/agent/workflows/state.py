@@ -22,7 +22,7 @@ class GraphState(TypedDict, total=False):
     user_id: str
     user_prompt: str
     trace: List[str]
-    planting_draft: PlantingDetailsDraft
+    draft: PlantingDetailsDraft
     planting: PlantingDetails
     missing_fields: List[str]
     followup_count: int
@@ -36,7 +36,7 @@ class GraphState(TypedDict, total=False):
     recommendations: List[Recommendation]
     message: str
     data: Dict[str, object]
-    pending_options: List[str]
+    options: List[str]
     pending_message: Optional[str]
     plant_season_id: Optional[object]
     plan_id: Optional[object]

@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from ..infra.llm import get_chat_model
+from .followup import summarize_pending
 from .input_specs import format_input_schema, get_input_spec
 from ..observability.logging_utils import log_event, summarize_text
 from ..observability.llm_usage import (
@@ -48,7 +49,7 @@ class PlannerRunner:
     def plan(self, prompt: str, *, pending: Optional[dict] = None) -> Optional[ActionPlan]:
         payload = {
             "prompt": prompt,
-            "pending": self._summarize_pending(pending),
+            "pending": summarize_pending(pending),
         }
         user_payload = json.dumps(payload, ensure_ascii=False, default=str)
         messages = [
@@ -123,25 +124,6 @@ class PlannerRunner:
                 workflow_lines.append(f"- {spec.name}: {spec.description}")
         workflows_text = "\n".join(workflow_lines) or "(none)"
         return build_planner_prompt(tools_text, workflows_text)
-
-    @staticmethod
-    def _summarize_pending(pending: Optional[dict]) -> Optional[dict]:
-        if not isinstance(pending, dict):
-            return None
-        name = pending.get("tool_name") or pending.get("workflow_name") or pending.get(
-            "name"
-        )
-        summary: Dict[str, Any] = {
-            "mode": pending.get("mode"),
-            "name": name,
-            "missing_fields": pending.get("missing_fields"),
-            "followup_count": pending.get("followup_count"),
-        }
-        if "action" in pending:
-            summary["action"] = pending.get("action")
-        if "input_attempts" in pending:
-            summary["input_attempts"] = pending.get("input_attempts")
-        return summary
 
     @staticmethod
     def _extract_llm_text(result: object) -> str:

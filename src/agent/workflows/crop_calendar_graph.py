@@ -5,7 +5,6 @@ LangGraph workflow for crop calendar planning.
 from __future__ import annotations
 
 import json
-import re
 from typing import Dict, List, Optional
 
 from langgraph.graph import END, StateGraph
@@ -47,9 +46,19 @@ from ...schemas import (
     WorkflowResponse,
 )
 from ...prompts.workflow_messages import (
+    CROP_CALENDAR_MISSING_PREFIX,
     GROWTH_STAGE_ORDER,
     build_crop_calendar_missing_question,
     format_crop_calendar_plan_message,
+)
+from ..followup import (
+    build_workflow_followup_update,
+    get_followup_draft,
+    get_followup_message,
+    get_followup_missing_fields,
+    get_followup_options,
+    render_followup_message,
+    resolve_followup_choice,
 )
 from .common import (
     coerce_planting_draft,
@@ -70,7 +79,6 @@ CROP_FIELD_LABELS = {
 }
 CROP_CACHE_NAME = "crop_calendar_workflow"
 CROP_CACHE_PROVIDER = "workflow"
-_FOLLOWUP_INDEX_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
 _YES_WORDS = {"是", "保存", "需要", "要", "确认", "好的", "好", "ok", "yes", "y"}
 _NO_WORDS = {
     "否",
@@ -86,7 +94,7 @@ _NO_WORDS = {
 
 
 def _optional_fields_for_prompt(state: GraphState) -> list[str]:
-    draft = coerce_planting_draft(state.get("planting_draft"))
+    draft = coerce_planting_draft(get_followup_draft(state))
     prompt = state.get("user_prompt", "") or ""
     optional: list[str] = []
     if not (draft and getattr(draft, "culti_type", None)):
@@ -163,21 +171,7 @@ def _is_known_variety(name: Optional[str]) -> bool:
 def _resolve_followup_candidate(
     answer: str, candidates: list[str]
 ) -> Optional[str]:
-    if not answer or not candidates:
-        return None
-    text = answer.strip()
-    match = _FOLLOWUP_INDEX_RE.match(text)
-    if match:
-        index = int(match.group(1))
-        if 1 <= index <= len(candidates):
-            return candidates[index - 1]
-    for candidate in candidates:
-        if candidate == text:
-            return candidate
-    for candidate in candidates:
-        if text in candidate or candidate in text:
-            return candidate
-    return None
+    return resolve_followup_choice(answer, candidates)
 
 
 def _build_recommendations_from_plan(
@@ -232,23 +226,26 @@ def _store_calendar_response(
 
 
 def _extract_node(state: GraphState) -> GraphState:
+    """抽取并补全种植信息，处理追问、候选品种、字典校验和兜底默认值。"""
     prompt = state.get("user_prompt", "")
-    prior_draft = coerce_planting_draft(state.get("planting_draft"))
-    prior_missing = state.get("missing_fields") or []
+    prior_draft = coerce_planting_draft(get_followup_draft(state))
+    prior_missing = get_followup_missing_fields(state)
     plant_season_id = state.get("plant_season_id")
-    pending_options = list(state.get("pending_options") or [])
+    options = get_followup_options(state)
     followup_count = state.get("followup_count", 0)
+    # 保存确认是特殊追问分支，优先处理，避免继续走方案生成链路。
     if "save_confirmation" in prior_missing:
         decision = _parse_save_confirmation(prompt)
         if decision is None:
             state = add_trace(state, "save confirm missing")
             state.update(
-                {
-                    "planting_draft": prior_draft,
-                    "missing_fields": ["save_confirmation"],
-                    "followup_count": followup_count + 1,
-                    "pending_message": "是否保存该方案？请回复“是/否”。",
-                }
+                build_workflow_followup_update(
+                    draft=prior_draft,
+                    missing_fields=["save_confirmation"],
+                    followup_count=followup_count + 1,
+                    pending_message="是否保存该方案？请回复“是/否”。",
+                    options=[],
+                )
             )
             return state
         if not decision:
@@ -293,6 +290,7 @@ def _extract_node(state: GraphState) -> GraphState:
                 }
             )
             return state
+    # 先做信息抽取；失败时回退到无 LLM 的基础抽取逻辑。
     try:
         fresh_draft = extract_planting_details(
             prompt, llm_extract=llm_extract_planting
@@ -314,8 +312,8 @@ def _extract_node(state: GraphState) -> GraphState:
     is_followup = bool(prior_draft and prior_missing)
     # Resolve variety selection from the previous candidate list.
     resolved_from_followup = False
-    if prior_missing and "variety" in prior_missing and pending_options:
-        resolved = _resolve_followup_candidate(prompt, pending_options)
+    if prior_missing and "variety" in prior_missing and options:
+        resolved = _resolve_followup_candidate(prompt, options)
         if resolved:
             draft = draft.model_copy(update={"variety": resolved})
             missing_fields = list_missing_required_fields(draft)
@@ -392,13 +390,13 @@ def _extract_node(state: GraphState) -> GraphState:
     if invalid_messages:
         state = add_trace(state, "extract code_dict_mismatch")
         state.update(
-            {
-                "planting_draft": draft,
-                "missing_fields": missing_fields,
-                "followup_count": followup_count,
-                "pending_message": "\n".join(invalid_messages),
-                "pending_options": [],
-            }
+            build_workflow_followup_update(
+                draft=draft,
+                missing_fields=missing_fields,
+                followup_count=followup_count,
+                pending_message="\n".join(invalid_messages),
+                options=[],
+            )
         )
         return state
     # If user says "不确定/不知道", allow fallback defaults to avoid dead-ends.
@@ -453,14 +451,17 @@ def _extract_node(state: GraphState) -> GraphState:
         state, f"extract missing={missing_fields} followup_count={followup_count}"
     )
     state.update(
-        {
-            "planting_draft": draft,
-            "missing_fields": missing_fields,
-            "followup_count": followup_count,
-            "assumptions": list(draft.assumptions),
-            "variety_candidates": variety_candidates,
-            "pending_message": None,
-        }
+        build_workflow_followup_update(
+            draft=draft,
+            missing_fields=missing_fields,
+            followup_count=followup_count,
+            pending_message=None,
+            options=[],
+            extra={
+                "assumptions": list(draft.assumptions),
+                "variety_candidates": variety_candidates,
+            },
+        )
     )
     return state
 
@@ -479,29 +480,28 @@ def _parse_save_confirmation(prompt: str) -> Optional[bool]:
 
 
 def _ask_node(state: GraphState) -> GraphState:
-    missing_fields = state.get("missing_fields", [])
+    """把缺失字段转成可回复的话术；品种候选存在时优先展示候选列表。"""
+    missing_fields = get_followup_missing_fields(state)
     candidates = state.get("variety_candidates") or []
-    pending_message = state.get("pending_message")
-    if pending_message:
-        message = pending_message
-    elif "variety" in missing_fields and candidates:
-        options = "\n".join(
-            f"{idx + 1}. {name}" for idx, name in enumerate(candidates)
-        )
-        message = (
-            "未找到完全匹配的品种。你是不是想查询以下品种：\n"
-            f"{options}\n"
-            "请回复序号或品种名称。"
-        )
-    else:
-        message = _build_missing_question(state, missing_fields)
+    message = render_followup_message(
+        pending_message=get_followup_message(state),
+        missing_fields=missing_fields,
+        field_labels=CROP_FIELD_LABELS,
+        default_prefix=CROP_CALENDAR_MISSING_PREFIX,
+        allow_unknown=True,
+        optional_fields=_optional_fields_for_prompt(state),
+        options=candidates if "variety" in missing_fields else [],
+        options_intro="未找到完全匹配的品种。你是不是想查询以下品种：",
+        reply_hint="请回复序号或品种名称。",
+    )
     state = add_trace(state, f"ask missing={missing_fields}")
     state.update({"message": message})
     return state
 
 
 def _context_node(state: GraphState) -> GraphState:
-    raw_draft = state.get("planting_draft")
+    """把草稿标准化为最终 planting 对象，并在这里优先命中缓存。"""
+    raw_draft = get_followup_draft(state)
     draft = coerce_planting_draft(raw_draft)
     if draft is None:
         state = add_trace(state, "context missing draft")
@@ -514,6 +514,7 @@ def _context_node(state: GraphState) -> GraphState:
         )
         return state
 
+    # context 节点负责最终校验；缺字段时重新回到追问链路。
     try:
         planting = normalize_and_validate_planting(draft)
     except MissingPlantingInfoError as exc:
@@ -527,6 +528,7 @@ def _context_node(state: GraphState) -> GraphState:
         )
         return state
 
+    # 方案生成成本较高，因此先按 planting 维度查工作流缓存。
     cache_key = build_planting_cache_key(planting)
     cached = _get_cached_calendar_response(cache_key)
     if cached:
@@ -556,6 +558,7 @@ def _context_node(state: GraphState) -> GraphState:
 
 
 def _recommend_node(state: GraphState) -> GraphState:
+    """调用农事方案服务，组装推荐结果，并在可保存时追加确认提示。"""
     planting = state.get("planting")
     weather_info = state.get("weather_info") or {}
     variety_info = state.get("variety_info") or {}
@@ -571,6 +574,7 @@ def _recommend_node(state: GraphState) -> GraphState:
         )
         return state
 
+    # 这里是真正的外部方案计算入口，返回农事方案、生育期和 plant_season_id。
     try:
         plan_result = request_crop_calendar_plan(planting)
     except Exception as exc:
@@ -615,6 +619,7 @@ def _recommend_node(state: GraphState) -> GraphState:
     if plant_season_id is not None:
         message = f"{message}\n是否保存该方案？请回复“是/否”。"
     state = add_trace(state, "recommend complete")
+    # 成功结果写入缓存，避免同一 planting 重复调用外部服务。
     cache_key = build_planting_cache_key(planting)
     _store_calendar_response(
         cache_key,
@@ -625,28 +630,29 @@ def _recommend_node(state: GraphState) -> GraphState:
     )
     state = add_trace(state, "calendar_cached")
     state.update(
-        {
-            "recommendations": recommendations,
-            "growth_stage": growth_stage,
-            "plant_season_id": plant_season_id,
-            "message": message,
-            "data": {
-                "plant_season_id": plant_season_id,
-                "farmworks": farmworks_payload,
-                "growth_stages": growth_stages_payload,
-            },
-            "weather_info": weather_info,
-            "variety_info": variety_info,
-            "recommendation_info": recommendation_info,
-            "missing_fields": (
-                ["save_confirmation"] if plant_season_id is not None else []
-            ),
-            "pending_message": (
+        build_workflow_followup_update(
+            missing_fields=["save_confirmation"] if plant_season_id is not None else [],
+            pending_message=(
                 "是否保存该方案？请回复“是/否”。"
                 if plant_season_id is not None
                 else None
             ),
-        }
+            options=[],
+            extra={
+                "recommendations": recommendations,
+                "growth_stage": growth_stage,
+                "plant_season_id": plant_season_id,
+                "message": message,
+                "data": {
+                    "plant_season_id": plant_season_id,
+                    "farmworks": farmworks_payload,
+                    "growth_stages": growth_stages_payload,
+                },
+                "weather_info": weather_info,
+                "variety_info": variety_info,
+                "recommendation_info": recommendation_info,
+            },
+        )
     )
     return state
 
@@ -684,13 +690,15 @@ def _format_growth_stage_lines(stages: Dict[str, str]) -> str:
 
 
 def _route_after_extract(state: GraphState) -> str:
-    missing = state.get("missing_fields") or []
+    """extract 后路由：缺字段追问，否则进入 context；halt 时直接结束。"""
+    missing = get_followup_missing_fields(state)
     if state.get("halt"):
         return END
     return "ask" if missing else "context"
 
 
 def _route_after_context(state: GraphState) -> str:
+    """context 后路由：命中缓存直接结束，否则继续生成方案。"""
     if state.get("cache_hit"):
         return END
     return "recommend"
@@ -699,8 +707,11 @@ def _route_after_context(state: GraphState) -> str:
 def build_crop_calendar_graph():
     """
     Construct and return the crop calendar LangGraph workflow.
+
+    Flow: extract -> ask/context -> recommend -> END.
     """
     def _trace_node(node_name: str, func):
+        """为节点统一补充 tracing，便于查看状态流转是否符合预期。"""
         def _inner(state: GraphState) -> GraphState:
             attrs = {"workflow.name": CROP_CACHE_NAME, "node.name": node_name}
             attrs.update(build_span_attributes("node.input", summarize_state(state)))

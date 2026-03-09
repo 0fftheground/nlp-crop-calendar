@@ -1,15 +1,24 @@
 from __future__ import annotations
 
-import re
+import json
 from typing import Optional
 
+from .followup import (
+    build_followup_options,
+    get_followup_count,
+    get_followup_draft,
+    get_followup_message,
+    get_followup_missing_fields,
+    get_followup_options,
+    extract_draft_options,
+    parse_followup_index,
+    resolve_followup_choice,
+)
 from ..infra.variety_store import find_exact_variety_in_text, retrieve_variety_candidates
 from ..observability.logging_utils import log_event
 from ..schemas.models import PlantingDetailsDraft, ToolInvocation
 
 
-_FOLLOWUP_INDEX_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
-_FOLLOWUP_QUOTED_RE = re.compile(r"[\"“”']([^\"“”']+)[\"“”']")
 _NEW_TOPIC_TOKENS = {
     "另一个",
     "另外",
@@ -67,11 +76,59 @@ class PendingManager:
     def delete(self, session_id: str) -> None:
         self._pending_store.delete(session_id)
 
+    def build_workflow_resume_state(
+        self, pending: Optional[dict], workflow_name: str
+    ) -> dict:
+        if not isinstance(pending, dict):
+            return {}
+        if pending.get("workflow_name") != workflow_name:
+            return {}
+        draft = get_followup_draft(pending)
+        options = get_followup_options(pending)
+        return {
+            "draft": draft,
+            "missing_fields": get_followup_missing_fields(pending),
+            "followup_count": get_followup_count(pending),
+            "options": options,
+            "pending_message": get_followup_message(pending),
+            "future_sowing_date_warning": pending.get(
+                "future_sowing_date_warning", False
+            ),
+            "plant_season_id": pending.get("plant_season_id"),
+            "variety_tool_query": pending.get("variety_tool_query"),
+            "variety_tool_draft": pending.get("variety_tool_draft"),
+            "variety_tool_missing_fields": pending.get(
+                "variety_tool_missing_fields"
+            ),
+            "variety_tool_followup_count": pending.get(
+                "variety_tool_followup_count", 0
+            ),
+        }
+
+    def build_tool_followup_prompt(
+        self,
+        *,
+        prompt: str,
+        pending: Optional[dict],
+        memory_id: str,
+    ) -> str:
+        followup_payload = {
+            "user_id": memory_id,
+            "query": pending.get("query") if isinstance(pending, dict) else None,
+            "followup": {
+                "prompt": prompt,
+                "draft": get_followup_draft(pending) or {},
+                "missing_fields": get_followup_missing_fields(pending),
+                "followup_count": get_followup_count(pending),
+            },
+        }
+        return json.dumps(followup_payload, ensure_ascii=False, default=str)
+
     def update_workflow_followup_state(
         self, session_id: str, state: dict, workflow_name: str
     ) -> None:
-        missing = state.get("missing_fields") or []
-        draft = state.get("planting_draft")
+        missing = get_followup_missing_fields(state)
+        draft = get_followup_draft(state)
         draft_payload = None
         if isinstance(draft, PlantingDetailsDraft):
             draft_payload = draft.model_dump(mode="json")
@@ -86,10 +143,10 @@ class PendingManager:
             payload = {
                 "mode": "workflow",
                 "workflow_name": workflow_name,
-                "planting_draft": draft_payload,
+                "draft": draft_payload,
                 "missing_fields": missing,
-                "followup_count": state.get("followup_count", 0),
-                "pending_message": state.get("message"),
+                "followup_count": get_followup_count(state),
+                "pending_message": get_followup_message(state),
                 "future_sowing_date_warning": state.get(
                     "future_sowing_date_warning", False
                 ),
@@ -103,7 +160,7 @@ class PendingManager:
                     "variety_tool_followup_count", 0
                 ),
             }
-            options = self._build_pending_options(
+            options = get_followup_options(state) or build_followup_options(
                 payload.get("pending_message"), draft_payload
             )
             if options:
@@ -123,14 +180,14 @@ class PendingManager:
         self, session_id: str, tool_payload: ToolInvocation
     ) -> None:
         data = tool_payload.data or {}
-        missing = data.get("missing_fields") or []
-        draft = data.get("draft")
+        missing = get_followup_missing_fields(data)
+        draft = get_followup_draft(data)
         choice_hint = bool(data.get("choice_hint"))
-        options = data.get("options")
+        options = get_followup_options(data)
         if (missing and isinstance(draft, dict)) or (
             choice_hint and isinstance(options, list)
         ):
-            followup_count = data.get("followup_count", 0)
+            followup_count = get_followup_count(data)
             payload = {
                 "mode": "tool",
                 "tool_name": tool_payload.name,
@@ -145,11 +202,13 @@ class PendingManager:
             if choice_hint and isinstance(options, list):
                 payload["choice_hint"] = True
                 payload["strict_options_only"] = True
-                payload["options"] = [
-                    str(item).strip() for item in options if str(item).strip()
-                ]
+                payload["options"] = build_followup_options(
+                    payload.get("pending_message"),
+                    payload.get("draft"),
+                    extra_options=options,
+                )
             else:
-                built = self._build_pending_options(
+                built = build_followup_options(
                     payload.get("pending_message"), payload.get("draft")
                 )
                 if built:
@@ -179,9 +238,8 @@ class PendingManager:
                 rule_name=rule.name,
             )
             return False
-        if pending.get("missing_fields") and "variety" in pending.get(
-            "missing_fields", []
-        ):
+        missing_fields = get_followup_missing_fields(pending)
+        if missing_fields and "variety" in missing_fields:
             if find_exact_variety_in_text(prompt):
                 return True
             if retrieve_variety_candidates(prompt, limit=3):
@@ -195,86 +253,19 @@ class PendingManager:
         return True
 
     @staticmethod
-    def _parse_followup_index(text: str) -> Optional[int]:
-        if not text:
-            return None
-        match = _FOLLOWUP_INDEX_RE.match(text.strip())
-        if not match:
-            return None
-        return int(match.group(1))
-
-    @staticmethod
     def _extract_pending_candidates(pending: Optional[dict]) -> list[str]:
         if not isinstance(pending, dict):
             return []
-        draft = pending.get("draft")
-        if not isinstance(draft, dict):
-            return []
-        for key in ("candidates", "variety_candidates", "region_candidates"):
-            value = draft.get(key)
-            if isinstance(value, list):
-                return [str(item).strip() for item in value if str(item).strip()]
-        return []
+        draft = get_followup_draft(pending)
+        return extract_draft_options(draft)
 
     @staticmethod
     def _extract_pending_options(pending: Optional[dict]) -> list[str]:
-        if not isinstance(pending, dict):
-            return []
-        options = pending.get("options")
-        if isinstance(options, list):
-            return [str(item).strip() for item in options if str(item).strip()]
-        return []
+        return get_followup_options(pending)
 
     @staticmethod
     def _extract_pending_message(pending: Optional[dict]) -> str:
-        if not isinstance(pending, dict):
-            return ""
-        message = pending.get("pending_message") or pending.get("message")
-        return message.strip() if isinstance(message, str) else ""
-
-    @staticmethod
-    def _extract_message_options(message: str) -> list[str]:
-        if not message:
-            return []
-        options: list[str] = []
-        for line in message.splitlines():
-            text = line.strip()
-            if not text:
-                continue
-            if "回复" in text:
-                continue
-            if text.endswith("：") or "请选择" in text:
-                continue
-            match = re.match(r"^(\d+)[\.\、]\s*(.+)$", text)
-            if match:
-                text = match.group(2).strip()
-            if text:
-                options.append(text)
-        if not options:
-            for token in _FOLLOWUP_QUOTED_RE.findall(message):
-                for piece in re.split(r"[、/或]", token):
-                    piece = piece.strip()
-                    if piece:
-                        options.append(piece)
-        return options
-
-    def _build_pending_options(
-        self, message: Optional[str], draft: Optional[dict]
-    ) -> list[str]:
-        options: list[str] = []
-        if isinstance(draft, dict):
-            for key in ("options", "candidates", "variety_candidates", "region_candidates"):
-                value = draft.get(key)
-                if isinstance(value, list):
-                    for item in value:
-                        item = str(item).strip()
-                        if item and item not in options:
-                            options.append(item)
-        if isinstance(message, str) and message.strip():
-            for item in self._extract_message_options(message):
-                if item not in options:
-                    options.append(item)
-        return options
+        return get_followup_message(pending)
 
     def _matches_pending_choice(self, prompt: str, pending: Optional[dict]) -> bool:
         text = (prompt or "").strip()
@@ -283,18 +274,12 @@ class PendingManager:
         options = self._extract_pending_options(pending)
         candidates = options or self._extract_pending_candidates(pending)
         if candidates:
-            index = self._parse_followup_index(text)
-            if index is not None and 1 <= index <= len(candidates):
+            if resolve_followup_choice(text, candidates):
                 return True
-            for candidate in candidates:
-                if candidate == text:
-                    return True
-                if text in candidate or candidate in text:
-                    return True
         message = self._extract_pending_message(pending)
         if message and len(text) <= 10 and text in message:
             return True
-        if self._parse_followup_index(text) is not None and message and "序号" in message:
+        if parse_followup_index(text) is not None and message and "序号" in message:
             return True
         return False
 

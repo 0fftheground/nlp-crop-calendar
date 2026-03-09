@@ -23,11 +23,6 @@ def _require_db_url() -> str:
     return url
 
 
-def get_gdd_source() -> str:
-    table = _get_gdd_db_table()
-    return f"postgres:{table}"
-
-
 def _fetch_gdd_records() -> List[Dict[str, object]]:
     url = _require_db_url()
     table = _get_gdd_db_table()
@@ -40,7 +35,3 @@ def _fetch_gdd_records() -> List[Dict[str, object]]:
 
 def get_gdd_records() -> List[Dict[str, object]]:
     return _fetch_gdd_records()
-
-
-def clear_gdd_cache() -> None:
-    return None

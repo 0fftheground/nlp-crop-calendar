@@ -13,6 +13,7 @@ from .registry import auto_register_tool
     description="查询默认农场气象数据（仅使用默认农场ID）。需要提供起止日期（最多30天）。",
 )
 def weather_lookup(prompt: str) -> ToolInvocation:
+    """规范化天气查询入参后，统一走 weather service 完成查询。"""
     prompt_text = prompt or ""
     cache_prompt, query = normalize_weather_prompt(prompt_text)
     return lookup_weather(prompt_text, cache_prompt=cache_prompt, query=query)

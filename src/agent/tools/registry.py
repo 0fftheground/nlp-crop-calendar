@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 from langchain_core.tools import BaseTool, tool as lc_tool
 
+from ..followup import is_followup_payload
 from ...infra.tool_cache import get_tool_result_cache
 from ...infra.tool_provider import normalize_provider
 from ...observability.logging_utils import log_event
@@ -27,30 +28,16 @@ def register_tool(tool: BaseTool) -> None:
     TOOLS.append(tool)
     TOOL_INDEX[tool.name] = tool
 
-
-def _is_followup_payload(data: object) -> bool:
-    if not isinstance(data, dict):
-        return False
-    missing = data.get("missing_fields")
-    if isinstance(missing, list) and missing:
-        return True
-    if data.get("source") == "candidate":
-        return True
-    draft = data.get("draft")
-    if isinstance(draft, dict) and draft.get("candidates"):
-        return True
-    return False
-
-
 def _should_cache_tool_result(result: ToolInvocation) -> bool:
     if not result.data:
         return False
-    return not _is_followup_payload(result.data)
+    return not is_followup_payload(result.data)
 
 
 def _get_cached_tool_result(
     tool_name: str, provider: str, prompt: str
 ) -> Optional[ToolInvocation]:
+    """读取工具缓存；追问型结果不复用，避免把未完成状态当成最终答案。"""
     if tool_name not in TOOL_CACHEABLE:
         return None
     cache = get_tool_result_cache()
@@ -59,7 +46,7 @@ def _get_cached_tool_result(
         return None
     try:
         data = payload.get("data") if isinstance(payload, dict) else None
-        if _is_followup_payload(data):
+        if is_followup_payload(data):
             return None
         return ToolInvocation(**payload)
     except Exception:
@@ -69,6 +56,7 @@ def _get_cached_tool_result(
 def _store_tool_result(
     tool_name: str, provider: str, prompt: str, result: ToolInvocation
 ) -> None:
+    """写入可缓存的最终结果；中间态或追问态结果跳过缓存。"""
     if tool_name not in TOOL_CACHEABLE:
         return None
     if not _should_cache_tool_result(result):
@@ -153,6 +141,7 @@ def _summarize_tool_output(result: ToolInvocation) -> Dict[str, object]:
 
 
 def _import_tool_modules() -> List[object]:
+    """导入工具模块，通过模块加载触发 `@auto_register_tool` 注册。"""
     modules = []
     package = __package__ or "src.agent.tools"
     for name in _TOOL_MODULES:
@@ -163,6 +152,8 @@ def _import_tool_modules() -> List[object]:
 def initialize_tools() -> None:
     """
     Trigger tool registration by importing tool modules.
+
+    首次导入模块；若注册表为空则 reload，兼容测试和热重载场景。
     """
     global _TOOLS_INITIALIZED
     if _TOOLS_INITIALIZED and TOOLS:
@@ -176,6 +167,7 @@ def initialize_tools() -> None:
 
 
 def execute_tool(name: str, prompt: str) -> Optional[ToolInvocation]:
+    """执行单个工具入口：初始化 -> 查表 -> invoke -> tracing/logging。"""
     initialize_tools()
     tool = TOOL_INDEX.get(name)
     if not tool:

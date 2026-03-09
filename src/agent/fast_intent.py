@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from ..infra.llm import get_extractor_model
 from ..observability.logging_utils import log_event, summarize_text
+from .followup import summarize_pending
 from .workflows.registry import WorkflowSpec
 
 
@@ -42,7 +43,7 @@ class FastIntentRouter:
     ) -> Optional[FastIntentResult]:
         payload = {
             "prompt": prompt,
-            "pending": self._summarize_pending(pending),
+            "pending": summarize_pending(pending),
         }
         user_payload = json.dumps(payload, ensure_ascii=False, default=str)
         messages = [
@@ -101,25 +102,6 @@ class FastIntentRouter:
             '"reason":"...", "input":{...}}\n'
             "name 仅在 action=tool/workflow 时填写。"
         )
-
-    @staticmethod
-    def _summarize_pending(pending: Optional[dict]) -> Optional[dict]:
-        if not isinstance(pending, dict):
-            return None
-        name = pending.get("tool_name") or pending.get("workflow_name") or pending.get(
-            "name"
-        )
-        summary: Dict[str, Any] = {
-            "mode": pending.get("mode"),
-            "name": name,
-            "missing_fields": pending.get("missing_fields"),
-            "followup_count": pending.get("followup_count"),
-        }
-        if "action" in pending:
-            summary["action"] = pending.get("action")
-        if "input_attempts" in pending:
-            summary["input_attempts"] = pending.get("input_attempts")
-        return summary
 
     @staticmethod
     def _extract_llm_text(result: object) -> str:

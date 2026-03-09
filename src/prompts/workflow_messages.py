@@ -70,22 +70,6 @@ def build_crop_calendar_missing_question(
         allow_unknown=allow_unknown,
         optional_fields=optional_fields,
     )
-
-
-def build_growth_stage_missing_question(
-    missing_fields: List[str],
-    field_labels: Dict[str, str],
-    *,
-    allow_unknown: bool = True,
-) -> str:
-    return format_missing_question(
-        missing_fields,
-        field_labels,
-        GROWTH_STAGE_MISSING_PREFIX,
-        allow_unknown=allow_unknown,
-    )
-
-
 def build_future_weather_warning(
     sowing_date: Optional[date],
     *,
@@ -216,7 +200,3 @@ def format_growth_stage_message(
                     lines.append(f"{name}：{value}")
 
     return "\n".join(lines).strip()
-
-
-def format_planting_validation_error(error: Exception) -> str:
-    return f"种植信息校验失败: {error}"

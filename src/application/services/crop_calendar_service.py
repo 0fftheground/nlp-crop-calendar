@@ -21,7 +21,6 @@ from ...infra.db_catalog import (
 from ...infra.tool_provider import normalize_provider
 from ...observability.logging_utils import log_event, summarize_text
 from ...schemas import (
-    FarmWorkRecommendInput,
     GrowthStageResult,
     OperationPlanResult,
     OperationItem,
@@ -158,18 +157,6 @@ def assemble_weather_series(
     return WeatherSeries(**payload)
 
 
-def _default_weather_series(planting: PlantingDetails) -> WeatherSeries:
-    cfg = _cfg()
-    return WeatherSeries(
-        region=cfg.default_region or "unknown",
-        granularity="daily",
-        start_date=planting.sowing_date,
-        end_date=None,
-        points=[],
-        source="synthetic",
-    )
-
-
 def query_growth_stage(
     planting: PlantingDetails, weather_series: Optional[WeatherSeries] = None
 ) -> GrowthStageResult:
@@ -257,10 +244,6 @@ def generate_crop_calendar(
     )
 
 
-def query_growth_stage_gdd(input: PredictGrowthStageInput) -> GrowthStageResult:
-    return query_growth_stage_from_db(input)
-
-
 def get_farm_weather(input: WeatherQueryInput) -> WeatherSeries:
     cfg = _cfg()
     base_year = input.year
@@ -297,10 +280,6 @@ def get_farm_weather(input: WeatherQueryInput) -> WeatherSeries:
         points=points,
         source="synthetic",
     )
-
-
-def recommend_ops(input: FarmWorkRecommendInput) -> OperationPlanResult:
-    return request_operation_plan(input.planting)
 
 
 def _mock_operation_plan(planting: PlantingDetails) -> OperationPlanResult:
@@ -640,16 +619,6 @@ def list_code_names(category: str, *, limit: int = 8) -> List[str]:
     return names[: max(1, int(limit))]
 
 
-def _unwrap_operation_payload(payload: object) -> object:
-    if not isinstance(payload, dict):
-        return payload
-    for key in ("data", "result", "payload", "plan"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            return value
-    return payload
-
-
 def _coerce_operation_items(payload: object) -> List[OperationItem]:
     if not isinstance(payload, list):
         return []
@@ -684,45 +653,6 @@ def _coerce_operation_items(payload: object) -> List[OperationItem]:
         except Exception:
             continue
     return items
-
-
-def _coerce_operation_plan(
-    payload: object, *, default_crop: str
-) -> OperationPlanResult:
-    if isinstance(payload, OperationPlanResult):
-        return payload
-    if isinstance(payload, dict):
-        try:
-            return OperationPlanResult.model_validate(payload)
-        except Exception:
-            ops = _coerce_operation_items(
-                payload.get("operations") or payload.get("items")
-                or payload.get("recommendations")
-            )
-            if ops:
-                summary = (
-                    payload.get("summary")
-                    or payload.get("message")
-                    or payload.get("desc")
-                    or ""
-                )
-                crop = payload.get("crop") or default_crop
-                return OperationPlanResult(
-                    crop=crop,
-                    summary=summary,
-                    operations=ops,
-                    metadata={"source": "external"},
-                )
-    if isinstance(payload, list):
-        ops = _coerce_operation_items(payload)
-        if ops:
-            return OperationPlanResult(
-                crop=default_crop,
-                summary="",
-                operations=ops,
-                metadata={"source": "external"},
-            )
-    raise ValueError("外部推荐接口返回格式未识别。")
 
 def _build_crop_calendar_payload(
     planting: PlantingDetails,

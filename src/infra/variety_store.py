@@ -289,18 +289,3 @@ def _fuzzy_score(left: str, right: str) -> float:
     if left in right or right in left:
         return 0.95
     return difflib.SequenceMatcher(None, left, right).ratio()
-
-
-def build_variety_hint(
-    query: str,
-    *,
-    limit: int = 5,
-    threshold: float = 0.6,
-) -> str:
-    candidates = retrieve_variety_candidates(
-        query, limit=limit, threshold=threshold, semantic=True
-    )
-    if not candidates:
-        return ""
-    joined = "、".join(candidates)
-    return f"可参考的品种候选：{joined}。仅在与用户描述匹配时填写。"

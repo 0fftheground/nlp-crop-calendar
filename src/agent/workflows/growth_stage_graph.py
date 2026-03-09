@@ -28,8 +28,19 @@ from ...observability.otel import (
     summarize_state,
 )
 from ...prompts.workflow_messages import (
+    GROWTH_STAGE_MISSING_PREFIX,
     GROWTH_STAGE_ORDER,
     format_growth_stage_message,
+)
+from ..followup import (
+    build_workflow_followup_update,
+    clear_workflow_followup_update,
+    get_followup_draft,
+    get_followup_message,
+    get_followup_missing_fields,
+    get_followup_options,
+    render_followup_message,
+    resolve_followup_choice,
 )
 from .common import (
     coerce_planting_draft,
@@ -39,7 +50,6 @@ from .state import GraphState, add_trace
 
 
 GROWTH_WORKFLOW_NAME = "growth_stage_query_workflow"
-_PLAN_CHOICE_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
 _PLAN_ID_RE = re.compile(
     r"(?:plan_id|计划id|计划编号|id)\s*[:=]?\s*(\d+)",
     re.IGNORECASE,
@@ -134,22 +144,9 @@ def _extract_variety_from_payload(payload: dict | None) -> str:
 
 
 def _resolve_plan_choice(
-    prompt: str, pending_options: list[str]
+    prompt: str, options: list[str]
 ) -> Optional[str]:
-    text = (prompt or "").strip()
-    if not text or not pending_options:
-        return None
-    match = _PLAN_CHOICE_RE.match(text)
-    if match:
-        idx = int(match.group(1))
-        if 1 <= idx <= len(pending_options):
-            return pending_options[idx - 1]
-    for option in pending_options:
-        if text == option:
-            return option
-        if text in option or option in text:
-            return option
-    return None
+    return resolve_followup_choice(prompt, options)
 
 
 def _parse_plan_id_from_option(option: str) -> Optional[str]:
@@ -224,56 +221,49 @@ def _format_stage_only_message(stages: Dict[str, str]) -> str:
 
 
 def _growth_extract_node(state: GraphState) -> GraphState:
+    """解析用户输入，优先锁定 plan_id；否则按条件检索种植计划并决定是否追问。"""
     prompt = state.get("user_prompt", "")
-    prior_draft = coerce_planting_draft(state.get("planting_draft"))
-    prior_missing = state.get("missing_fields") or []
+    prior_draft = coerce_planting_draft(get_followup_draft(state))
+    prior_missing = get_followup_missing_fields(state)
     followup_count = state.get("followup_count", 0)
-    pending_options = list(state.get("pending_options") or [])
+    options = get_followup_options(state)
 
-    if "plan_choice" in prior_missing and pending_options:
-        choice = _resolve_plan_choice(prompt, pending_options)
+    # 处理多计划追问场景：把用户回复的序号/名称映射回具体 plan_id。
+    if "plan_choice" in prior_missing and options:
+        choice = _resolve_plan_choice(prompt, options)
         plan_id = _parse_plan_id_from_option(choice or "") if choice else None
         if not plan_id:
             plan_id = _extract_plan_id_from_text(prompt)
         if plan_id:
             state = add_trace(state, f"plan_choice resolved={plan_id}")
             state.update(
-                {
-                    "plan_id": plan_id,
-                    "missing_fields": [],
-                    "pending_message": None,
-                    "pending_options": [],
-                }
+                clear_workflow_followup_update(extra={"plan_id": plan_id})
             )
             return state
         followup_count += 1
         state = add_trace(state, "plan_choice unresolved")
         state.update(
-            {
-                "planting_draft": prior_draft,
-                "missing_fields": ["plan_choice"],
-                "followup_count": followup_count,
-                "pending_message": "未识别到有效的序号/计划，请回复序号或计划名称。",
-                "pending_options": pending_options,
-            }
+            build_workflow_followup_update(
+                draft=prior_draft,
+                missing_fields=["plan_choice"],
+                followup_count=followup_count,
+                pending_message="未识别到有效的序号/计划，请回复序号或计划名称。",
+                options=options,
+            )
         )
         return state
 
+    # 第一优先级是直接从 prompt/payload 中拿到 plan_id，命中后直接进入查询节点。
     payload = _parse_prompt_payload(prompt)
     plan_id = _extract_plan_id_from_payload(payload) or _extract_plan_id_from_text(
         prompt
     )
     if plan_id:
         state = add_trace(state, f"plan_id from prompt={plan_id}")
-        state.update(
-            {
-                "plan_id": plan_id,
-                "missing_fields": [],
-                "pending_message": None,
-            }
-        )
+        state.update(clear_workflow_followup_update(extra={"plan_id": plan_id}))
         return state
 
+    # 没有 plan_id 时退回到种植信息抽取，用品种/日期/方式等条件查计划。
     try:
         fresh_draft = extract_planting_details(
             prompt, llm_extract=llm_extract_planting
@@ -315,28 +305,29 @@ def _growth_extract_node(state: GraphState) -> GraphState:
     if not filters:
         state = add_trace(state, "missing plan query")
         state.update(
-            {
-                "planting_draft": draft,
-                "missing_fields": ["plan_query"],
-                "followup_count": followup_count,
-                "pending_message": "请提供品种名称或种植计划名称，以便查询种植计划。",
-                "pending_options": [],
-            }
+            build_workflow_followup_update(
+                draft=draft,
+                missing_fields=["plan_query"],
+                followup_count=followup_count,
+                pending_message="请提供品种名称或种植计划名称，以便查询种植计划。",
+                options=[],
+            )
         )
         return state
 
+    # 根据抽取出的过滤条件查计划：0 条则追问，1 条直达，多条让用户选。
     try:
         rows, id_col, columns = search_planting_plans(filters, limit=5)
     except Exception as exc:
         state = add_trace(state, f"plan_search failed={exc}")
         state.update(
-            {
-                "planting_draft": draft,
-                "missing_fields": ["plan_query"],
-                "followup_count": followup_count,
-                "pending_message": f"查询种植计划失败: {exc}。请提供更具体的品种或计划名称。",
-                "pending_options": [],
-            }
+            build_workflow_followup_update(
+                draft=draft,
+                missing_fields=["plan_query"],
+                followup_count=followup_count,
+                pending_message=f"查询种植计划失败: {exc}。请提供更具体的品种或计划名称。",
+                options=[],
+            )
         )
         return state
 
@@ -362,26 +353,26 @@ def _growth_extract_node(state: GraphState) -> GraphState:
                     message_lines.append(f"{idx}. {option}")
                 state = add_trace(state, "plan_search fallback active")
                 state.update(
-                    {
-                        "planting_draft": draft,
-                        "missing_fields": ["plan_choice"],
-                        "followup_count": followup_count + 1,
-                        "pending_message": "\n".join(message_lines),
-                        "pending_options": options,
-                        "plan_filters": filters,
-                    }
+                    build_workflow_followup_update(
+                        draft=draft,
+                        missing_fields=["plan_choice"],
+                        followup_count=followup_count + 1,
+                        pending_message="\n".join(message_lines),
+                        options=options,
+                        extra={"plan_filters": filters},
+                    )
                 )
                 return state
         state = add_trace(state, "plan_search empty")
         state.update(
-            {
-                "planting_draft": draft,
-                "missing_fields": ["plan_query"],
-                "followup_count": followup_count,
-                "pending_message": "未找到符合条件的种植计划，请提供更具体的品种或计划名称。",
-                "pending_options": [],
-                "plan_filters": filters,
-            }
+            build_workflow_followup_update(
+                draft=draft,
+                missing_fields=["plan_query"],
+                followup_count=followup_count,
+                pending_message="未找到符合条件的种植计划，请提供更具体的品种或计划名称。",
+                options=[],
+                extra={"plan_filters": filters},
+            )
         )
         return state
 
@@ -389,12 +380,9 @@ def _growth_extract_node(state: GraphState) -> GraphState:
         plan_id = rows[0].get(id_col)
         state = add_trace(state, f"plan_search single={plan_id}")
         state.update(
-            {
-                "plan_id": plan_id,
-                "missing_fields": [],
-                "pending_message": None,
-                "plan_filters": filters,
-            }
+            clear_workflow_followup_update(
+                extra={"plan_id": plan_id, "plan_filters": filters}
+            )
         )
         return state
 
@@ -406,34 +394,54 @@ def _growth_extract_node(state: GraphState) -> GraphState:
         message_lines.append(f"{idx}. {option}")
     state = add_trace(state, f"plan_search multi={len(options)}")
     state.update(
-        {
-            "planting_draft": draft,
-            "missing_fields": ["plan_choice"],
-            "followup_count": followup_count + 1,
-            "pending_message": "\n".join(message_lines),
-            "pending_options": options,
-            "plan_filters": filters,
-        }
+        build_workflow_followup_update(
+            draft=draft,
+            missing_fields=["plan_choice"],
+            followup_count=followup_count + 1,
+            pending_message="\n".join(message_lines),
+            options=options,
+            extra={"plan_filters": filters},
+        )
     )
     return state
 
 
 def _growth_ask_node(state: GraphState) -> GraphState:
-    missing_fields = state.get("missing_fields", [])
-    pending_message = state.get("pending_message")
-    if pending_message:
-        message = pending_message
+    """根据缺失信息生成下一轮提问，主要覆盖计划选择或查询条件补充。"""
+    missing_fields = get_followup_missing_fields(state)
+    options = get_followup_options(state)
+    pending_message = get_followup_message(state)
+    if (
+        "plan_choice" in missing_fields
+        and not pending_message
+        and not options
+    ):
+        message = "请回复序号选择对应的种植计划。"
     else:
-        if "plan_choice" in missing_fields:
-            message = "请回复序号选择对应的种植计划。"
-        else:
-            message = "请提供品种名称或种植计划名称，以便查询种植计划。"
+        message = render_followup_message(
+            pending_message=pending_message,
+            missing_fields=missing_fields,
+            field_labels={
+                "plan_choice": "种植计划",
+                "plan_query": "品种名称或种植计划名称",
+                "plan_id": "计划 ID",
+            },
+            default_prefix=GROWTH_STAGE_MISSING_PREFIX,
+            options=options if "plan_choice" in missing_fields else [],
+            options_intro="找到多个种植计划，请回复序号：",
+            reply_hint=(
+                "请回复序号或计划名称。"
+                if "plan_choice" in missing_fields
+                else None
+            ),
+        )
     state = add_trace(state, f"ask missing={missing_fields}")
     state.update({"message": message})
     return state
 
 
 def _growth_predict_node(state: GraphState) -> GraphState:
+    """使用 plan_id 查询生育期结果，并拼装最终展示消息与调试数据。"""
     plan_id = state.get("plan_id")
     workflow_payload = {
         "plan_id": plan_id,
@@ -461,6 +469,7 @@ def _growth_predict_node(state: GraphState) -> GraphState:
 
     result = None
     provider_response: Dict[str, object] = {}
+    # 先查生育期结果；成功后再补查计划详情，仅用于生成更友好的回复文案。
     try:
         result = query_growth_stage_from_plan_id(plan_id)
         provider_response = result.model_dump(mode="json")
@@ -515,7 +524,8 @@ def _growth_predict_node(state: GraphState) -> GraphState:
 
 
 def _growth_route_after_extract(state: GraphState) -> str:
-    missing = state.get("missing_fields") or []
+    """extract 后的路由：有缺口去 ask，信息齐全去 predict。"""
+    missing = get_followup_missing_fields(state)
     if state.get("halt"):
         return END
     return "ask" if missing else "predict"
@@ -524,8 +534,11 @@ def _growth_route_after_extract(state: GraphState) -> str:
 def build_growth_stage_graph():
     """
     Construct and return the growth stage query LangGraph workflow.
+
+    Flow: extract -> ask/predict -> END.
     """
     def _trace_node(node_name: str, func):
+        """为每个节点统一包一层 tracing，便于排查节点输入输出。"""
         def _inner(state: GraphState) -> GraphState:
             attrs = {"workflow.name": GROWTH_WORKFLOW_NAME, "node.name": node_name}
             attrs.update(build_span_attributes("node.input", summarize_state(state)))

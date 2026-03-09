@@ -40,8 +40,10 @@ _WORKFLOW_INDEX: Dict[str, WorkflowSpec] = {spec.name: spec for spec in _WORKFLO
 
 
 def list_workflow_specs() -> List[WorkflowSpec]:
+    """返回所有可路由工作流，供上层做选择或生成提示。"""
     return list(_WORKFLOWS)
 
 
 def get_workflow_spec(name: str) -> Optional[WorkflowSpec]:
+    """按名称取工作流定义，随后由 builder 构建实际 LangGraph。"""
     return _WORKFLOW_INDEX.get(name)
