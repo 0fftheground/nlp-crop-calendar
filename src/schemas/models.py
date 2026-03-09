@@ -129,18 +129,6 @@ class WeatherQueryInput(BaseModel):
         max_length=64,
         description="区域名称；weather_lookup 会先按区域表匹配 region_id，再调用天气接口。",
     )
-    lat: Optional[float] = Field(
-        default=None,
-        ge=-90,
-        le=90,
-        description="纬度（用于外部气象 API）。",
-    )
-    lon: Optional[float] = Field(
-        default=None,
-        ge=-180,
-        le=180,
-        description="经度（用于外部气象 API）。",
-    )
     start_date: date = Field(
         ..., description="查询起始日期（含），格式 YYYY-MM-DD。"
     )
@@ -172,19 +160,6 @@ class WeatherQueryInput(BaseModel):
         if match:
             return _strip_admin_prefix(match.group(0))
         return _strip_admin_prefix(text)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _fill_region_from_coords(cls, values: object) -> object:
-        if not isinstance(values, dict):
-            return values
-        region = values.get("region")
-        lat = values.get("lat")
-        lon = values.get("lon")
-        if (region is None or str(region).strip() == "") and lat is not None and lon is not None:
-            values = dict(values)
-            values["region"] = f"{lat},{lon}"
-        return values
 
     @model_validator(mode="after")
     def _validate_date_range(self) -> "WeatherQueryInput":
@@ -285,18 +260,12 @@ class WeatherSeriesDraft(BaseModel):
             else:
                 year = date.today().year
         merged["year"] = year
-        lat = merged.get("lat")
-        lon = merged.get("lon")
-        if merged.get("region") is None and lat is not None and lon is not None:
-            merged["region"] = f"{lat},{lon}"
         if merged.get("start_date") is None or merged.get("end_date") is None:
             raise ValueError("Missing required fields for WeatherQueryInput: start_date,end_date")
         merged.setdefault("granularity", "daily")
         merged.setdefault("include_advice", False)
         allowed = {
             "region",
-            "lat",
-            "lon",
             "start_date",
             "end_date",
             "year",

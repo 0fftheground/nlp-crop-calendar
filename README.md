@@ -56,7 +56,6 @@ Minimum required for most real runs:
 Common optional values:
 - `OPENAI_API_BASE` (OpenAI-compatible gateway/proxy base URL, usually ends with `/v1`)
 - `PUBLIC_BASE_URL`
-- `AMAP_API_KEY` (if using geocoding / weather flows that need it)
 - `BUSINESS_API_BASE_URL` / `BUSINESS_API_KEY` (required for planting plan / growth-stage / farm weather business APIs)
 
 Notes:

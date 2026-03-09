@@ -33,11 +33,9 @@ if not _MISSING_PYDANTIC_SETTINGS:
 class FeatureCaseTests(unittest.TestCase):
     def setUp(self) -> None:
         self._env_backup = {
-            "WEATHER_PROVIDER": os.environ.get("WEATHER_PROVIDER"),
             "TOOL_CACHE_STORE": os.environ.get("TOOL_CACHE_STORE"),
             "PENDING_STORE": os.environ.get("PENDING_STORE"),
         }
-        os.environ["WEATHER_PROVIDER"] = "mock"
         os.environ["TOOL_CACHE_STORE"] = "memory"
         os.environ["PENDING_STORE"] = "memory"
         get_config.cache_clear()
@@ -61,7 +59,7 @@ class FeatureCaseTests(unittest.TestCase):
             }
         )
         result = weather_lookup(payload)
-        self.assertEqual(result.name, "growth_weather_lookup")
+        self.assertEqual(result.name, "weather_lookup")
         data = result.data or {}
         self.assertEqual(data.get("region"), "farm:1")
         points = data.get("points") or []

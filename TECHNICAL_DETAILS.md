@@ -129,7 +129,7 @@ Growth-stage workflow specifics:
 5. **Farming recommendation**: call the external crop calendar API (when configured) using normalized planting data; output is stored in `recommendation_info`, and the workflow composes the final message.
 
 ## Tool Notes
-- Tools/services support `mock`/`local` providers; variety lookup reads Postgres via `AGRI_DB_URL` when `VARIETY_PROVIDER=local`. Weather can use `WEATHER_PROVIDER=91weather` for external forecasts.
+- Tools/services support `mock`/`local` providers where still applicable; variety lookup reads Postgres via `AGRI_DB_URL` when `VARIETY_PROVIDER=local`.
 - Planting plan search, growth-stage result lookup, and farm weather business-data access now use HTTP business APIs only; those paths no longer keep DB fallback branches.
 - Tool cache is currently disabled (no-op implementation).
 - Variety matching strategy: first recall all approval records by variety name, score using user location and "approval region/suitable region" rules; if multiple high-score records exist, an LLM chooses the best.

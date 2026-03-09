@@ -93,26 +93,8 @@ class AppConfig(BaseSettings):
     variety_db_table: Optional[str] = Field(
         default=None, validation_alias="VARIETY_DB_TABLE"
     )
-    weather_provider: str = Field(
-        default="mock", validation_alias="WEATHER_PROVIDER"
-    )
-    weather_api_url: Optional[str] = Field(
-        default=None, validation_alias="WEATHER_API_URL"
-    )
-    weather_api_key: Optional[str] = Field(
-        default=None, validation_alias="WEATHER_API_KEY"
-    )
-    weather_summary_mode: str = Field(
-        default="template", validation_alias="WEATHER_SUMMARY_MODE"
-    )
     public_base_url: Optional[str] = Field(
         default=None, validation_alias="PUBLIC_BASE_URL"
-    )
-    amap_api_key: Optional[str] = Field(
-        default=None, validation_alias="AMAP_API_KEY"
-    )
-    amap_geocode_url: Optional[str] = Field(
-        default=None, validation_alias="AMAP_GEOCODE_URL"
     )
     growth_stage_provider: str = Field(
         default="local", validation_alias="GROWTH_STAGE_PROVIDER"
@@ -202,15 +184,6 @@ class AppConfig(BaseSettings):
     interaction_raw_dir: Optional[str] = Field(
         default=None, validation_alias="INTERACTION_RAW_DIR"
     )
-    geocode_cache_store: str = Field(
-        default="sqlite", validation_alias="GEOCODE_CACHE_STORE"
-    )
-    geocode_cache_ttl_days: int = Field(
-        default=30, validation_alias="GEOCODE_CACHE_TTL_DAYS"
-    )
-    geocode_cache_path: Optional[str] = Field(
-        default=None, validation_alias="GEOCODE_CACHE_PATH"
-    )
     intent_rules_path: Optional[str] = Field(
         default=None, validation_alias="INTENT_RULES_PATH"
     )
@@ -233,10 +206,8 @@ class AppConfig(BaseSettings):
 
     @field_validator(
         "variety_provider",
-        "weather_provider",
         "growth_stage_provider",
         "crop_calendar_provider",
-        "weather_summary_mode",
         mode="after",
     )
     @classmethod
@@ -247,7 +218,6 @@ class AppConfig(BaseSettings):
         "pending_store",
         "tool_cache_store",
         "interaction_store",
-        "geocode_cache_store",
         mode="after",
     )
     @classmethod
