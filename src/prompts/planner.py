@@ -10,6 +10,7 @@ def build_planner_prompt(tools_text: str, workflows_text: str) -> str:
         "- none: 与农事无关或可直接回答。\n\n"
         "判定规则（尽量命中tool和workflow而不是 none）:\n"
         "- 天气/气象/预报/降雨/气温相关 -> tool: weather_lookup\n"
+        "- 查询播期推荐/播种适宜期/适播日期 -> tool: sowing_suitability_lookup\n"
         "- 生育期预测结果查询/生育阶段查询 -> workflow: growth_stage_query_workflow\n"
         "- 查询品种信息/特性/抗性/生育期/熟期/审定信息 -> tool: variety_lookup\n"
         "- 需要完整种植计划/全流程/多环节方案 -> workflow: crop_calendar_workflow\n"

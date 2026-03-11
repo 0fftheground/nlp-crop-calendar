@@ -78,6 +78,9 @@ class AppConfig(BaseSettings):
     farm_weather_api_url: Optional[str] = Field(
         default=None, validation_alias="FARM_WEATHER_API_URL"
     )
+    sowing_suitability_api_url: Optional[str] = Field(
+        default=None, validation_alias="SOWING_SUITABILITY_API_URL"
+    )
     variety_provider: str = Field(
         default="local", validation_alias="VARIETY_PROVIDER"
     )

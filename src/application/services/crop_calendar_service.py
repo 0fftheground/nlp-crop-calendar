@@ -56,6 +56,8 @@ def configure_crop_calendar_ports(
         _SQL_PORT = sql_port
     if http_port is not None:
         _HTTP_PORT = http_port
+    _CODE_MAP_CACHE.clear()
+    _CODE_REVERSE_CACHE.clear()
 
 
 def _cfg():

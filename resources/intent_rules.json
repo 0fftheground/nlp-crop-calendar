@@ -85,6 +85,26 @@
       "handler": "weather"
     },
     {
+      "id": "sowing_suitability_lookup",
+      "action": "tool",
+      "name": "sowing_suitability_lookup",
+      "priority": 65,
+      "any": [
+        "播期推荐",
+        "播种适宜期",
+        "播期",
+        "适播",
+        "适宜播种",
+        "播种窗口"
+      ],
+      "negative": [
+        "天气",
+        "气象",
+        "生育期",
+        "计划删除"
+      ]
+    },
+    {
       "id": "growth_stage_query_workflow",
       "action": "workflow",
       "name": "growth_stage_query_workflow",

@@ -623,11 +623,17 @@ def _recommend_node(state: GraphState) -> GraphState:
     state = add_trace(state, "recommend complete")
     # 成功结果写入缓存，避免同一 planting 重复调用外部服务。
     cache_key = build_planting_cache_key(planting)
+    planting_payload = planting.model_dump(mode="json")
     _store_calendar_response(
         cache_key,
         WorkflowResponse(
             message=message,
             recommendations=recommendations,
+            data={
+                "planting": planting_payload,
+                "plant_season_id": plant_season_id,
+                "resolved_region_id": resolved_region_id,
+            },
         ),
     )
     state = add_trace(state, "calendar_cached")
@@ -645,8 +651,10 @@ def _recommend_node(state: GraphState) -> GraphState:
                 "growth_stage": growth_stage,
                 "plant_season_id": plant_season_id,
                 "resolved_region_id": resolved_region_id,
+                "planting": planting_payload,
                 "message": message,
                 "data": {
+                    "planting": planting_payload,
                     "plant_season_id": plant_season_id,
                     "resolved_region_id": resolved_region_id,
                     "farmworks": farmworks_payload,

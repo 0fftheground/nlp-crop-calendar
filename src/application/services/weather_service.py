@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime, time, timedelta
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 
 from ..adapters import (
     DEFAULT_CONFIG_ADAPTER,
@@ -60,6 +60,21 @@ def _get_http(
     return _HTTP_PORT.get(
         url,
         params=params,
+        headers=headers,
+        timeout=timeout,
+    )
+
+
+def _post_json(
+    url: str,
+    *,
+    payload: dict[str, object],
+    headers: Optional[dict[str, str]] = None,
+    timeout: float = 10.0,
+):
+    return _HTTP_PORT.post(
+        url,
+        json_payload=payload,
         headers=headers,
         timeout=timeout,
     )
@@ -442,6 +457,7 @@ def _build_series_from_rows(
     rows: List[Dict[str, object]],
     *,
     region: Optional[str] = None,
+    summary: Optional[str] = None,
 ) -> Optional[WeatherSeries]:
     if not rows:
         return None
@@ -460,19 +476,49 @@ def _build_series_from_rows(
                 precipitation=_parse_float(row.get("pre")),
                 wind_speed=_parse_float(row.get("wins")),
                 condition=None,
+                sf_ws=_parse_float(row.get("sf_ws")),
+                sf_reason=str(row.get("sf_reason")).strip()
+                if row.get("sf_reason") is not None
+                else None,
+                lm_ws=_parse_float(row.get("lm_ws")),
+                lm_reason=str(row.get("lm_reason")).strip()
+                if row.get("lm_reason") is not None
+                else None,
+                yz_ws=_parse_float(row.get("yz_ws")),
+                yz_reason=str(row.get("yz_reason")).strip()
+                if row.get("yz_reason") is not None
+                else None,
+                fd_ws=_parse_float(row.get("fd_ws")),
+                fd_reason=str(row.get("fd_reason")).strip()
+                if row.get("fd_reason") is not None
+                else None,
+                dy_ws=_parse_float(row.get("dy_ws")),
+                dy_reason=str(row.get("dy_reason")).strip()
+                if row.get("dy_reason") is not None
+                else None,
+                sg_ws=_parse_float(row.get("sg_ws")),
+                sg_reason=str(row.get("sg_reason")).strip()
+                if row.get("sg_reason") is not None
+                else None,
+                zd_ws=_parse_float(row.get("zd_ws")),
+                zd_reason=str(row.get("zd_reason")).strip()
+                if row.get("zd_reason") is not None
+                else None,
             )
         )
     if not points:
         return None
     start_date = points[0].timestamp.date()
     end_date = points[-1].timestamp.date()
+    region_label = str(region).strip() if region else f"farm:{farm_id}"
     return WeatherSeries(
-        region=f"farm:{farm_id}",
+        region=region_label,
         granularity="daily",
         start_date=start_date,
         end_date=end_date,
         points=points,
         source="db",
+        summary=summary,
     )
 
 
@@ -484,7 +530,7 @@ def _get_farm_weather_api_url() -> Optional[str]:
     base = str(getattr(cfg, "business_api_base_url", None) or "").strip().rstrip("/")
     if not base:
         return None
-    return f"{base}/weather/farm"
+    return f"{base}/suit_rili"
 
 
 def _lookup_farm_weather_by_api(
@@ -492,24 +538,26 @@ def _lookup_farm_weather_by_api(
     farm_id: str,
     start_date: date,
     end_date: date,
-    region: Optional[str] = None,
+    region_id: Optional[object] = None,
+    region_label: Optional[str] = None,
 ) -> Optional[WeatherSeries]:
     cfg = _cfg()
     url = _get_farm_weather_api_url()
     if not url:
         raise RuntimeError("缺少农场天气接口地址。")
-    params: dict[str, object] = {
-        "farm_id": farm_id,
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
+    payload: dict[str, object] = {
+        "start_date": start_date.strftime("%Y%m%d"),
+        "end_date": end_date.strftime("%Y%m%d"),
     }
-    if region:
-        text = str(region).strip()
+    if region_id is not None:
+        text = str(region_id).strip()
         if text:
-            params["region_id"] = text
-    response = _get_http(
+            payload["region_id"] = text
+    else:
+        payload["farm_id"] = farm_id
+    response = _post_json(
         url,
-        params=params,
+        payload=payload,
         headers=_build_api_headers(
             api_key=getattr(cfg, "business_api_key", None)
         ),
@@ -520,25 +568,26 @@ def _lookup_farm_weather_by_api(
     if not isinstance(payload, dict):
         raise RuntimeError("农场天气接口返回格式未识别。")
     code = str(payload.get("code", "")).strip()
-    if code and code != "0":
-        raise RuntimeError(str(payload.get("msg") or "农场天气接口返回失败。"))
+    message = str(payload.get("message") or payload.get("msg") or "").strip()
+    if code and code != "200":
+        raise RuntimeError(message or "农场天气接口返回失败。")
     data = payload.get("data")
-    if not isinstance(data, dict):
-        return None
-    api_farm_id = data.get("farm_id")
-    points = data.get("points")
-    if not isinstance(points, list):
+    if not isinstance(data, list):
         return None
     rows = []
-    for item in points:
+    for item in data:
         if not isinstance(item, dict):
             continue
         rows.append(dict(item))
-    farm_label = str(api_farm_id if api_farm_id is not None else farm_id)
-    series = _build_series_from_rows(farm_label, rows, region=region)
+    series = _build_series_from_rows(
+        str(farm_id),
+        rows,
+        region=region_label,
+        summary=message or None,
+    )
     if series is None:
         return None
-    return series.model_copy(update={"source": "business_api"})
+    return series.model_copy(update={"source": "agri_weather_api"})
 
 
 def lookup_farm_weather_by_user(
@@ -547,6 +596,7 @@ def lookup_farm_weather_by_user(
     start_date: date,
     end_date: date,
     region_id: Optional[object] = None,
+    region: Optional[str] = None,
 ) -> ToolInvocation:
     del user_id
     cfg = _cfg()
@@ -556,7 +606,8 @@ def lookup_farm_weather_by_user(
             farm_id=farm_id,
             start_date=start_date,
             end_date=end_date,
-            region=str(region_id).strip() if region_id is not None else None,
+            region_id=region_id,
+            region_label=region,
         )
     except Exception as exc:
         return ToolInvocation(
@@ -572,7 +623,7 @@ def lookup_farm_weather_by_user(
         )
     return ToolInvocation(
         name="weather_lookup",
-        message="已获取农场气象数据。",
+        message=series.summary or "已获取农场气象与适宜度数据。",
         data=series.model_dump(mode="json"),
     )
 
@@ -613,4 +664,5 @@ def lookup_weather(
         start_date=start,
         end_date=end,
         region_id=region_id,
+        region=query.region,
     )

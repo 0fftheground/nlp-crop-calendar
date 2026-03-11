@@ -172,6 +172,8 @@ class IntentRouter:
             return None
         if name == "variety_lookup":
             return {"query": prompt}
+        if name == "sowing_suitability_lookup":
+            return {"query": prompt}
         if name == "weather_lookup":
             return self._build_weather_payload(prompt)
         if name == "memory_clear":

@@ -2,8 +2,14 @@ import contextvars
 from pathlib import Path
 from typing import Optional
 
+from .session_context import (
+    build_contextual_plan,
+    extract_session_context_from_tool,
+    extract_session_context_from_workflow,
+)
 from ..infra.config import get_config
 from ..infra.pending_store import build_pending_followup_store
+from ..infra.session_context_store import build_session_context_store
 from ..observability.logging_utils import log_event
 from ..schemas.models import HandleResponse, UserRequest, WorkflowResponse
 from .fast_intent import FastIntentRouter
@@ -32,6 +38,7 @@ class RequestRouter:
         self._tool_names = {spec["name"] for spec in tool_specs}
         self._planner = PlannerRunner(tool_specs, self._workflow_specs)
         self._pending_store = build_pending_followup_store()
+        self._session_context_store = build_session_context_store()
         cfg = get_config()
 
         mode = (cfg.intent_routing_mode or "hybrid").strip().lower()
@@ -74,6 +81,40 @@ class RequestRouter:
             get_workflow_spec_fn=get_workflow_spec,
         )
 
+    def _get_session_context_payload(self, session_id: str) -> dict:
+        payload = self._session_context_store.get(session_id)
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def _set_session_named_context(
+        self, session_id: str, *, kind: str, name: str, context: dict
+    ) -> None:
+        payload = self._get_session_context_payload(session_id)
+        tool_contexts = dict(payload.get("tool_contexts") or {})
+        workflow_contexts = dict(payload.get("workflow_contexts") or {})
+        if kind == "tool":
+            tool_contexts[name] = dict(context)
+        elif kind == "workflow":
+            workflow_contexts[name] = dict(context)
+        payload.update(
+            {
+                "tool_contexts": tool_contexts,
+                "workflow_contexts": workflow_contexts,
+                "last_context": {"kind": kind, "name": name},
+            }
+        )
+        self._session_context_store.set(session_id, payload)
+
+    def _clear_session_tool_contexts(self, session_id: str) -> None:
+        self._session_context_store.delete(session_id)
+
+    def _maybe_build_contextual_plan(
+        self, prompt: str, session_id: str
+    ) -> Optional[ActionPlan]:
+        if self._rule_engine.match(prompt):
+            return None
+        payload = self._get_session_context_payload(session_id)
+        return build_contextual_plan(prompt, payload)
+
     def handle(self, request: UserRequest) -> HandleResponse:
         session_id = request.session_id or request.user_id or "default"
         memory_id = request.user_id or session_id
@@ -96,6 +137,11 @@ class RequestRouter:
                 # New question: clear stale pending to avoid misrouting follow-ups.
                 self._pending_manager.delete(session_id)
                 pending = None
+            contextual_plan = self._maybe_build_contextual_plan(prompt, session_id)
+            if contextual_plan:
+                return self._execute_with_validation(
+                    contextual_plan, prompt, pending, session_id
+                )
             plan = self._intent_router.plan(
                 prompt,
                 pending=pending,
@@ -149,7 +195,7 @@ class RequestRouter:
         pending: Optional[dict],
         session_id: str,
     ) -> HandleResponse:
-        return self._plan_executor.execute_tool_plan(
+        response = self._plan_executor.execute_tool_plan(
             plan,
             prompt=prompt,
             pending=pending,
@@ -157,6 +203,16 @@ class RequestRouter:
             memory_id=self._memory_id_ctx.get(),
             execute_tool_fn=execute_tool,
         )
+        tool = response.tool
+        if tool and tool.name == "memory_clear":
+            self._clear_session_tool_contexts(session_id)
+        session_context = extract_session_context_from_tool(tool)
+        if session_context:
+            name, context = session_context
+            self._set_session_named_context(
+                session_id, kind="tool", name=name, context=context
+            )
+        return response
 
     def _execute_workflow_plan(
         self,
@@ -165,13 +221,26 @@ class RequestRouter:
         pending: Optional[dict],
         session_id: str,
     ) -> HandleResponse:
-        return self._plan_executor.execute_workflow_plan(
+        response = self._plan_executor.execute_workflow_plan(
             plan,
             prompt=prompt,
             pending=pending,
             session_id=session_id,
             run_named_workflow=self._run_named_workflow,
         )
+        workflow_name = plan.name
+        if not workflow_name and pending and pending.get("mode") == "workflow":
+            workflow_name = pending.get("workflow_name")
+        if workflow_name:
+            session_context = extract_session_context_from_workflow(
+                workflow_name, response.plan
+            )
+            if session_context:
+                name, context = session_context
+                self._set_session_named_context(
+                    session_id, kind="workflow", name=name, context=context
+                )
+        return response
 
     def _respond_none(
         self,

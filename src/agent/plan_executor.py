@@ -190,10 +190,8 @@ class PlanExecutor:
             self._pending_manager.delete(session_id)
         tool_input = self._coerce_plan_input(plan.input, prompt)
         if tool_name == "variety_lookup" and not pending:
-            tool_input = json.dumps(
-                {"prompt": prompt, "user_id": memory_id},
-                ensure_ascii=False,
-                default=str,
+            tool_input = self._build_variety_tool_input(
+                tool_input, prompt=prompt, memory_id=memory_id
             )
         tool_payload = execute_tool_fn(tool_name, tool_input)
         if not tool_payload:
@@ -442,6 +440,35 @@ class PlanExecutor:
             except json.JSONDecodeError:
                 return value
         return value
+
+    @staticmethod
+    def _build_variety_tool_input(
+        tool_input: str, *, prompt: str, memory_id: str
+    ) -> str:
+        payload = {"prompt": prompt, "query": prompt, "user_id": memory_id}
+        try:
+            parsed = json.loads(tool_input)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key, value in parsed.items():
+                if value not in (None, ""):
+                    payload[key] = value
+            effective_prompt = str(
+                parsed.get("prompt")
+                or parsed.get("query")
+                or payload.get("prompt")
+                or payload.get("query")
+                or prompt
+            ).strip()
+            payload["prompt"] = effective_prompt or prompt
+            payload.setdefault("query", payload["prompt"])
+        else:
+            text = str(tool_input or "").strip()
+            if text:
+                payload["prompt"] = text
+                payload["query"] = text
+        return json.dumps(payload, ensure_ascii=False, default=str)
 
     @staticmethod
     def _extract_missing_fields(exc: ValidationError) -> list[str]:

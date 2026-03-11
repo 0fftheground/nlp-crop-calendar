@@ -6,7 +6,13 @@ from typing import Callable, Dict, Optional, Sequence, Type
 
 from pydantic import BaseModel
 
-from ..schemas import MemoryClearInput, PromptInput, QueryInput, WeatherQueryInput
+from ..schemas import (
+    MemoryClearInput,
+    PromptInput,
+    QueryInput,
+    SowingSuitabilityQueryInput,
+    WeatherQueryInput,
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,11 @@ TOOL_INPUT_SPECS: Dict[str, InputSpec] = {
     ),
     "variety_lookup": InputSpec(
         model=QueryInput,
+        field_labels=QUERY_FIELD_LABELS,
+        to_prompt=_to_json_payload,
+    ),
+    "sowing_suitability_lookup": InputSpec(
+        model=SowingSuitabilityQueryInput,
         field_labels=QUERY_FIELD_LABELS,
         to_prompt=_to_json_payload,
     ),

@@ -69,6 +69,109 @@ docker-compose -f docker-compose.yml up -d --build
 docker-compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
 ```
 
+## Common Ops Commands
+
+### Local run
+Start:
+```bash
+python run_all.py
+```
+
+Stop:
+- Press `Ctrl+C` in the terminal that started the service.
+
+Check ports:
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8001/
+```
+
+If you need to find the local process by port:
+```bash
+netstat -ano | findstr :8000
+netstat -ano | findstr :8001
+```
+
+### Docker Compose
+Start base stack:
+```bash
+docker-compose -f docker-compose.yml up -d --build
+```
+
+Start full stack:
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+```
+
+Stop services:
+```bash
+docker-compose -f docker-compose.yml down
+```
+
+Stop full stack:
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.observability.yml down
+```
+
+Restart one service:
+```bash
+docker-compose -f docker-compose.yml restart api
+docker-compose -f docker-compose.yml restart chainlit
+```
+
+View service status:
+```bash
+docker-compose -f docker-compose.yml ps
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+```
+
+View recent logs:
+```bash
+docker-compose -f docker-compose.yml logs --tail=200 api
+docker-compose -f docker-compose.yml logs --tail=200 chainlit
+```
+
+Follow logs continuously:
+```bash
+docker-compose -f docker-compose.yml logs -f api
+docker-compose -f docker-compose.yml logs -f chainlit
+```
+
+View both main services together:
+```bash
+docker-compose -f docker-compose.yml logs -f api chainlit
+```
+
+Rebuild and restart a single service:
+```bash
+docker-compose -f docker-compose.yml up -d --build api
+docker-compose -f docker-compose.yml up -d --build chainlit
+```
+
+Enter a container:
+```bash
+docker exec -it nlp-crop-calendar-api /bin/sh
+docker exec -it nlp-crop-calendar-chainlit /bin/sh
+```
+
+Check container health:
+```bash
+docker inspect --format "{{.Name}} {{.State.Status}} {{.State.Health.Status}}" nlp-crop-calendar-api
+docker inspect --format "{{.Name}} {{.State.Status}} {{.State.Health.Status}}" nlp-crop-calendar-chainlit
+```
+
+### Log files in the API container
+The API process writes local files under `.cache/logs`:
+- `api_errors.log`
+- `observability.log`
+
+If you are running inside Docker, you can inspect them with:
+```bash
+docker exec -it nlp-crop-calendar-api ls -lah .cache/logs
+docker exec -it nlp-crop-calendar-api tail -n 200 .cache/logs/api_errors.log
+docker exec -it nlp-crop-calendar-api tail -n 200 .cache/logs/observability.log
+```
+
 ### 4) Open ports on the server
 Allow inbound traffic:
 - `8000` (API)

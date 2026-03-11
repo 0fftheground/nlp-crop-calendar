@@ -19,7 +19,7 @@ HIDDEN_TOOL_NAMES: set[str] = set()
 
 
 TOOL_CACHEABLE: set[str] = set()
-_TOOL_MODULES = ("variety", "weather", "memory", "plant_plan")
+_TOOL_MODULES = ("variety", "weather", "sowing", "memory", "plant_plan")
 _TOOLS_INITIALIZED = False
 
 

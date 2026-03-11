@@ -16,46 +16,19 @@ _USER_ID_KEY = "user_id"
 
 
 def _build_capability_guide() -> str:
-    return """欢迎来到农事助手！
+    return """欢迎使用农事助手。
 
-我目前支持两类能力：`workflow`（多步骤流程）和 `tool`（单点查询/操作）。
+你可以直接这样问：
 
-当前限制：
-- 创建/保存种植计划仅支持默认农场（`DEFAULT_FARM_ID`），暂不支持前端指定农场。
+- 种植计划：`帮我做一份水稻种植计划`
+- 生育期查询：`查询计划id=123的生育期预测结果`
+- 天气与适宜度：`查询长沙2025-01-01到2025-01-03的天气`
+- 播期推荐：`查询美香占2号、一季晚稻、直播在长沙的播期推荐`
+- 品种信息：`南粳9108的生育期和适宜种植区域是什么？`
+- 计划管理：`列出当前启用的种植计划` / `删除种植计划 plant_season_id=123`
 
-可直接参考下面示例提问：
-
-## Workflow（复杂任务）
-
-1. 完整种植计划（`crop_calendar_workflow`）
-- 示例：`请基于默认农场，按水稻品种南粳9108、5月20日插秧生成完整农事计划。`
-- 示例：`帮我给默认农场做一份水稻种植计划。`（信息不足时我会继续追问）
-
-2. 生育期查询（`growth_stage_query_workflow`）
-- 示例：`查询计划id=123的生育期预测结果。`
-- 示例：`帮我查一下默认农场里南粳9108相关计划的生育期。`（可能会让你选择计划）
-
-## Tool（单点查询/操作）
-
-1. 天气查询（`weather_lookup`）
-- 示例：`查询默认农场2026-03-01到2026-03-07的天气。`
-
-2. 品种信息查询（`variety_lookup`）
-- 示例：`南粳9108的生育期、抗性和适宜种植区域是什么？`
-
-3. 查看启用计划（`plant_plan_list_active`）
-- 示例：`列出默认农场当前启用的种植计划。`
-
-4. 删除种植计划（`plant_plan_delete`）
-- 示例：`删除种植计划 plant_season_id=123`
-
-5. 清除历史经验（`memory_clear`）
-- 示例：`清除历史经验记录`
-
-提问建议：
-- 尽量提供：`地区 / 作物 / 品种 / 播种或插秧日期 / 种植方式`
-- 查询类请求尽量给出：`计划ID` 或明确的时间范围
-- 如需生成/保存计划，默认写入系统配置的默认农场
+提问时尽量带上：`地区 / 品种 / 稻作类型 / 播种方式 / 日期或计划ID`
+如需保存计划，默认使用系统配置的 `DEFAULT_FARM_ID`。
 """
 
 
@@ -148,6 +121,70 @@ def _format_weather_tool_details(
     return detail_text
 
 
+def _format_sowing_suitability_details(
+    tool_name: str, data: object, base_message: str = ""
+) -> str:
+    if tool_name != "sowing_suitability_lookup":
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    result = data.get("result")
+    resolved = data.get("resolved")
+    if not isinstance(result, dict):
+        return ""
+    lines: list[str] = []
+    method_labels = {
+        "direct_seeding": "直播",
+        "transplanting": "移栽",
+    }
+
+    def _clean_dates(values: object) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        return [str(item).strip() for item in values if str(item).strip()]
+
+    def _format_date_range(values: list[str], *, full_threshold: int = 7) -> str:
+        if not values:
+            return ""
+        if len(values) <= full_threshold:
+            return "、".join(values)
+        if len(values) == 1:
+            return values[0]
+        return f"{values[0]} ~ {values[-1]}（共{len(values)}天）"
+
+    if isinstance(resolved, dict):
+        meta = []
+        for label, key in (
+            ("品种", "variety"),
+            ("稻作类型", "culti_type"),
+            ("播种方式", "planting_method"),
+            ("区域", "region_id"),
+        ):
+            value = resolved.get(key)
+            if value:
+                if key == "planting_method":
+                    value = method_labels.get(str(value), str(value))
+                meta.append(f"{label}：{value}")
+        if meta:
+            lines.append("，".join(meta))
+    valid_dates = _clean_dates(result.get("suitDate"))
+    invalid_dates = _clean_dates(result.get("unsuitDate"))
+    reasons = _clean_dates(result.get("unsuitReasons"))
+    if valid_dates:
+        lines.append(f"推荐播期：{_format_date_range(valid_dates)}")
+    if invalid_dates:
+        lines.append(f"不推荐日期：{_format_date_range(invalid_dates, full_threshold=10)}")
+    if reasons:
+        deduped_reasons = list(dict.fromkeys(reasons))
+        lines.append(f"原因：{'；'.join(deduped_reasons[:3])}")
+    detail_text = "\n".join([line for line in lines if line])
+    if not detail_text:
+        return ""
+    if base_message and detail_text in base_message:
+        return ""
+    return detail_text
+
+
 def _format_tool_response_message(tool: dict) -> str:
     tool_name = str(tool.get("name") or "")
     message_text = str(tool.get("message") or "").strip()
@@ -156,6 +193,10 @@ def _format_tool_response_message(tool: dict) -> str:
     if message_text:
         content += f"\n{message_text}"
     detail_text = _format_weather_tool_details(tool_name, data, base_message=message_text)
+    if not detail_text:
+        detail_text = _format_sowing_suitability_details(
+            tool_name, data, base_message=message_text
+        )
     if detail_text:
         content += f"\n\n{detail_text}"
     return content

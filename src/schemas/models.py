@@ -182,6 +182,20 @@ class WeatherDataPoint(BaseModel):
     precipitation: Optional[float] = None
     wind_speed: Optional[float] = None
     condition: Optional[str] = None
+    sf_ws: Optional[float] = None
+    sf_reason: Optional[str] = None
+    lm_ws: Optional[float] = None
+    lm_reason: Optional[str] = None
+    yz_ws: Optional[float] = None
+    yz_reason: Optional[str] = None
+    fd_ws: Optional[float] = None
+    fd_reason: Optional[str] = None
+    dy_ws: Optional[float] = None
+    dy_reason: Optional[str] = None
+    sg_ws: Optional[float] = None
+    sg_reason: Optional[str] = None
+    zd_ws: Optional[float] = None
+    zd_reason: Optional[str] = None
 
 
 class WeatherSeries(BaseModel):
@@ -284,6 +298,22 @@ class QueryInput(BaseModel):
         min_length=1,
         description="用户查询内容或原始问题。",
     )
+
+
+class SowingSuitabilityQueryInput(BaseModel):
+    """Structured input for sowing suitability lookup."""
+
+    query: str = Field(
+        ...,
+        min_length=1,
+        description="用户原始问题，需包含品种、稻作类型、播种方式及区域或使用默认农场。",
+    )
+    variety: Optional[str] = None
+    culti_type: Optional[str] = None
+    planting_method: Optional[str] = None
+    region_id: Optional[str] = None
+    farm_id: Optional[str] = None
+    crop: Optional[str] = None
 
 
 class PromptInput(BaseModel):

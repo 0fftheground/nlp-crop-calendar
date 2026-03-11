@@ -233,6 +233,5 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertTrue(mocked_execute.called)
         self.assertIsNone(self.router._pending_store.get("s8"))
 
-
 if __name__ == "__main__":
     unittest.main()
