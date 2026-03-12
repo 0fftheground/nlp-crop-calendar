@@ -600,6 +600,17 @@ def _normalize_sowing_method_code(value: object) -> Optional[int]:
     return _resolve_code("sowingmtd", label)
 
 
+def _planting_method_value(value: object) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "value"):
+        try:
+            return str(value.value).strip()
+        except Exception:
+            pass
+    return str(value).strip()
+
+
 def _normalize_culti_type_code(value: object) -> Optional[int]:
     if value is None:
         return None
@@ -622,71 +633,42 @@ def list_code_names(category: str, *, limit: int = 8) -> List[str]:
     return names[: max(1, int(limit))]
 
 
-def _coerce_operation_items(payload: object) -> List[OperationItem]:
-    if not isinstance(payload, list):
-        return []
-    items: List[OperationItem] = []
-    for raw in payload:
-        if isinstance(raw, OperationItem):
-            items.append(raw)
-            continue
-        if not isinstance(raw, dict):
-            continue
-        try:
-            items.append(OperationItem.model_validate(raw))
-            continue
-        except Exception:
-            pass
-        data = dict(raw)
-        if "title" not in data:
-            data["title"] = data.get("name") or data.get("operation") or ""
-        if "description" not in data:
-            data["description"] = (
-                data.get("desc")
-                or data.get("content")
-                or data.get("detail")
-                or ""
-            )
-        if "stage" not in data:
-            data["stage"] = data.get("code") or data.get("type") or ""
-        if "window" not in data:
-            data["window"] = data.get("time_window") or data.get("time") or None
-        try:
-            items.append(OperationItem.model_validate(data))
-        except Exception:
-            continue
-    return items
-
 def _build_crop_calendar_payload(
     planting: PlantingDetails,
 ) -> tuple[Dict[str, object], Optional[object]]:
     cfg = _cfg()
+    explicit_farm_id = str(planting.farm_id or "").strip()
     region_raw = planting.region_id
-    resolved_region_id = _resolve_region_id_for_payload(region_raw)
-    if region_raw and resolved_region_id is None:
-        raise RuntimeError(f"未匹配到区域 region_id: {region_raw}")
+    farm_id_raw = explicit_farm_id or (
+        None if region_raw else getattr(cfg, "default_farm_id", None)
+    )
     farm_id: Optional[int] = None
-    if resolved_region_id is None:
-        # User-provided farm_id is intentionally ignored for now.
-        # Only default farm_id is supported when region is not provided.
-        farm_id_raw = cfg.default_farm_id
-        if not farm_id_raw:
-            raise RuntimeError("缺少 DEFAULT_FARM_ID，无法生成种植计划。")
+    resolved_region_id: Optional[object] = None
+    if farm_id_raw:
         try:
             farm_id = int(str(farm_id_raw).strip())
         except Exception as exc:
             raise RuntimeError(f"farm_id 非法: {farm_id_raw}") from exc
+    else:
+        resolved_region_id = _resolve_region_id_for_payload(region_raw)
+        if region_raw and resolved_region_id is None:
+            raise RuntimeError(f"未匹配到区域 region_id: {region_raw}")
     if not planting.variety:
         raise RuntimeError("缺少品种信息，无法生成种植计划。")
     variety_id = _fetch_variety_id_by_name(planting.variety)
     if variety_id is None:
         raise RuntimeError(f"未找到品种ID: {planting.variety}")
-    sowing_method = _normalize_sowing_method_code(planting.planting_method)
+    planting_method_value = _planting_method_value(planting.planting_method)
+    sowing_method = _normalize_sowing_method_code(planting_method_value)
     if sowing_method is None:
         raise RuntimeError("无法解析 sowing_method 代码。")
-    culti_type_code = None
-    if planting.culti_type:
-        culti_type_code = _normalize_culti_type_code(planting.culti_type)
+    if planting.transplant_date is None and planting_method_value != "direct_seeding":
+        raise RuntimeError("非直播模式必须提供 transp_date。")
+    if not planting.culti_type:
+        raise RuntimeError("缺少稻作类型信息，无法生成种植计划。")
+    culti_type_code = _normalize_culti_type_code(planting.culti_type)
+    if culti_type_code is None:
+        raise RuntimeError("无法解析 culti_type 代码。")
     payload: Dict[str, object] = {
         "sowing_date": planting.sowing_date.isoformat(),
         "variety_id": variety_id,
@@ -696,10 +678,10 @@ def _build_crop_calendar_payload(
             if planting.transplant_date
             else ""
         ),
-        "culti_type": culti_type_code if culti_type_code is not None else "",
+        "culti_type": culti_type_code,
     }
     if resolved_region_id is not None:
-        payload["region_id"] = resolved_region_id
+        payload["region_id"] = _coerce_region_id_value(resolved_region_id)
     elif farm_id is not None:
         payload["farm_id"] = farm_id
     return payload, resolved_region_id
@@ -735,15 +717,27 @@ def _build_operation_plan_from_farmworks(
         for idx, (title, date_text) in enumerate(farmworks.items()):
             if not title:
                 continue
-            date_str = str(date_text) if date_text is not None else ""
+            if isinstance(date_text, (list, tuple, set)):
+                date_values = [
+                    str(item).strip()
+                    for item in date_text
+                    if item is not None and str(item).strip()
+                ]
+                date_str = "、".join(date_values)
+                sort_key = _extract_operation_sort_date(date_values[0]) if date_values else None
+            else:
+                date_str = str(date_text).strip() if date_text is not None else ""
+                sort_key = _extract_operation_sort_date(date_str)
+                date_values = [date_str] if date_str else []
             op = OperationItem(
                 stage=str(title),
                 title=str(title),
                 description=date_str,
+                dates=date_values,
                 window=None,
                 priority="medium",
             )
-            ops_with_sort_keys.append((_extract_operation_sort_date(date_str), idx, op))
+            ops_with_sort_keys.append((sort_key, idx, op))
     ops = [
         item
         for _, _, item in sorted(
@@ -930,10 +924,14 @@ def _derive_crop_calendar_delete_url(cfg) -> Optional[str]:
     for url in candidates:
         if not url:
             continue
-        if url.endswith("/cropCalender/plantPlan/add"):
-            return url.replace("/cropCalender/plantPlan/add", "/cropCalender/plantPlan/delete")
+        if url.endswith("/cropCalender/previewCalender"):
+            return url.replace("/cropCalender/previewCalender", "/cropCalender/plantPlan/delete")
+        if url.endswith("/cropCalender/plantPlan/activate"):
+            return url.replace("/cropCalender/plantPlan/activate", "/cropCalender/plantPlan/delete")
         if url.endswith("/cropCalender/plantPlan/setActive"):
             return url.replace("/cropCalender/plantPlan/setActive", "/cropCalender/plantPlan/delete")
+        if url.endswith("/cropCalender/plantPlan/add"):
+            return url.replace("/cropCalender/plantPlan/add", "/cropCalender/plantPlan/delete")
     return None
 
 

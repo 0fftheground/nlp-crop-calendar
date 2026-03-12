@@ -10,7 +10,7 @@ from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
-from typing import Optional, Tuple
+from typing import Optional
 
 from .postgres import connect_postgres
 
@@ -32,7 +32,7 @@ class MemoryToolResultCache(ToolResultCache):
     def __init__(self, max_items: int, ttl_seconds: int) -> None:
         self._max_items = max(1, int(max_items))
         self._ttl_seconds = max(1, int(ttl_seconds))
-        self._items: "OrderedDict[str, Tuple[dict, int]]" = OrderedDict()
+        self._items: "OrderedDict[str, tuple[dict, int]]" = OrderedDict()
         self._lock = Lock()
 
     def get(self, tool_name: str, provider: str, prompt: str) -> Optional[dict]:

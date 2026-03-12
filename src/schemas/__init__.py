@@ -5,8 +5,6 @@ from .models import (
     WorkflowResponse,
     ToolInvocation,
     HandleResponse,
-    PlantingDetailsDraft,
-    PlantingDetails,
     PredictGrowthStageInput,
     GrowthStageResult,
     WeatherQueryInput,
@@ -21,6 +19,7 @@ from .models import (
     OperationPlanResult,
     OperationItem,
 )
+from ..domain.planting_models import PlantingDetailsDraft, PlantingDetails
 
 __all__ = [
     "FarmerQuery",

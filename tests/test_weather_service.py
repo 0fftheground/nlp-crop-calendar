@@ -17,6 +17,7 @@ if not _MISSING_PYDANTIC_SETTINGS:
     from src.application.services.weather_service import (
         configure_weather_ports,
         lookup_weather,
+        normalize_weather_prompt,
     )
 
 
@@ -214,3 +215,41 @@ class WeatherServiceTests(unittest.TestCase):
             },
         )
         self.assertEqual(result.data.get("region"), "farm:12")
+
+    def test_normalize_weather_prompt_uses_recent_range_from_query_text(self) -> None:
+        from datetime import date as _date
+        from unittest.mock import patch
+
+        class FakeDate(_date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 3, 12)
+
+        payload = (
+            '{"query":"最近适合打药吗","start_date":"2024-06-01","end_date":"2024-06-10"}'
+        )
+        with patch("src.application.services.weather_service.date", FakeDate):
+            _, query = normalize_weather_prompt(payload)
+
+        self.assertIsNotNone(query)
+        self.assertEqual(query.start_date.isoformat(), "2026-03-03")
+        self.assertEqual(query.end_date.isoformat(), "2026-03-12")
+        self.assertEqual(query.year, 2026)
+
+    def test_lookup_weather_rejects_unsupported_operation_display(self) -> None:
+        from datetime import date as _date
+        from unittest.mock import patch
+
+        class FakeDate(_date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 3, 12)
+
+        with patch("src.application.services.weather_service.date", FakeDate):
+            result = lookup_weather('{"query":"最近适合浇水吗"}')
+
+        self.assertEqual(result.name, "weather_lookup")
+        self.assertIn("施肥、炼苗、移栽、翻地、打药、收割、整地", result.message)
+        self.assertIn("浇水", result.message)
+        self.assertIn("暂无法显示", result.message)
+        self.assertEqual(result.data, {})

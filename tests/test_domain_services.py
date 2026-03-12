@@ -1,4 +1,3 @@
-import calendar
 import importlib.util
 import os
 import sys
@@ -79,6 +78,19 @@ class DomainServiceTests(unittest.TestCase):
         titles = [op.title for op in plan.operations]
         self.assertEqual(titles, ["整地", "追肥", "收获"])
 
+    def test_build_operation_plan_from_farmworks_accepts_date_lists(self) -> None:
+        farmworks = {
+            "追肥": ["2025-05-20", "2025-05-25"],
+            "整地": ["2025-05-01"],
+        }
+        plan = _build_operation_plan_from_farmworks(farmworks, crop="水稻")
+        titles = [op.title for op in plan.operations]
+        descriptions = [op.description for op in plan.operations]
+        dates = [op.dates for op in plan.operations]
+        self.assertEqual(titles, ["整地", "追肥"])
+        self.assertEqual(descriptions, ["2025-05-01", "2025-05-20、2025-05-25"])
+        self.assertEqual(dates, [["2025-05-01"], ["2025-05-20", "2025-05-25"]])
+
     def test_extract_planting_details_prefers_specific_culti_type(self) -> None:
         draft = extract_planting_details("4月20日播种，一季晚稻")
         self.assertEqual(draft.culti_type, "一季晚稻")
@@ -100,6 +112,40 @@ class DomainServiceTests(unittest.TestCase):
         planting = PlantingDetails(
             crop="水稻",
             variety="美香占2号",
+            planting_method="direct_seeding",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=None,
+        )
+        with patch(
+            "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
+            return_value=1001,
+        ):
+            payload, _ = _build_crop_calendar_payload(planting)
+        self.assertEqual(payload.get("transp_date"), "")
+
+    def test_build_crop_calendar_payload_allows_empty_transplant_date_for_enum_direct_seeding(self) -> None:
+        os.environ["DEFAULT_FARM_ID"] = "1"
+        get_config.cache_clear()
+        planting = PlantingDetails(
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="直播",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=None,
+        )
+        with patch(
+            "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
+            return_value=1001,
+        ):
+            payload, _ = _build_crop_calendar_payload(planting)
+        self.assertEqual(payload.get("transp_date"), "")
+
+    def test_build_crop_calendar_payload_requires_transplant_date_for_transplanting(self) -> None:
+        os.environ["DEFAULT_FARM_ID"] = "1"
+        get_config.cache_clear()
+        planting = PlantingDetails(
+            crop="水稻",
+            variety="美香占2号",
             planting_method="transplanting",
             sowing_date=date(2025, 5, 1),
             transplant_date=None,
@@ -108,8 +154,26 @@ class DomainServiceTests(unittest.TestCase):
             "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
             return_value=1001,
         ):
-            payload = _build_crop_calendar_payload(planting)
-        self.assertEqual(payload.get("transp_date"), "")
+            with self.assertRaisesRegex(RuntimeError, "transp_date"):
+                _build_crop_calendar_payload(planting)
+
+    def test_build_crop_calendar_payload_requires_culti_type(self) -> None:
+        os.environ["DEFAULT_FARM_ID"] = "1"
+        get_config.cache_clear()
+        planting = PlantingDetails(
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="direct_seeding",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=None,
+            culti_type=None,
+        )
+        with patch(
+            "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
+            return_value=1001,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "稻作类型"):
+                _build_crop_calendar_payload(planting)
 
     def test_build_fallback_planting_keeps_transplant_date_empty(self) -> None:
         draft = PlantingDetailsDraft(
@@ -137,21 +201,21 @@ class DomainServiceTests(unittest.TestCase):
         os.environ["DEFAULT_FARM_ID"] = "1"
         get_config.cache_clear()
         planting = PlantingDetails(
-            farm_id="99",
             crop="水稻",
             variety="美香占2号",
             planting_method="transplanting",
             sowing_date=date(2025, 5, 1),
-            transplant_date=None,
+            transplant_date=date(2025, 5, 25),
         )
         with patch(
             "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
             return_value=1001,
         ):
-            payload = _build_crop_calendar_payload(planting)
+            payload, resolved_region_id = _build_crop_calendar_payload(planting)
         self.assertEqual(payload.get("farm_id"), 1)
+        self.assertIsNone(resolved_region_id)
 
-    def test_build_crop_calendar_payload_prefers_region_id(self) -> None:
+    def test_build_crop_calendar_payload_prefers_explicit_farm_id(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"
         get_config.cache_clear()
         planting = PlantingDetails(
@@ -161,15 +225,39 @@ class DomainServiceTests(unittest.TestCase):
             variety="美香占2号",
             planting_method="transplanting",
             sowing_date=date(2025, 5, 1),
-            transplant_date=None,
+            transplant_date=date(2025, 5, 25),
+        )
+        with patch(
+            "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
+            return_value=1001,
+        ), patch(
+            "src.application.services.crop_calendar_service._resolve_region_id_for_payload"
+        ) as resolve_region:
+            payload, resolved_region_id = _build_crop_calendar_payload(planting)
+        self.assertEqual(payload.get("farm_id"), 99)
+        self.assertNotIn("region_id", payload)
+        self.assertIsNone(resolved_region_id)
+        resolve_region.assert_not_called()
+
+    def test_build_crop_calendar_payload_prefers_region_id(self) -> None:
+        os.environ["DEFAULT_FARM_ID"] = "1"
+        get_config.cache_clear()
+        planting = PlantingDetails(
+            region_id="320100",
+            crop="水稻",
+            variety="美香占2号",
+            planting_method="transplanting",
+            sowing_date=date(2025, 5, 1),
+            transplant_date=date(2025, 5, 25),
         )
         with patch(
             "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
             return_value=1001,
         ):
-            payload = _build_crop_calendar_payload(planting)
+            payload, resolved_region_id = _build_crop_calendar_payload(planting)
         self.assertEqual(payload.get("region_id"), 320100)
         self.assertNotIn("farm_id", payload)
+        self.assertEqual(resolved_region_id, 320100)
 
     def test_build_crop_calendar_payload_resolves_region_name(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"
@@ -180,7 +268,7 @@ class DomainServiceTests(unittest.TestCase):
             variety="美香占2号",
             planting_method="transplanting",
             sowing_date=date(2025, 5, 1),
-            transplant_date=None,
+            transplant_date=date(2025, 5, 25),
         )
         with patch(
             "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
@@ -189,9 +277,10 @@ class DomainServiceTests(unittest.TestCase):
             "src.application.services.crop_calendar_service._resolve_region_id_for_payload",
             return_value=430000,
         ):
-            payload = _build_crop_calendar_payload(planting)
+            payload, resolved_region_id = _build_crop_calendar_payload(planting)
         self.assertEqual(payload.get("region_id"), 430000)
         self.assertNotIn("farm_id", payload)
+        self.assertEqual(resolved_region_id, 430000)
 
     def test_build_crop_calendar_payload_errors_when_region_unmatched(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"
@@ -202,7 +291,7 @@ class DomainServiceTests(unittest.TestCase):
             variety="美香占2号",
             planting_method="transplanting",
             sowing_date=date(2025, 5, 1),
-            transplant_date=None,
+            transplant_date=date(2025, 5, 25),
         )
         with patch(
             "src.application.services.crop_calendar_service._fetch_variety_id_by_name",

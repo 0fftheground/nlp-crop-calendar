@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Mapping, Optional
+from typing import Dict, Mapping, Optional
 
 from ..adapters import (
     DEFAULT_CONFIG_ADAPTER,

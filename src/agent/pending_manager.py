@@ -16,7 +16,7 @@ from .followup import (
 )
 from ..infra.variety_store import find_exact_variety_in_text, retrieve_variety_candidates
 from ..observability.logging_utils import log_event
-from ..schemas.models import PlantingDetailsDraft, ToolInvocation
+from ..schemas import PlantingDetailsDraft, ToolInvocation
 
 
 _NEW_TOPIC_TOKENS = {

@@ -251,6 +251,47 @@ class SessionContextExtensionTests(unittest.TestCase):
         self.assertIn("2026-03-20", merged_prompt)
         self.assertEqual(mocked_run.call_args[0][1], "crop_calendar_workflow")
 
+    def test_crop_calendar_save_response_does_not_override_session_context(self) -> None:
+        from src.schemas.models import WorkflowResponse
+
+        router = self._build_router()
+        router._session_context_store.set(
+            "c-save",
+            {
+                "workflow_contexts": {
+                    "crop_calendar_workflow": {
+                        "planting": {
+                            "region_id": "长沙",
+                            "crop": "水稻",
+                            "variety": "美香占2号",
+                            "culti_type": "早稻",
+                            "planting_method": "direct_seeding",
+                            "sowing_date": "2026-03-20",
+                        },
+                        "plant_season_id": 1,
+                    }
+                },
+                "last_context": {"kind": "workflow", "name": "crop_calendar_workflow"},
+            },
+        )
+
+        session_context = router._session_context_store.get("c-save")
+        save_plan = WorkflowResponse(
+            message="已保存种植计划。",
+            data={"save_response": {"code": "0", "data": {"plant_season_id": 1}}},
+        )
+
+        from src.agent.session_context import extract_session_context_from_workflow
+
+        extracted = extract_session_context_from_workflow(
+            "crop_calendar_workflow", save_plan
+        )
+        self.assertIsNone(extracted)
+        self.assertEqual(
+            session_context.get("last_context"),
+            {"kind": "workflow", "name": "crop_calendar_workflow"},
+        )
+
     def test_session_context_only_uses_last_context(self) -> None:
         from src.schemas.models import ToolInvocation, UserRequest
 

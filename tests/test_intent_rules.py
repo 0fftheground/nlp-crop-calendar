@@ -88,6 +88,20 @@ class IntentRuleTests(unittest.TestCase):
         self.assertIsInstance(plan.input, dict)
         self.assertEqual(plan.input.get("query"), "帮我查美香占2号一季晚稻直播的播种适宜期")
 
+    def test_router_rule_crop_calendar_generate_plan(self) -> None:
+        from src.agent.router import RequestRouter
+
+        with patch("src.agent.planner.get_chat_model", return_value=_DummyLLM()):
+            with patch(
+                "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
+            ):
+                router = RequestRouter()
+        plan = router._intent_router._rule_route("帮我生成一个种植计划")
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.action, "workflow")
+        self.assertEqual(plan.name, "crop_calendar_workflow")
+        self.assertEqual(plan.input, {"prompt": "帮我生成一个种植计划"})
+
 
 if __name__ == "__main__":
     unittest.main()

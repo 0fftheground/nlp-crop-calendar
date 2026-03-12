@@ -7,6 +7,10 @@ import httpx
 import uuid
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+try:
+    BACKEND_TIMEOUT_SECONDS = float(os.getenv("BACKEND_TIMEOUT_SECONDS", "90"))
+except ValueError:
+    BACKEND_TIMEOUT_SECONDS = 90.0
 _AUTH_USERS_ENV = "CHAINLIT_AUTH_USERS"
 _AUTH_USERNAME_ENV = "CHAINLIT_AUTH_USERNAME"
 _AUTH_PASSWORD_ENV = "CHAINLIT_AUTH_PASSWORD"
@@ -85,6 +89,35 @@ def _format_weather_tool_details(
             meta.append(f"结束：{end_date}")
         if meta:
             lines.append("，".join(meta))
+    advice_labels = {
+        "sf_ws": "施肥",
+        "lm_ws": "炼苗",
+        "yz_ws": "移栽",
+        "fd_ws": "翻地",
+        "dy_ws": "打药",
+        "sg_ws": "收割",
+        "zd_ws": "整地",
+    }
+
+    def _format_score(score: object) -> str:
+        if isinstance(score, int):
+            return str(score)
+        if isinstance(score, float):
+            return f"{score:.2f}".rstrip("0").rstrip(".")
+        return str(score)
+
+    def _format_operation_advice(
+        label: str, score: object, reason: object
+    ) -> Optional[str]:
+        if score is None and not reason:
+            return None
+        advice = f"{label}适宜度"
+        if score is not None:
+            advice = f"{advice} {_format_score(score)}"
+        if reason:
+            advice = f"{advice}（{reason}）"
+        return advice
+
     if isinstance(points, list):
         lines.append(f"天数：{len(points)}")
         preview = points[:7]
@@ -107,9 +140,18 @@ def _format_weather_tool_details(
                 segs.append(f"降水 {rain}mm")
             if not segs and item.get("condition"):
                 segs.append(str(item.get("condition")))
+            advice_parts = []
+            for score_key, label in advice_labels.items():
+                score = item.get(score_key)
+                reason = item.get(score_key.replace("_ws", "_reason"))
+                advice = _format_operation_advice(label, score, reason)
+                if advice:
+                    advice_parts.append(advice)
             line = f"- {ts}" if ts else "- "
             if segs:
                 line += " " + "，".join(segs)
+            if advice_parts:
+                line += "；" + "；".join(advice_parts)
             lines.append(line.rstrip())
         if len(points) > len(preview):
             lines.append(f"... 其余 {len(points) - len(preview)} 天已省略")
@@ -353,7 +395,7 @@ async def on_message(message: cl.Message):
         session_id, user_id = _ensure_session_ids()
         async with httpx.AsyncClient(
             base_url=BACKEND_URL,
-            timeout=30,
+            timeout=httpx.Timeout(BACKEND_TIMEOUT_SECONDS),
             trust_env=_trust_env_for_backend(BACKEND_URL),
         ) as client:
             response = await client.post(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from typing import Dict, Optional, List, Tuple
 
 from ..adapters import (
@@ -29,6 +29,43 @@ _WEATHER_REGION_RE = re.compile(
     r"(?:天气|气温|气象|降雨|降水|湿度|风速|预报)"
 )
 _REGION_SUFFIX_RE = re.compile(r"(特别行政区|自治区|自治州|省|市|州|盟|地区|区|县)$")
+_RECENT_DAYS_RE = re.compile(r"(?:最近|近)(\d{1,2})天")
+_SUPPORTED_WEATHER_OPERATIONS = (
+    "施肥",
+    "炼苗",
+    "移栽",
+    "翻地",
+    "打药",
+    "收割",
+    "整地",
+)
+_SUPPORTED_WEATHER_OPERATION_ALIASES = {
+    "施肥": ("施肥", "追肥"),
+    "炼苗": ("炼苗",),
+    "移栽": ("移栽", "插秧"),
+    "翻地": ("翻地",),
+    "打药": ("打药", "喷药"),
+    "收割": ("收割", "收获"),
+    "整地": ("整地",),
+}
+_UNSUPPORTED_WEATHER_OPERATION_ALIASES = {
+    "浇水": ("浇水", "灌溉"),
+    "除草": ("除草",),
+    "播种": ("播种",),
+    "育秧": ("育秧",),
+    "病虫害防治": ("病虫害防治", "防病", "治虫"),
+}
+_WEATHER_SUITABILITY_CUES = (
+    "农事适宜度",
+    "适合",
+    "适宜",
+    "是否适合",
+    "能否",
+    "能不能",
+    "可否",
+    "合适吗",
+    "宜不宜",
+)
 
 
 def configure_weather_ports(
@@ -48,22 +85,6 @@ def configure_weather_ports(
 
 def _cfg():
     return _CONFIG_PORT.get()
-
-
-def _get_http(
-    url: str,
-    *,
-    params: Optional[dict[str, object]] = None,
-    headers: Optional[dict[str, str]] = None,
-    timeout: float = 10.0,
-):
-    return _HTTP_PORT.get(
-        url,
-        params=params,
-        headers=headers,
-        timeout=timeout,
-    )
-
 
 def _post_json(
     url: str,
@@ -178,6 +199,60 @@ def _extract_region_from_text(text: str) -> Optional[str]:
     return region or None
 
 
+def _extract_weather_source_prompt(prompt: str) -> str:
+    text = str(prompt or "").strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(payload, dict):
+        return text
+    source_text = str(payload.get("query") or payload.get("prompt") or "").strip()
+    return source_text or text
+
+
+def _dedupe_preserve_order(values: List[str]) -> List[str]:
+    return list(dict.fromkeys(values))
+
+
+def _detect_weather_operation_support(text: str) -> Tuple[List[str], List[str]]:
+    normalized = re.sub(r"\s+", "", str(text or ""))
+    if not normalized:
+        return [], []
+    if not any(token in normalized for token in _WEATHER_SUITABILITY_CUES):
+        return [], []
+    supported: List[str] = []
+    unsupported: List[str] = []
+    for label, aliases in _SUPPORTED_WEATHER_OPERATION_ALIASES.items():
+        if any(alias in normalized for alias in aliases):
+            supported.append(label)
+    for label, aliases in _UNSUPPORTED_WEATHER_OPERATION_ALIASES.items():
+        if any(alias in normalized for alias in aliases):
+            unsupported.append(label)
+    return _dedupe_preserve_order(supported), _dedupe_preserve_order(unsupported)
+
+
+def _build_unsupported_weather_operation_message(operations: List[str]) -> str:
+    supported = "、".join(_SUPPORTED_WEATHER_OPERATIONS)
+    unsupported = "、".join(_dedupe_preserve_order(operations))
+    return (
+        f"当前气象适宜度 API 仅支持展示：{supported}；"
+        f"“{unsupported}”暂无法显示。"
+    )
+
+
+def _prepend_message(note: str, message: str) -> str:
+    note_text = str(note or "").strip()
+    message_text = str(message or "").strip()
+    if not note_text:
+        return message_text
+    if not message_text:
+        return note_text
+    return f"{note_text}\n{message_text}"
+
+
 def _build_weather_query_from_payload(
     payload: Dict[str, object],
 ) -> Optional[WeatherQueryInput]:
@@ -212,6 +287,31 @@ def _build_weather_query_from_payload(
         return WeatherQueryInput(**data)
     except Exception:
         return None
+
+
+def _extract_recent_range(text: str) -> Optional[Tuple[date, date]]:
+    prompt = str(text or "").strip()
+    if not prompt:
+        return None
+    days: Optional[int] = None
+    match = _RECENT_DAYS_RE.search(prompt)
+    if match:
+        try:
+            days = int(match.group(1))
+        except ValueError:
+            days = None
+    elif any(token in prompt for token in ("最近一周", "近一周", "最近7天", "近7天")):
+        days = 7
+    elif any(token in prompt for token in ("最近半个月", "近半个月", "最近15天", "近15天")):
+        days = 15
+    elif any(token in prompt for token in ("最近", "近期", "近来")):
+        days = 10
+    if days is None:
+        return None
+    days = max(1, min(days, 30))
+    end_date = date.today()
+    start_date = end_date.fromordinal(end_date.toordinal() - days + 1)
+    return start_date, end_date
 
 
 def _merge_followup_weather_payload(
@@ -256,6 +356,9 @@ def normalize_weather_prompt(
         start_date = dates[0] if len(dates) >= 1 else None
         end_date = dates[1] if len(dates) >= 2 else None
         region = _extract_region_from_text(text)
+        recent_range = _extract_recent_range(text)
+        if recent_range and not (start_date and end_date):
+            start_date, end_date = recent_range
         if start_date and end_date:
             try:
                 query = WeatherQueryInput(
@@ -277,6 +380,30 @@ def normalize_weather_prompt(
         return canonical, query
     if not isinstance(payload, dict):
         return text, None
+    source_prompt = str(payload.get("query") or payload.get("prompt") or "").strip()
+    recent_range = _extract_recent_range(source_prompt)
+    if recent_range:
+        region = payload.get("region")
+        try:
+            query = WeatherQueryInput(
+                region=str(region).strip() if region not in (None, "") else None,
+                start_date=recent_range[0],
+                end_date=recent_range[1],
+                year=recent_range[0].year,
+                granularity=payload.get("granularity")
+                if payload.get("granularity") in {"hourly", "daily"}
+                else "daily",
+                include_advice=bool(payload.get("include_advice", False)),
+            )
+            canonical = json.dumps(
+                query.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+            return canonical, query
+        except Exception:
+            pass
     query = _build_weather_query_from_payload(payload)
     if query is None:
         query = _merge_followup_weather_payload(payload)
@@ -635,6 +762,17 @@ def lookup_weather(
     query: Optional[WeatherQueryInput] = None,
 ) -> ToolInvocation:
     text = prompt or ""
+    source_text = _extract_weather_source_prompt(text)
+    supported_ops, unsupported_ops = _detect_weather_operation_support(source_text)
+    unsupported_note = ""
+    if unsupported_ops:
+        unsupported_note = _build_unsupported_weather_operation_message(unsupported_ops)
+        if not supported_ops:
+            return ToolInvocation(
+                name="weather_lookup",
+                message=unsupported_note,
+                data={},
+            )
     if cache_prompt is None or query is None:
         cache_prompt, query = normalize_weather_prompt(text)
     if query is None:
@@ -659,10 +797,15 @@ def lookup_weather(
                 start_date=start,
                 end_date=end,
             )
-    return lookup_farm_weather_by_user(
+    result = lookup_farm_weather_by_user(
         user_id=None,
         start_date=start,
         end_date=end,
         region_id=region_id,
         region=query.region,
     )
+    if unsupported_note:
+        return result.model_copy(
+            update={"message": _prepend_message(unsupported_note, result.message)}
+        )
+    return result

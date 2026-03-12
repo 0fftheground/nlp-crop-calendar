@@ -34,7 +34,6 @@ GROWTH_STAGE_COLUMNS = [
     "齐穗期",
     "成熟期",
 ]
-_PLAN_ID_COLUMNS = ("id", "plan_id", "planting_plan_id", "planting_id")
 _PLAN_NAME_COLUMNS = (
     "name",
     "plan_name",
@@ -71,23 +70,6 @@ _PLAN_TRANSPLANT_DATE_COLUMNS = (
     "插秧日期",
     "插秧时间",
 )
-
-_FORECAST_PLAN_ID_COLUMNS = ("planting_plan_id", "plan_id", "planting_id")
-_FORECAST_STAGE_NAME_COLUMNS = (
-    "stage",
-    "stage_name",
-    "growth_stage",
-    "阶段",
-    "生育期",
-)
-_FORECAST_STAGE_DATE_COLUMNS = (
-    "stage_date",
-    "date",
-    "forecast_date",
-    "预测日期",
-    "stage_time",
-)
-
 
 _CONFIG_PORT: ConfigPort = DEFAULT_CONFIG_ADAPTER
 _SQL_PORT: SqlPort = DEFAULT_SQL_ADAPTER
@@ -153,16 +135,6 @@ def _post_json(
 
 def _get_variety_table() -> str:
     return resolve_db_table(_cfg(), TABLE_KEY_VARIETY)
-
-
-def _format_value(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
 
 
 def _build_api_headers(*, api_key: Optional[str] = None) -> dict[str, str]:
@@ -240,7 +212,9 @@ def _unwrap_api_data(payload: object) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise RuntimeError("业务接口返回格式未识别。")
     code = str(payload.get("code", "")).strip()
-    if code and code != "0":
+    if code == "204":
+        return {}
+    if code and code not in {"0", "200"}:
         raise RuntimeError(str(payload.get("msg") or "业务接口返回失败。"))
     data = payload.get("data")
     if isinstance(data, dict):
@@ -283,7 +257,6 @@ def _build_plan_api_payload(filters: Dict[str, object], *, limit: Optional[int])
 
 
 _CODE_MAP_CACHE: Dict[str, Dict[int, str]] = {}
-_CODE_REVERSE_CACHE: Dict[str, Dict[str, int]] = {}
 
 
 def _fetch_code_map(category: str) -> Dict[int, str]:
@@ -315,15 +288,6 @@ def _get_code_map(category: str) -> Dict[int, str]:
     return _CODE_MAP_CACHE[category]
 
 
-def _get_code_reverse_map(category: str) -> Dict[str, int]:
-    if category not in _CODE_REVERSE_CACHE:
-        mapping = _get_code_map(category)
-        _CODE_REVERSE_CACHE[category] = {
-            name: code for code, name in mapping.items() if name
-        }
-    return _CODE_REVERSE_CACHE[category]
-
-
 def _code_to_name(category: str, value: object) -> Optional[str]:
     if value is None:
         return None
@@ -336,20 +300,6 @@ def _code_to_name(category: str, value: object) -> Optional[str]:
     if name:
         return name
     return str(value)
-
-
-def _name_to_code(category: str, value: object) -> Optional[int]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    text = str(value).strip()
-    if not text:
-        return None
-    if text.isdigit():
-        return int(text)
-    reverse = _get_code_reverse_map(category)
-    return reverse.get(text)
 
 
 def _normalize_method_for_planting(value: object) -> Optional[str]:

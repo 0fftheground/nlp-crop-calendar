@@ -172,23 +172,6 @@ def record_exception(span: object, exc: Exception) -> None:
         pass
 
 
-def wrap_with_otel_context(func):
-    try:
-        from opentelemetry import context as otel_context
-    except Exception:
-        return func
-    ctx = otel_context.get_current()
-
-    def _inner(*args, **kwargs):
-        token = otel_context.attach(ctx)
-        try:
-            return func(*args, **kwargs)
-        finally:
-            otel_context.detach(token)
-
-    return _inner
-
-
 def _resolve_http_endpoint(
     base: Optional[str], signal: str, override: Optional[str]
 ) -> Optional[str]:

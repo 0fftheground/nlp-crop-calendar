@@ -179,6 +179,10 @@ def extract_session_context_from_workflow(
             context["planting"] = planting
         return (workflow_name, context) if context else None
     if workflow_name == "crop_calendar_workflow":
+        # Save confirmation is an action on an already-generated plan.
+        # It should not replace the previously cached planting context.
+        if "save_response" in data:
+            return None
         planting = _reduce_planting_context(data.get("planting"))
         if not planting:
             return None

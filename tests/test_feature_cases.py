@@ -1,4 +1,3 @@
-import calendar
 import importlib.util
 import json
 import os
@@ -235,6 +234,34 @@ class FeatureCaseTests(unittest.TestCase):
             )
         self.assertIn("variety", state.get("missing_fields", []))
         self.assertIn("品种", state.get("message", ""))
+
+    def test_crop_calendar_missing_message_requires_culti_type(self) -> None:
+        draft = PlantingDetailsDraft(
+            crop="水稻",
+            region_id="芜湖",
+        )
+        with patch(
+            "src.agent.workflows.crop_calendar_graph.extract_planting_details",
+            return_value=draft,
+        ), patch(
+            "src.agent.workflows.crop_calendar_graph.find_exact_variety_in_text",
+            return_value=None,
+        ), patch(
+            "src.agent.workflows.crop_calendar_graph.retrieve_variety_candidates",
+            return_value=[],
+        ):
+            graph = build_crop_calendar_graph()
+            state = graph.invoke(
+                {
+                    "user_prompt": "我要在芜湖种",
+                    "trace": [],
+                    "user_id": "u1",
+                }
+            )
+        message = state.get("message", "")
+        self.assertIn("稻作类型", message)
+        self.assertNotIn("稻作类型(可选)", message)
+        self.assertIn("移栽日期(可选)", message)
 
     def test_crop_calendar_followup_keeps_existing_variety(self) -> None:
         prior = PlantingDetailsDraft(

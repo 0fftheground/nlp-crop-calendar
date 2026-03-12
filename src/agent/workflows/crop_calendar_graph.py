@@ -97,8 +97,6 @@ def _optional_fields_for_prompt(state: GraphState) -> list[str]:
     draft = coerce_planting_draft(get_followup_draft(state))
     prompt = state.get("user_prompt", "") or ""
     optional: list[str] = []
-    if not (draft and getattr(draft, "culti_type", None)):
-        optional.append("culti_type")
     if not _requires_transplant_date(draft, prompt) and not (
         draft and draft.transplant_date
     ):
@@ -128,6 +126,14 @@ def _append_transplant_date_if_needed(
             return missing_fields
         if "transplant_date" not in missing_fields:
             missing_fields.append("transplant_date")
+    return missing_fields
+
+
+def _append_culti_type_if_needed(
+    draft: PlantingDetailsDraft, missing_fields: list[str]
+) -> list[str]:
+    if not getattr(draft, "culti_type", None) and "culti_type" not in missing_fields:
+        missing_fields.append("culti_type")
     return missing_fields
 
 
@@ -308,6 +314,7 @@ def _extract_node(state: GraphState) -> GraphState:
     else:
         draft = fresh_draft
     missing_fields = list_missing_required_fields(draft)
+    missing_fields = _append_culti_type_if_needed(draft, missing_fields)
     missing_fields = _append_transplant_date_if_needed(draft, prompt, missing_fields)
     is_followup = bool(prior_draft and prior_missing)
     # Resolve variety selection from the previous candidate list.
@@ -317,6 +324,7 @@ def _extract_node(state: GraphState) -> GraphState:
         if resolved:
             draft = draft.model_copy(update={"variety": resolved})
             missing_fields = list_missing_required_fields(draft)
+            missing_fields = _append_culti_type_if_needed(draft, missing_fields)
             missing_fields = _append_transplant_date_if_needed(
                 draft, prompt, missing_fields
             )
@@ -336,6 +344,7 @@ def _extract_node(state: GraphState) -> GraphState:
             if draft.variety != exact_variety:
                 draft = draft.model_copy(update={"variety": exact_variety})
             missing_fields = list_missing_required_fields(draft)
+            missing_fields = _append_culti_type_if_needed(draft, missing_fields)
             missing_fields = _append_transplant_date_if_needed(
                 draft, prompt, missing_fields
             )
@@ -351,6 +360,7 @@ def _extract_node(state: GraphState) -> GraphState:
                 # LLM-only variety without DB evidence -> clear and re-ask.
                 draft = draft.model_copy(update={"variety": None})
                 missing_fields = list_missing_required_fields(draft)
+                missing_fields = _append_culti_type_if_needed(draft, missing_fields)
                 missing_fields = _append_transplant_date_if_needed(
                     draft, prompt, missing_fields
                 )
@@ -427,6 +437,7 @@ def _extract_node(state: GraphState) -> GraphState:
                 field for field in unfillable_fields if field != "transplant_date"
             ]
         missing_fields = list_missing_required_fields(draft)
+        missing_fields = _append_culti_type_if_needed(draft, missing_fields)
         for field in unfillable_fields:
             if field not in missing_fields:
                 missing_fields.append(field)
@@ -445,6 +456,7 @@ def _extract_node(state: GraphState) -> GraphState:
                 fallback=fallback,
             )
         missing_fields = list_missing_required_fields(draft)
+        missing_fields = _append_culti_type_if_needed(draft, missing_fields)
         missing_fields = _append_transplant_date_if_needed(draft, prompt, missing_fields)
 
     state = add_trace(
@@ -633,6 +645,9 @@ def _recommend_node(state: GraphState) -> GraphState:
                 "planting": planting_payload,
                 "plant_season_id": plant_season_id,
                 "resolved_region_id": resolved_region_id,
+                "farmworks": farmworks_payload,
+                "growth_stages": growth_stages_payload,
+                "operation_plan": plan.model_dump(mode="json"),
             },
         ),
     )

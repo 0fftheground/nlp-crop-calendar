@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from ..domain.enums import PlantingMethod
-from ..domain.planting_models import PlantingDetails, PlantingDetailsDraft
+from ..domain.planting_models import PlantingDetails
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -355,6 +355,9 @@ class OperationItem(BaseModel):
     stage: str
     title: str
     description: str
+    dates: List[str] = Field(
+        default_factory=list, description="Recommended execution dates from external service."
+    )
     reasoning: Optional[str] = None
     window: Optional[str] = Field(
         default=None, description="Suggested execution window or timeframe."
