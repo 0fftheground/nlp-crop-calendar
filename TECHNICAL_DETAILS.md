@@ -142,3 +142,17 @@ Growth-stage workflow specifics:
 
 ## Tests
 - `python -m unittest` runs the basic test suite.
+- Test modules are organized by domain:
+  - `tests/weather/`
+  - `tests/sowing/`
+  - `tests/variety/`
+  - `tests/workflow/`
+  - `tests/router/`
+  - `tests/domain/`
+  - `tests/architecture/`
+- Scenario-driven suites use YAML fixtures under `tests/scenarios/<domain>/`.
+- Shared test utilities live in:
+  - `tests/scenario_loader.py`
+  - `tests/support.py`
+- Weather regression entrypoint:
+  - `scripts/run_weather_regression.ps1`

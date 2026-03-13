@@ -84,7 +84,9 @@ class PlanExecutor:
                     return plan, None, None
                 except ValidationError:
                     pass
-            missing_fields = self._extract_missing_fields(exc) or list(spec.required_fields)
+            missing_fields, invalid_fields = self._classify_validation_errors(exc)
+            if not missing_fields and not invalid_fields:
+                missing_fields = list(spec.required_fields)
             if input_attempts >= INPUT_VALIDATION_MAX_ATTEMPTS:
                 if pending and pending.get("mode") == INPUT_VALIDATION_MODE:
                     self._pending_manager.delete(session_id)
@@ -100,11 +102,15 @@ class PlanExecutor:
                     "action": target_action,
                     "name": target_name,
                     "missing_fields": missing_fields,
+                    "invalid_fields": invalid_fields,
                     "input_attempts": input_attempts + 1,
                 },
             )
             message = format_input_validation_message(
-                target_name, missing_fields, spec.field_labels
+                target_name,
+                missing_fields,
+                spec.field_labels,
+                invalid_fields=invalid_fields,
             )
             response = HandleResponse(mode="none", plan=WorkflowResponse(message=message))
             return plan, None, response
@@ -493,13 +499,20 @@ class PlanExecutor:
         return json.dumps(payload, ensure_ascii=False, default=str)
 
     @staticmethod
-    def _extract_missing_fields(exc: ValidationError) -> list[str]:
-        fields: list[str] = []
+    def _classify_validation_errors(
+        exc: ValidationError,
+    ) -> tuple[list[str], list[str]]:
+        missing_fields: list[str] = []
+        invalid_fields: list[str] = []
         for error in exc.errors():
             loc = error.get("loc") or []
             if not loc:
                 continue
             field = str(loc[0])
-            if field not in fields:
-                fields.append(field)
-        return fields
+            if not field:
+                continue
+            error_type = str(error.get("type") or "")
+            target = missing_fields if error_type == "missing" else invalid_fields
+            if field not in target:
+                target.append(field)
+        return missing_fields, invalid_fields

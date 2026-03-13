@@ -1,0 +1,116 @@
+feature_cases:
+  - id: requires_exact_name
+    prompt:
+      prompt: 美香占
+      planting:
+        crop: 水稻
+    lookup_records:
+      records:
+        - 品种名称: 美香占2号
+          审定区域: 湖南
+      raw_records:
+        - variety_name: 美香占2号
+          approval_region: 湖南
+      candidates:
+        - 美香占2号
+    expected:
+      message_contains:
+        - 未找到完全匹配的品种
+        - 美香占2号
+      missing_fields:
+        - variety
+
+  - id: followup_region_choice_keeps_selected_variety
+    original_query: 帮我查询品种美香占
+    candidate_followup_prompt:
+      user_id: u1
+      query: 帮我查询品种美香占
+      followup:
+        prompt: '1'
+        draft:
+          candidates:
+            - 美香占2号
+            - 华两优美香新占
+            - 荃优美香银占3号
+            - Q两优银泰香占
+            - 荃优美香丝苗1号
+        missing_fields:
+          - variety
+        followup_count: 0
+    region_followup_prompt:
+      user_id: u1
+      followup:
+        prompt: '1'
+        followup_count: 1
+    fake_lookup:
+      confirmed_candidate: 美香占2号
+      records:
+        - 品种名称: 美香占2号
+          审定区域: 湖南
+          审定年份: '2020'
+        - 品种名称: 美香占2号
+          审定区域: 芜湖
+          审定年份: '2021'
+      raw_records:
+        - variety_name: 美香占2号
+          approval_region: 湖南
+        - variety_name: 美香占2号
+          approval_region: 芜湖
+      fallback_records:
+        - 品种名称: 美香占2号
+          审定区域: 湖南
+          审定年份: '2020'
+        - 品种名称: 美香占2号
+          审定区域: 芜湖
+          审定年份: '2021'
+      fallback_raw_records:
+        - variety_name: 美香占2号
+          approval_region: 湖南
+        - variety_name: 美香占2号
+          approval_region: 芜湖
+      bug_trigger_keyword: 荃优美香丝苗1号
+      bug_trigger_records:
+        - 品种名称: 荃优美香丝苗1号
+          审定区域: 湖南
+      bug_trigger_raw_records:
+        - variety_name: 荃优美香丝苗1号
+          approval_region: 湖南
+    expected:
+      step1_message_contains:
+        - 请选择要查看的区域
+      step1_query: 帮我查询品种美香占
+      step2_message_contains:
+        - 已返回品种 美香占2号 的审定信息
+      step2_variety: 美香占2号
+
+session_context:
+  - id: reuse_latest_session_context
+    session_id: v1
+    seed_turn:
+      prompt: 查询美香占2号审定信息
+      plan_input:
+        query: 查询美香占2号审定信息
+      tool_result:
+        name: variety_lookup
+        message: ok
+        data:
+          crop: 水稻
+          variety: 美香占2号
+          region_choice: 湖南
+          selected:
+            品种名称: 美香占2号
+    followup_turn:
+      prompt: 在芜湖呢
+      tool_result:
+        name: variety_lookup
+        message: ok
+        data:
+          crop: 水稻
+          variety: 美香占2号
+          region_choice: 湖南
+          selected:
+            品种名称: 美香占2号
+    expected:
+      prompt_contains:
+        - 美香占2号
+        - 芜湖

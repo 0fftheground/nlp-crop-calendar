@@ -43,6 +43,7 @@ WEATHER_FIELD_LABELS = {
     "year": "年份(默认当前年)",
     "granularity": "粒度(hourly/daily)",
     "include_advice": "是否包含建议",
+    "requested_operations": "农事适宜度类型",
 }
 QUERY_FIELD_LABELS = {
     "query": "查询内容",

@@ -1,0 +1,279 @@
+- id: region_followup
+  title: 补充区域时沿用已有时间范围
+  session_id: w1
+  seed_turn:
+    prompt: 查长沙 2026-03-25 到 2026-03-31 天气
+    plan_input:
+      region: 长沙
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        points: []
+  followup_turn:
+    prompt: 在芜湖呢
+    tool_result:
+      message: ok
+      data:
+        region: 芜湖
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        points: []
+  expected:
+    payload:
+      region: 芜湖
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'
+
+- id: operation_followup
+  title: 简短农事项追问沿用已有天气上下文
+  session_id: w2
+  seed_turn:
+    prompt: 查长沙 2026-03-25 到 2026-03-31 打药适宜度
+    plan_input:
+      region: 长沙
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        requested_operations: [打药]
+        points: []
+  followup_turn:
+    prompt: 施肥呢
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        requested_operations: [施肥]
+        points: []
+  expected:
+    payload:
+      region: 长沙
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'
+
+- id: generalized_operation_followup
+  title: 泛化农事项追问沿用已有天气上下文
+  session_id: w4
+  seed_turn:
+    prompt: 查长沙 2026-03-25 到 2026-03-31 打药适宜度
+    plan_input:
+      region: 长沙
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        requested_operations: [打药]
+        points: []
+  followup_turn:
+    prompt: 那施肥怎么样
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        requested_operations: [施肥]
+        points: []
+  expected:
+    payload:
+      region: 长沙
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'
+
+- id: switch_phrase_followup
+  title: 切换表达沿用已有天气上下文
+  session_id: w5
+  seed_turn:
+    prompt: 查长沙 2026-03-25 到 2026-03-31 打药适宜度
+    plan_input:
+      region: 长沙
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        requested_operations: [打药]
+        points: []
+  followup_turn:
+    prompt: 换成施肥
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        requested_operations: [施肥]
+        points: []
+  expected:
+    payload:
+      region: 长沙
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'
+
+- id: relative_week_followup
+  title: 下周追问更新日期范围
+  session_id: w7
+  today: '2026-03-13'
+  seed_turn:
+    prompt: 查长沙最近天气适合打药吗
+    plan_input:
+      region: 长沙
+      start_date: '2026-03-13'
+      end_date: '2026-03-19'
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-13'
+        end_date: '2026-03-19'
+        granularity: daily
+        requested_operations: [打药]
+        points: []
+  followup_turn:
+    prompt: 下周呢
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-16'
+        end_date: '2026-03-22'
+        granularity: daily
+        requested_operations: [打药]
+        points: []
+  expected:
+    payload:
+      region: 长沙
+      start_date: '2026-03-16'
+      end_date: '2026-03-22'
+
+- id: relative_date_followup
+  title: 相对月份追问更新日期范围
+  session_id: w8
+  today: '2026-03-13'
+  seed_turn:
+    prompt: 查长沙最近天气适合打药吗
+    plan_input:
+      region: 长沙
+      start_date: '2026-03-13'
+      end_date: '2026-03-19'
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-13'
+        end_date: '2026-03-19'
+        granularity: daily
+        requested_operations: [打药]
+        points: []
+  followup_turn:
+    prompt: 下个月月初呢
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-04-01'
+        end_date: '2026-04-10'
+        granularity: daily
+        requested_operations: [打药]
+        points: []
+  expected:
+    payload:
+      region: 长沙
+      start_date: '2026-04-01'
+      end_date: '2026-04-10'
+
+- id: relative_two_weeks_followup
+  title: 下下周追问更新到两周后日期范围
+  session_id: w9
+  today: '2026-03-13'
+  seed_turn:
+    prompt: 查长沙最近天气适合施肥吗
+    plan_input:
+      region: 长沙
+      start_date: '2026-03-13'
+      end_date: '2026-03-19'
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-13'
+        end_date: '2026-03-19'
+        granularity: daily
+        requested_operations: [施肥]
+        points: []
+  followup_turn:
+    prompt: 下下周呢
+    tool_result:
+      message: ok
+      data:
+        region: 长沙
+        start_date: '2026-03-23'
+        end_date: '2026-03-29'
+        granularity: daily
+        requested_operations: [施肥]
+        points: []
+  expected:
+    payload:
+      region: 长沙
+      start_date: '2026-03-23'
+      end_date: '2026-03-29'
+
+- id: rule_engine_match_followup
+  title: 规则命中时仍优先复用天气上下文
+  session_id: w3
+  seed_turn:
+    prompt: 查最近一周打药适宜度
+    plan_input:
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'
+    tool_result:
+      message: ok
+      data:
+        region: farm:1
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        requested_operations: [打药]
+        points: []
+  followup_turn:
+    prompt: 施肥呢
+    tool_result:
+      message: ok
+      data:
+        region: farm:1
+        start_date: '2026-03-25'
+        end_date: '2026-03-31'
+        granularity: daily
+        requested_operations: [施肥]
+        points: []
+  force_rule_match: true
+  expected:
+    payload:
+      start_date: '2026-03-25'
+      end_date: '2026-03-31'

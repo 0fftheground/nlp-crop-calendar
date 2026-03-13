@@ -82,7 +82,7 @@ def _format_weather_tool_details(
         if region:
             meta.append(f"区域：{region}")
         if start_date and end_date:
-            meta.append(f"时间：{start_date} ~ {end_date}")
+            meta.append(f"时间：{start_date} 至 {end_date}")
         elif start_date:
             meta.append(f"开始：{start_date}")
         elif end_date:
@@ -98,6 +98,14 @@ def _format_weather_tool_details(
         "sg_ws": "收割",
         "zd_ws": "整地",
     }
+    requested_operations = data.get("requested_operations")
+    requested_label_set = None
+    if isinstance(requested_operations, list):
+        requested_label_set = {
+            str(item).strip()
+            for item in requested_operations
+            if str(item).strip()
+        }
 
     def _format_score(score: object) -> str:
         if isinstance(score, int):
@@ -106,8 +114,54 @@ def _format_weather_tool_details(
             return f"{score:.2f}".rstrip("0").rstrip(".")
         return str(score)
 
+    def _detect_reason_factor_keys(reason_text: str) -> list[str]:
+        text = str(reason_text or "").strip()
+        if not text:
+            return []
+        factor_patterns = (
+            ("wind_speed", ("风速", "风力", "风大", "大风", "风较大", "风偏大")),
+            ("precipitation", ("降水", "降雨", "下雨", "有雨", "雨", "雨量")),
+            ("humidity", ("湿度", "潮湿", "湿润", "湿", "墒情")),
+            (
+                "temperature",
+                ("温度", "气温", "高温", "低温", "升温", "降温", "温差", "冷", "热"),
+            ),
+        )
+        matches: list[str] = []
+        for key, patterns in factor_patterns:
+            if any(pattern in text for pattern in patterns):
+                matches.append(key)
+        return matches
+
+    def _format_reason_factors(item: dict, reason: object) -> str:
+        reason_text = str(reason or "").strip()
+        negative_markers = ("不适合", "不宜", "不建议", "较大", "偏大", "过大", "偏高", "偏低")
+        if not reason_text or not any(marker in reason_text for marker in negative_markers):
+            return ""
+        factor_keys = _detect_reason_factor_keys(reason_text)
+        if not factor_keys:
+            return ""
+        parts: list[str] = []
+        if "wind_speed" in factor_keys and item.get("wind_speed") is not None:
+            parts.append(f"风速 {_format_score(item.get('wind_speed'))}m/s")
+        if "precipitation" in factor_keys and item.get("precipitation") is not None:
+            parts.append(f"降水 {_format_score(item.get('precipitation'))}mm")
+        if "humidity" in factor_keys and item.get("humidity") is not None:
+            parts.append(f"湿度 {_format_score(item.get('humidity'))}%")
+        if "temperature" in factor_keys:
+            tmax = item.get("temperature_max")
+            tmin = item.get("temperature_min")
+            tavg = item.get("temperature")
+            if tmax is not None and tmin is not None:
+                parts.append(
+                    f"气温 {_format_score(tmin)}至{_format_score(tmax)}°C"
+                )
+            elif tavg is not None:
+                parts.append(f"气温 {_format_score(tavg)}°C")
+        return "；".join(parts)
+
     def _format_operation_advice(
-        label: str, score: object, reason: object
+        label: str, score: object, reason: object, item: dict
     ) -> Optional[str]:
         if score is None and not reason:
             return None
@@ -115,7 +169,11 @@ def _format_weather_tool_details(
         if score is not None:
             advice = f"{advice} {_format_score(score)}"
         if reason:
-            advice = f"{advice}（{reason}）"
+            factor_text = _format_reason_factors(item, reason)
+            if factor_text:
+                advice = f"{advice}（{reason}；{factor_text}）"
+            else:
+                advice = f"{advice}（{reason}）"
         return advice
 
     if isinstance(points, list):
@@ -133,18 +191,18 @@ def _format_weather_tool_details(
             rain = item.get("precipitation")
             segs = []
             if tmax is not None and tmin is not None:
-                segs.append(f"{tmin}~{tmax}°C")
+                segs.append(f"{tmin}至{tmax}°C")
             elif tavg is not None:
                 segs.append(f"{tavg}°C")
-            if rain is not None:
-                segs.append(f"降水 {rain}mm")
             if not segs and item.get("condition"):
                 segs.append(str(item.get("condition")))
             advice_parts = []
             for score_key, label in advice_labels.items():
+                if requested_label_set is not None and label not in requested_label_set:
+                    continue
                 score = item.get(score_key)
                 reason = item.get(score_key.replace("_ws", "_reason"))
-                advice = _format_operation_advice(label, score, reason)
+                advice = _format_operation_advice(label, score, reason, item)
                 if advice:
                     advice_parts.append(advice)
             line = f"- {ts}" if ts else "- "
@@ -192,7 +250,7 @@ def _format_sowing_suitability_details(
             return "、".join(values)
         if len(values) == 1:
             return values[0]
-        return f"{values[0]} ~ {values[-1]}（共{len(values)}天）"
+        return f"{values[0]} 至 {values[-1]}（共{len(values)}天）"
 
     if isinstance(resolved, dict):
         meta = []

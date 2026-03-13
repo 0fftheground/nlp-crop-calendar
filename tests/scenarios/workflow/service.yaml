@@ -1,0 +1,125 @@
+growth_stage_feature_cases:
+  - id: prediction_output
+    user_prompt: 在常德鼎城区种水稻，播种日期2025-04-03，直播
+    draft:
+      crop: 水稻
+      planting_method: direct_seeding
+      sowing_date: "2025-04-03"
+    search_result:
+      records:
+        - id: 1
+      strategy: id
+      labels:
+        - id
+    growth_result:
+      stage_dates:
+        三叶一心: "2025-05-01"
+        成熟期: "2025-08-09"
+    expected:
+      message_contains:
+        - 种植信息
+        - 三叶一心：2025-05-01
+        - 成熟期：2025-08-09
+      message_not_contains:
+        - 积温
+        - 气象信息
+        - 品种信息
+
+crop_calendar_graph_cases:
+  - id: unknown_variety_does_not_raise_500
+    mode: graph
+    user_prompt: 品种不知道
+    draft:
+      crop: 水稻
+      planting_method: direct_seeding
+      sowing_date: "2025-04-20"
+    exact_variety_in_text:
+    retrieve_variety_candidates: []
+    expected:
+      missing_fields_contains:
+        - variety
+      message_contains:
+        - 品种
+
+  - id: missing_message_requires_culti_type
+    mode: graph
+    user_prompt: 我要在芜湖种
+    draft:
+      crop: 水稻
+      region_id: 芜湖
+    exact_variety_in_text:
+    retrieve_variety_candidates: []
+    expected:
+      message_contains:
+        - 稻作类型
+        - 移栽日期(可选)
+      message_not_contains:
+        - 稻作类型(可选)
+
+  - id: followup_keeps_existing_variety
+    mode: extract_node
+    user_prompt: 移栽日期2025-05-20
+    prior_draft:
+      crop: 水稻
+      variety: 美香占2号
+      planting_method: transplanting
+      sowing_date: "2025-05-01"
+      culti_type: 中稻
+    followup_draft:
+      transplant_date: "2025-05-20"
+    missing_fields:
+      - transplant_date
+    followup_count: 0
+    exact_variety_in_text:
+    retrieve_variety_candidates: []
+    expected:
+      draft:
+        variety: 美香占2号
+      missing_fields_not_contains:
+        - variety
+
+  - id: followup_date_maps_to_transplant_date
+    mode: extract_node
+    user_prompt: "2025-05-28"
+    prior_draft:
+      crop: 水稻
+      variety: 美香占2号
+      planting_method: transplanting
+      sowing_date: "2025-05-01"
+      culti_type: 中稻
+    followup_draft:
+      sowing_date: "2025-05-28"
+    missing_fields:
+      - transplant_date
+    followup_count: 1
+    exact_variety_in_text:
+    retrieve_variety_candidates: []
+    expected:
+      draft:
+        sowing_date: "2025-05-01"
+        transplant_date: "2025-05-28"
+      missing_fields_not_contains:
+        - transplant_date
+
+  - id: unknown_transplant_date_proceeds_with_empty
+    mode: extract_node
+    user_prompt: 不清楚
+    prior_draft:
+      crop: 水稻
+      variety: 美香占2号
+      planting_method: transplanting
+      sowing_date: "2025-05-01"
+      culti_type: 中稻
+    followup_draft: {}
+    missing_fields:
+      - transplant_date
+    followup_count: 1
+    exact_variety_in_text:
+    retrieve_variety_candidates: []
+    expected:
+      draft:
+        transplant_date:
+      missing_fields_not_contains:
+        - transplant_date
+      assumptions_prefix:
+        - "transplant_date: 用户不知道"

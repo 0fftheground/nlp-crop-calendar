@@ -12,6 +12,7 @@ from ..adapters import (
 )
 from ..ports import ConfigPort, HttpPort, SqlPort
 from ...agent.followup import build_tool_followup_invocation
+from ...domain.date_parser import extract_date_range, extract_explicit_dates
 from ...infra.db_catalog import resolve_region_lookup_sources
 from ...schemas.models import (
     ToolInvocation,
@@ -29,7 +30,6 @@ _WEATHER_REGION_RE = re.compile(
     r"(?:天气|气温|气象|降雨|降水|湿度|风速|预报)"
 )
 _REGION_SUFFIX_RE = re.compile(r"(特别行政区|自治区|自治州|省|市|州|盟|地区|区|县)$")
-_RECENT_DAYS_RE = re.compile(r"(?:最近|近)(\d{1,2})天")
 _SUPPORTED_WEATHER_OPERATIONS = (
     "施肥",
     "炼苗",
@@ -48,10 +48,18 @@ _SUPPORTED_WEATHER_OPERATION_ALIASES = {
     "收割": ("收割", "收获"),
     "整地": ("整地",),
 }
+_WEATHER_OPERATION_FIELD_PREFIXES = {
+    "施肥": "sf",
+    "炼苗": "lm",
+    "移栽": "yz",
+    "翻地": "fd",
+    "打药": "dy",
+    "收割": "sg",
+    "整地": "zd",
+}
 _UNSUPPORTED_WEATHER_OPERATION_ALIASES = {
     "浇水": ("浇水", "灌溉"),
     "除草": ("除草",),
-    "播种": ("播种",),
     "育秧": ("育秧",),
     "病虫害防治": ("病虫害防治", "防病", "治虫"),
 }
@@ -66,6 +74,27 @@ _WEATHER_SUITABILITY_CUES = (
     "合适吗",
     "宜不宜",
 )
+
+
+def extract_weather_operations(
+    text: str, *, require_suitability_cues: bool = True
+) -> Tuple[List[str], List[str]]:
+    normalized = re.sub(r"\s+", "", str(text or ""))
+    if not normalized:
+        return [], []
+    if require_suitability_cues and not any(
+        token in normalized for token in _WEATHER_SUITABILITY_CUES
+    ):
+        return [], []
+    supported: List[str] = []
+    unsupported: List[str] = []
+    for label, aliases in _SUPPORTED_WEATHER_OPERATION_ALIASES.items():
+        if any(alias in normalized for alias in aliases):
+            supported.append(label)
+    for label, aliases in _UNSUPPORTED_WEATHER_OPERATION_ALIASES.items():
+        if any(alias in normalized for alias in aliases):
+            unsupported.append(label)
+    return _dedupe_preserve_order(supported), _dedupe_preserve_order(unsupported)
 
 
 def configure_weather_ports(
@@ -169,24 +198,7 @@ def _parse_payload_date(value: object) -> Optional[date]:
 
 
 def _extract_dates_from_text(text: str) -> List[date]:
-    if not text:
-        return []
-    dates: List[date] = []
-    for match in re.finditer(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})", text):
-        try:
-            dates.append(
-                date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-            )
-        except ValueError:
-            continue
-    for match in re.finditer(r"(20\d{2})(\d{2})(\d{2})", text):
-        try:
-            dates.append(
-                date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-            )
-        except ValueError:
-            continue
-    return dates
+    return extract_explicit_dates(text)
 
 
 def _extract_region_from_text(text: str) -> Optional[str]:
@@ -218,29 +230,13 @@ def _dedupe_preserve_order(values: List[str]) -> List[str]:
 
 
 def _detect_weather_operation_support(text: str) -> Tuple[List[str], List[str]]:
-    normalized = re.sub(r"\s+", "", str(text or ""))
-    if not normalized:
-        return [], []
-    if not any(token in normalized for token in _WEATHER_SUITABILITY_CUES):
-        return [], []
-    supported: List[str] = []
-    unsupported: List[str] = []
-    for label, aliases in _SUPPORTED_WEATHER_OPERATION_ALIASES.items():
-        if any(alias in normalized for alias in aliases):
-            supported.append(label)
-    for label, aliases in _UNSUPPORTED_WEATHER_OPERATION_ALIASES.items():
-        if any(alias in normalized for alias in aliases):
-            unsupported.append(label)
-    return _dedupe_preserve_order(supported), _dedupe_preserve_order(unsupported)
+    return extract_weather_operations(text, require_suitability_cues=True)
 
 
 def _build_unsupported_weather_operation_message(operations: List[str]) -> str:
     supported = "、".join(_SUPPORTED_WEATHER_OPERATIONS)
     unsupported = "、".join(_dedupe_preserve_order(operations))
-    return (
-        f"当前气象适宜度 API 仅支持展示：{supported}；"
-        f"“{unsupported}”暂无法显示。"
-    )
+    return f"{unsupported}当前暂不支持气象适宜度展示；目前支持：{supported}。"
 
 
 def _prepend_message(note: str, message: str) -> str:
@@ -283,35 +279,73 @@ def _build_weather_query_from_payload(
     include_advice = payload.get("include_advice")
     if isinstance(include_advice, bool):
         data["include_advice"] = include_advice
+    requested_operations = payload.get("requested_operations")
+    if isinstance(requested_operations, list):
+        data["requested_operations"] = [
+            str(item).strip()
+            for item in requested_operations
+            if str(item).strip()
+        ]
     try:
         return WeatherQueryInput(**data)
     except Exception:
         return None
 
 
-def _extract_recent_range(text: str) -> Optional[Tuple[date, date]]:
-    prompt = str(text or "").strip()
-    if not prompt:
-        return None
-    days: Optional[int] = None
-    match = _RECENT_DAYS_RE.search(prompt)
-    if match:
-        try:
-            days = int(match.group(1))
-        except ValueError:
-            days = None
-    elif any(token in prompt for token in ("最近一周", "近一周", "最近7天", "近7天")):
-        days = 7
-    elif any(token in prompt for token in ("最近半个月", "近半个月", "最近15天", "近15天")):
-        days = 15
-    elif any(token in prompt for token in ("最近", "近期", "近来")):
-        days = 10
-    if days is None:
-        return None
-    days = max(1, min(days, 30))
-    end_date = date.today()
-    start_date = end_date.fromordinal(end_date.toordinal() - days + 1)
-    return start_date, end_date
+def parse_weather_prompt_operations(
+    prompt: str,
+) -> Tuple[List[str], List[str], str]:
+    source_text = _extract_weather_source_prompt(prompt or "")
+    supported_ops, unsupported_ops = _detect_weather_operation_support(source_text)
+    if not supported_ops and not unsupported_ops:
+        supported_ops, unsupported_ops = extract_weather_operations(
+            source_text, require_suitability_cues=False
+        )
+    unsupported_note = ""
+    if unsupported_ops:
+        unsupported_note = _build_unsupported_weather_operation_message(unsupported_ops)
+    return supported_ops, unsupported_ops, unsupported_note
+
+
+def apply_weather_operation_view(
+    result: ToolInvocation,
+    *,
+    requested_operations: Optional[List[str]] = None,
+    unsupported_note: str = "",
+) -> ToolInvocation:
+    data = dict(result.data or {})
+    ops = _dedupe_preserve_order(list(requested_operations or []))
+    if ops:
+        points = data.get("points")
+        allowed_prefixes = {
+            _WEATHER_OPERATION_FIELD_PREFIXES[label]
+            for label in ops
+            if label in _WEATHER_OPERATION_FIELD_PREFIXES
+        }
+        if isinstance(points, list):
+            trimmed_points: List[dict[str, object]] = []
+            for item in points:
+                if not isinstance(item, dict):
+                    trimmed_points.append(item)
+                    continue
+                trimmed: dict[str, object] = {}
+                for key, value in item.items():
+                    if not re.match(r"^[a-z]{2}_(ws|reason)$", str(key)):
+                        trimmed[key] = value
+                        continue
+                    prefix = str(key).split("_", 1)[0]
+                    if prefix in allowed_prefixes:
+                        trimmed[key] = value
+                trimmed_points.append(trimmed)
+            data["points"] = trimmed_points
+    if ops:
+        data["requested_operations"] = ops
+    elif "requested_operations" in data:
+        data.pop("requested_operations", None)
+    message = result.message
+    if unsupported_note:
+        message = _prepend_message(unsupported_note, message)
+    return result.model_copy(update={"message": message, "data": data})
 
 
 def _merge_followup_weather_payload(
@@ -356,9 +390,9 @@ def normalize_weather_prompt(
         start_date = dates[0] if len(dates) >= 1 else None
         end_date = dates[1] if len(dates) >= 2 else None
         region = _extract_region_from_text(text)
-        recent_range = _extract_recent_range(text)
-        if recent_range and not (start_date and end_date):
-            start_date, end_date = recent_range
+        parsed_range = extract_date_range(text, today=date.today())
+        if parsed_range and not (start_date and end_date):
+            start_date, end_date = parsed_range
         if start_date and end_date:
             try:
                 query = WeatherQueryInput(
@@ -381,15 +415,15 @@ def normalize_weather_prompt(
     if not isinstance(payload, dict):
         return text, None
     source_prompt = str(payload.get("query") or payload.get("prompt") or "").strip()
-    recent_range = _extract_recent_range(source_prompt)
-    if recent_range:
+    parsed_range = extract_date_range(source_prompt, today=date.today())
+    if parsed_range:
         region = payload.get("region")
         try:
             query = WeatherQueryInput(
                 region=str(region).strip() if region not in (None, "") else None,
-                start_date=recent_range[0],
-                end_date=recent_range[1],
-                year=recent_range[0].year,
+                start_date=parsed_range[0],
+                end_date=parsed_range[1],
+                year=parsed_range[0].year,
                 granularity=payload.get("granularity")
                 if payload.get("granularity") in {"hourly", "daily"}
                 else "daily",
@@ -762,17 +796,15 @@ def lookup_weather(
     query: Optional[WeatherQueryInput] = None,
 ) -> ToolInvocation:
     text = prompt or ""
-    source_text = _extract_weather_source_prompt(text)
-    supported_ops, unsupported_ops = _detect_weather_operation_support(source_text)
-    unsupported_note = ""
-    if unsupported_ops:
-        unsupported_note = _build_unsupported_weather_operation_message(unsupported_ops)
-        if not supported_ops:
-            return ToolInvocation(
-                name="weather_lookup",
-                message=unsupported_note,
-                data={},
-            )
+    supported_ops, _, unsupported_note = parse_weather_prompt_operations(text)
+    if not supported_ops and query is not None:
+        supported_ops = _dedupe_preserve_order(list(query.requested_operations or []))
+    if unsupported_note and not supported_ops:
+        return ToolInvocation(
+            name="weather_lookup",
+            message=unsupported_note,
+            data={},
+        )
     if cache_prompt is None or query is None:
         cache_prompt, query = normalize_weather_prompt(text)
     if query is None:
@@ -804,8 +836,8 @@ def lookup_weather(
         region_id=region_id,
         region=query.region,
     )
-    if unsupported_note:
-        return result.model_copy(
-            update={"message": _prepend_message(unsupported_note, result.message)}
-        )
-    return result
+    return apply_weather_operation_view(
+        result,
+        requested_operations=supported_ops,
+        unsupported_note=unsupported_note,
+    )

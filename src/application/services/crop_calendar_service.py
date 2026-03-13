@@ -614,7 +614,27 @@ def _planting_method_value(value: object) -> str:
 def _normalize_culti_type_code(value: object) -> Optional[int]:
     if value is None:
         return None
-    return _resolve_code("culti_type", value)
+    code = _resolve_code("culti_type", value)
+    if code is not None:
+        return code
+    text = str(value).strip()
+    aliases = {
+        "一季稻": ("一季晚稻", "中稻"),
+        "单季稻": ("一季晚稻", "中稻"),
+        "晚稻": ("一季晚稻",),
+    }
+    for candidate in aliases.get(text, ()):
+        code = _resolve_code("culti_type", candidate)
+        if code is not None:
+            return code
+    return None
+
+
+def _normalize_culti_type_label(value: object) -> Optional[str]:
+    code = _normalize_culti_type_code(value)
+    if code is None:
+        return None
+    return _get_code_map("culti_type").get(code)
 
 
 def resolve_sowing_method_code(value: object) -> Optional[int]:
@@ -623,6 +643,10 @@ def resolve_sowing_method_code(value: object) -> Optional[int]:
 
 def resolve_culti_type_code(value: object) -> Optional[int]:
     return _normalize_culti_type_code(value)
+
+
+def resolve_culti_type_label(value: object) -> Optional[str]:
+    return _normalize_culti_type_label(value)
 
 
 def list_code_names(category: str, *, limit: int = 8) -> List[str]:

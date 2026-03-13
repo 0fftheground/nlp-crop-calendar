@@ -132,6 +132,40 @@ More deployment details:
 python -m unittest
 ```
 
+Recommended targeted runs:
+
+- Weather regression:
+  ```bash
+  powershell -ExecutionPolicy Bypass -File scripts/run_weather_regression.ps1
+  ```
+- Scenario-driven suites:
+  ```bash
+  python -m unittest tests.weather.test_service tests.weather.test_session tests.weather.test_ui tests.weather.test_regression
+  python -m unittest tests.sowing.test_service tests.sowing.test_session
+  python -m unittest tests.variety.test_service tests.variety.test_session
+  python -m unittest tests.workflow.test_service tests.workflow.test_session
+  ```
+
+Current test layout:
+
+- `tests/weather/`: weather service, session, UI, regression
+- `tests/sowing/`: sowing suitability service and session reuse
+- `tests/variety/`: variety service and session reuse
+- `tests/workflow/`: growth-stage and crop-calendar workflow/service tests
+- `tests/router/`: router / planner / intent-rule tests
+- `tests/domain/`: domain and payload-building tests
+- `tests/architecture/`: dependency boundary checks
+- `tests/scenarios/<domain>/`: YAML scenario files used by scenario-driven tests
+
+Scenario-driven tests follow a `YAML + Python executor` pattern:
+
+- YAML keeps user scenarios, follow-up turns, expected payloads, and expected copy
+- Python test files stay small and focus on replaying scenarios plus assertions
+
+See also:
+
+- `tests/README.md`
+
 ## More Docs
 - Deployment details: `DEPLOY.md`
 - Technical details: `TECHNICAL_DETAILS.md`

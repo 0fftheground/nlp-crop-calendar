@@ -21,10 +21,41 @@ _WEATHER_REGION_RE = re.compile(
 _YEAR_RE = re.compile(r"(20\d{2})\s*年?")
 _DATE_TEXT_RE = re.compile(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})")
 _DATE_TEXT_COMPACT_RE = re.compile(r"(20\d{2})(\d{2})(\d{2})")
+_SOWING_QUERY_CUES = (
+    "播种",
+    "播期",
+    "适播",
+)
+_SOWING_INTENT_CUES = (
+    "适合",
+    "适宜",
+    "什么时候",
+    "何时",
+    "窗口",
+    "推荐",
+    "怎么播",
+    "播吗",
+    "播嘛",
+    "播呢",
+)
+_PLAN_QUERY_CUES = ("计划", "方案", "生成", "制定", "新增", "创建")
 
 
 def _normalize_prompt(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _looks_like_sowing_query(text: str) -> bool:
+    prompt = _normalize_prompt(text)
+    if not prompt:
+        return False
+    if any(token in prompt for token in _PLAN_QUERY_CUES):
+        return False
+    if not any(token in prompt for token in _SOWING_QUERY_CUES):
+        return False
+    if any(token in prompt for token in _SOWING_INTENT_CUES):
+        return True
+    return len(prompt) <= 12
 
 
 class _IntentPlanCache:
@@ -87,7 +118,8 @@ class IntentRouter:
         intent_mode: str,
     ) -> Optional[ActionPlan]:
         if intent_mode == "llm_only":
-            return self._planner.plan(prompt, pending=pending)
+            plan = self._planner.plan(prompt, pending=pending)
+            return self._normalize_plan_for_boundaries(plan, prompt)
         plan = self._rule_route(prompt)
         if plan:
             log_event(
@@ -96,7 +128,7 @@ class IntentRouter:
                 name=plan.name,
                 reason=plan.reason,
             )
-            return plan
+            return self._normalize_plan_for_boundaries(plan, prompt)
         cached_plan = self._get_cached_plan(prompt)
         if cached_plan:
             log_event(
@@ -104,14 +136,16 @@ class IntentRouter:
                 action=cached_plan.action,
                 name=cached_plan.name,
             )
-            return cached_plan
+            return self._normalize_plan_for_boundaries(cached_plan, prompt)
         fast_plan = self._fast_intent_route(prompt, pending)
         if fast_plan:
             log_event("intent_fast_hit", action=fast_plan.action, name=fast_plan.name)
+            fast_plan = self._normalize_plan_for_boundaries(fast_plan, prompt)
             self._cache_plan(prompt, fast_plan)
             return fast_plan
         plan = self._planner.plan(prompt, pending=pending)
         if plan:
+            plan = self._normalize_plan_for_boundaries(plan, prompt)
             self._cache_plan(prompt, plan)
         return plan
 
@@ -119,6 +153,15 @@ class IntentRouter:
         text = _normalize_prompt(prompt)
         if not text:
             return None
+        if _looks_like_sowing_query(text):
+            return ActionPlan(
+                action="tool",
+                name="sowing_suitability_lookup",
+                input=self._default_plan_input(
+                    "tool", "sowing_suitability_lookup", text
+                ),
+                reason="rule:sowing_query",
+            )
         lowered = text.lower()
         for name in self._tool_names:
             if name.lower() in lowered:
@@ -235,6 +278,23 @@ class IntentRouter:
             except ValueError:
                 pass
         return payload or {}
+
+    def _normalize_plan_for_boundaries(
+        self, plan: Optional[ActionPlan], prompt: str
+    ) -> Optional[ActionPlan]:
+        if plan is None:
+            return None
+        if _looks_like_sowing_query(prompt):
+            if plan.action != "tool" or plan.name != "sowing_suitability_lookup":
+                return ActionPlan(
+                    action="tool",
+                    name="sowing_suitability_lookup",
+                    input=self._default_plan_input(
+                        "tool", "sowing_suitability_lookup", _normalize_prompt(prompt)
+                    ),
+                    reason="boundary:sowing_query",
+                )
+        return plan
 
     def _build_intent_cache_key(self, prompt: str) -> str:
         text = _normalize_prompt(prompt)

@@ -1,0 +1,28 @@
+sowing_session_context:
+  - id: followup_region_reuses_latest_context
+    session_id: s1
+    initial_context:
+      tool_contexts:
+        sowing_suitability_lookup:
+          variety: 美香占2号
+          culti_type: 早稻
+          planting_method: direct_seeding
+          region_id: 湖南
+          crop: 水稻
+      last_context:
+        kind: tool
+        name: sowing_suitability_lookup
+    followup_prompt: 在芜湖呢
+    tool_result:
+      name: sowing_suitability_lookup
+      message: success
+      data:
+        resolved:
+          region_id: 芜湖
+    expected:
+      tool_name: sowing_suitability_lookup
+      payload:
+        variety: 美香占2号
+        culti_type: 早稻
+        planting_method: direct_seeding
+        region_id: 芜湖

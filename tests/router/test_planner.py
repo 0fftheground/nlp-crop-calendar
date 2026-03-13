@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 _MISSING_PYDANTIC_SETTINGS = importlib.util.find_spec("pydantic_settings") is None
@@ -33,21 +33,21 @@ class PlannerRouterTests(unittest.TestCase):
         from src.infra.config import get_config
 
         get_config.cache_clear()
-        from src.infra.planting_choice_store import get_planting_choice_store
-        from src.infra.variety_choice_store import get_variety_choice_store
-
-        get_planting_choice_store.cache_clear()
-        get_variety_choice_store.cache_clear()
         self._llm_patch = patch(
             "src.agent.planner.get_chat_model", return_value=_DummyLLM()
         )
         self._llm_patch.start()
+        self._fast_intent_patch = patch(
+            "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
+        )
+        self._fast_intent_patch.start()
         from src.agent.router import RequestRouter
 
         self.router = RequestRouter()
 
     def tearDown(self) -> None:
         self._llm_patch.stop()
+        self._fast_intent_patch.stop()
         for key, value in self._env_backup.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -62,10 +62,8 @@ class PlannerRouterTests(unittest.TestCase):
         from src.schemas.models import UserRequest
 
         plan = ActionPlan(action="none", response="ok")
-        with patch.object(self.router._planner, "plan", return_value=plan):
-            result = self.router.handle(
-                UserRequest(prompt="hello", session_id="s1")
-            )
+        with patch.object(self.router._intent_router, "plan", return_value=plan):
+            result = self.router.handle(UserRequest(prompt="hello", session_id="s1"))
 
         self.assertEqual(result.mode, "none")
         self.assertIsNotNone(result.plan)
@@ -76,7 +74,7 @@ class PlannerRouterTests(unittest.TestCase):
         from src.schemas.models import UserRequest
 
         plan = ActionPlan(action="none")
-        with patch.object(self.router._planner, "plan", return_value=plan):
+        with patch.object(self.router._intent_router, "plan", return_value=plan):
             with patch("src.agent.router.execute_tool") as mocked_execute:
                 result = self.router.handle(
                     UserRequest(prompt="水稻品种美香占2号", session_id="s6")
@@ -94,7 +92,12 @@ class PlannerRouterTests(unittest.TestCase):
         plan = ActionPlan(
             action="tool",
             name="weather_lookup",
-            input={"region": "长沙", "year": 2025},
+            input={
+                "region": "长沙",
+                "start_date": "2025-03-13",
+                "end_date": "2025-03-19",
+                "year": 2025,
+            },
         )
         tool_payload = ToolInvocation(
             name="weather_lookup",
@@ -105,13 +108,11 @@ class PlannerRouterTests(unittest.TestCase):
                 "followup_count": 0,
             },
         )
-        with patch.object(self.router._planner, "plan", return_value=plan):
+        with patch.object(self.router._intent_router, "plan", return_value=plan):
             with patch(
                 "src.agent.router.execute_tool", return_value=tool_payload
             ) as mocked_execute:
-                result = self.router.handle(
-                    UserRequest(prompt="查天气", session_id="s2")
-                )
+                result = self.router.handle(UserRequest(prompt="查天气", session_id="s2"))
 
         self.assertEqual(result.mode, "tool")
         self.assertTrue(mocked_execute.called)
@@ -120,26 +121,26 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertEqual(pending.get("mode"), "tool")
         self.assertEqual(pending.get("tool_name"), "weather_lookup")
 
-    def test_memory_clear_tool_clears_user_memory(self) -> None:
-        from datetime import date
-
+    def test_memory_clear_tool_clears_session_context(self) -> None:
         from src.agent.planner import ActionPlan
-        from src.infra.planting_choice_store import get_planting_choice_store
-        from src.infra.variety_choice_store import get_variety_choice_store
-        from src.schemas.models import PlantingDetails, UserRequest
+        from src.schemas.models import UserRequest
 
-        planting = PlantingDetails(
-            crop="rice",
-            planting_method="direct_seeding",
-            sowing_date=date(2025, 1, 1),
+        self.router._session_context_store.set(
+            "s7",
+            {
+                "tool_contexts": {
+                    "weather_lookup": {
+                        "region": "长沙",
+                        "start_date": "2026-03-13",
+                        "end_date": "2026-03-19",
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "weather_lookup"},
+            },
         )
-        planting_store = get_planting_choice_store()
-        variety_store = get_variety_choice_store()
-        planting_store.set("u7", planting.crop, "default", planting)
-        variety_store.set("u7", "test-query", "test-variety", None)
 
         plan = ActionPlan(action="tool", name="memory_clear", input={})
-        with patch.object(self.router._planner, "plan", return_value=plan):
+        with patch.object(self.router._intent_router, "plan", return_value=plan):
             with patch("src.agent.router.execute_tool") as mocked_execute:
                 result = self.router.handle(
                     UserRequest(prompt="clear memory", session_id="s7", user_id="u7")
@@ -147,10 +148,9 @@ class PlannerRouterTests(unittest.TestCase):
 
         mocked_execute.assert_not_called()
         self.assertEqual(result.mode, "tool")
-        self.assertIsNotNone(result.tool)
         self.assertEqual(result.tool.name, "memory_clear")
-        self.assertIsNone(planting_store.get("u7", "rice", "default"))
-        self.assertIsNone(variety_store.get("u7", "test-query"))
+        session_context = self.router._session_context_store.get("s7") or {}
+        self.assertEqual(session_context, {})
 
     def test_workflow_action_invokes_runner(self) -> None:
         from src.agent.planner import ActionPlan
@@ -162,15 +162,13 @@ class PlannerRouterTests(unittest.TestCase):
             input={"prompt": "种水稻"},
         )
         plan_payload = WorkflowResponse(message="done")
-        with patch.object(self.router._planner, "plan", return_value=plan):
+        with patch.object(self.router._intent_router, "plan", return_value=plan):
             with patch.object(
                 self.router,
                 "_run_named_workflow",
                 return_value=plan_payload,
             ) as mocked_run:
-                result = self.router.handle(
-                    UserRequest(prompt="种水稻", session_id="s3")
-                )
+                result = self.router.handle(UserRequest(prompt="种水稻", session_id="s3"))
 
         self.assertEqual(result.mode, "workflow")
         self.assertIsNotNone(result.plan)
@@ -192,10 +190,8 @@ class PlannerRouterTests(unittest.TestCase):
             },
         )
         plan = ActionPlan(action="none", response="ok")
-        with patch.object(self.router._planner, "plan", return_value=plan) as mocked_plan:
-            result = self.router.handle(
-                UserRequest(prompt="取消追问", session_id="s4")
-            )
+        with patch.object(self.router._intent_router, "plan", return_value=plan) as mocked_plan:
+            result = self.router.handle(UserRequest(prompt="取消追问", session_id="s4"))
 
         mocked_plan.assert_called_once()
         self.assertEqual(result.mode, "none")
@@ -232,6 +228,54 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertEqual(result.tool.name, "plant_plan_list_active")
         self.assertTrue(mocked_execute.called)
         self.assertIsNone(self.router._pending_store.get("s8"))
+
+    def test_llm_only_mode_rewrites_sowing_query_away_from_weather(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        self.router._intent_mode = "llm_only"
+        plan = ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input={"start_date": "2026-03-13", "end_date": "2026-03-19"},
+            reason="llm:weather",
+        )
+        tool_payload = ToolInvocation(
+            name="sowing_suitability_lookup",
+            message="ok",
+            data={},
+        )
+        with patch.object(self.router._planner, "plan", return_value=plan):
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = self.router.handle(
+                    UserRequest(prompt="最近适合播种嘛", session_id="s-llm-sowing")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "sowing_suitability_lookup")
+        self.assertEqual(mocked_execute.call_args[0][0], "sowing_suitability_lookup")
+
+    def test_input_validation_reports_invalid_field_format_instead_of_missing(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import UserRequest
+
+        plan = ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input={"start_date": {"bad": 1}, "end_date": "2026-03-19"},
+        )
+        with patch.object(self.router._intent_router, "plan", return_value=plan):
+            result = self.router.handle(
+                UserRequest(prompt="查天气", session_id="s-invalid-weather")
+            )
+
+        self.assertEqual(result.mode, "none")
+        self.assertIsNotNone(result.plan)
+        self.assertIn("请检查这些字段的格式", result.plan.message)
+        self.assertIn("起始日期(YYYY-MM-DD)", result.plan.message)
+
 
 if __name__ == "__main__":
     unittest.main()

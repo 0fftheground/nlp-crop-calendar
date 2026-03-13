@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 _MISSING_PYDANTIC_SETTINGS = importlib.util.find_spec("pydantic_settings") is None
@@ -106,6 +106,14 @@ class DomainServiceTests(unittest.TestCase):
         draft = extract_planting_details("我想在湖南省种植水稻，5月1日播种")
         self.assertEqual(draft.region_id, "湖南省")
 
+    def test_extract_planting_details_keeps_variety_field(self) -> None:
+        draft = extract_planting_details(
+            "南粳46，一季稻，直播",
+            llm_extract=lambda _: {"variety": "南粳46", "culti_type": "一季稻"},
+        )
+        self.assertEqual(draft.variety, "南粳46")
+        self.assertEqual(draft.culti_type, "一季稻")
+
     def test_build_crop_calendar_payload_allows_empty_transplant_date(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"
         get_config.cache_clear()
@@ -196,6 +204,14 @@ class DomainServiceTests(unittest.TestCase):
         planting = draft.to_canonical()
         self.assertEqual(planting.farm_id, "88")
         self.assertEqual(planting.region_id, "320100")
+
+    def test_sowing_suitability_query_input_accepts_numeric_farm_id(self) -> None:
+        from src.schemas.models import SowingSuitabilityQueryInput
+
+        query = SowingSuitabilityQueryInput.model_validate(
+            {"query": "最近适合播种嘛", "farm_id": 12}
+        )
+        self.assertEqual(query.farm_id, "12")
 
     def test_build_crop_calendar_payload_uses_default_farm_id(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"

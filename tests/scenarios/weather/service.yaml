@@ -1,0 +1,101 @@
+relative_dates:
+  today: '2026-03-13'
+  cases:
+    - prompt: 最近适合打药吗
+      start_date: '2026-03-13'
+      end_date: '2026-03-19'
+    - prompt: 下周呢
+      start_date: '2026-03-16'
+      end_date: '2026-03-22'
+    - prompt: 明天呢
+      start_date: '2026-03-14'
+      end_date: '2026-03-14'
+    - prompt: 大后天适合打药吗
+      start_date: '2026-03-16'
+      end_date: '2026-03-16'
+    - prompt: 周末呢
+      start_date: '2026-03-14'
+      end_date: '2026-03-15'
+    - prompt: 未来三天适合施肥吗
+      start_date: '2026-03-13'
+      end_date: '2026-03-15'
+    - prompt: 这个月呢
+      start_date: '2026-03-01'
+      end_date: '2026-03-30'
+    - prompt: 下个月月初呢
+      start_date: '2026-04-01'
+      end_date: '2026-04-10'
+    - prompt: 月底呢
+      start_date: '2026-03-22'
+      end_date: '2026-03-31'
+
+operation_cases:
+  base_payload:
+    region: farm:9
+    start_date: '2026-03-12'
+    end_date: '2026-03-18'
+    points:
+      - date: '2026-03-12'
+        sf_ws: 0.5
+        sf_reason: sf reason
+        lm_ws: 0.5
+        lm_reason: lm reason
+        yz_ws: 0.5
+        yz_reason: yz reason
+        fd_ws: 0.5
+        fd_reason: fd reason
+        dy_ws: 0.5
+        dy_reason: dy reason
+        sg_ws: 0.5
+        sg_reason: sg reason
+        zd_ws: 0.5
+        zd_reason: zd reason
+  direct:
+    - query: 最近天气适合施肥吗
+      requested_operations: [施肥]
+      present_fields: [sf_ws, sf_reason]
+      absent_fields: [dy_ws, dy_reason]
+    - query: 最近天气适合炼苗吗
+      requested_operations: [炼苗]
+      present_fields: [lm_ws, lm_reason]
+      absent_fields: [sf_ws, sf_reason]
+    - query: 最近天气适合移栽吗
+      requested_operations: [移栽]
+      present_fields: [yz_ws, yz_reason]
+      absent_fields: [lm_ws, lm_reason]
+    - query: 最近天气适合翻地吗
+      requested_operations: [翻地]
+      present_fields: [fd_ws, fd_reason]
+      absent_fields: [yz_ws, yz_reason]
+    - query: 最近天气适合打药吗
+      requested_operations: [打药]
+      present_fields: [dy_ws, dy_reason]
+      absent_fields: [sf_ws, sf_reason]
+    - query: 最近天气适合收割吗
+      requested_operations: [收割]
+      present_fields: [sg_ws, sg_reason]
+      absent_fields: [dy_ws, dy_reason]
+    - query: 最近天气适合整地吗
+      requested_operations: [整地]
+      present_fields: [zd_ws, zd_reason]
+      absent_fields: [sg_ws, sg_reason]
+  followup:
+    - query: 施肥呢
+      requested_operations: [施肥]
+      present_fields: [sf_ws, sf_reason]
+      absent_fields: [dy_ws, dy_reason]
+    - query: 那收割怎么样
+      requested_operations: [收割]
+      present_fields: [sg_ws, sg_reason]
+      absent_fields: [dy_ws, dy_reason]
+    - query: 换成施肥
+      requested_operations: [施肥]
+      present_fields: [sf_ws, sf_reason]
+      absent_fields: [dy_ws, dy_reason]
+
+unsupported_cases:
+  - query: 最近适合浇水吗
+    message_contains:
+      - 浇水
+      - 暂不支持气象适宜度展示
+      - 目前支持：施肥、炼苗、移栽、翻地、打药、收割、整地

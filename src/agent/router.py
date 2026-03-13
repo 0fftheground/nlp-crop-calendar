@@ -110,8 +110,6 @@ class RequestRouter:
     def _maybe_build_contextual_plan(
         self, prompt: str, session_id: str
     ) -> Optional[ActionPlan]:
-        if self._rule_engine.match(prompt):
-            return None
         payload = self._get_session_context_payload(session_id)
         return build_contextual_plan(prompt, payload)
 

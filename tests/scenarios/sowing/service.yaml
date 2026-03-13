@@ -1,0 +1,233 @@
+sowing_service_cases:
+  - id: uses_region_id_and_variety_sub_type
+    request_payload:
+      variety: 美香占2号
+      culti_type: 一季晚稻
+      planting_method: 直播
+      region_id: 长沙
+    config:
+      agri_db_url: postgresql://example
+      business_api_key:
+      business_api_base_url: http://example.test
+      sowing_suitability_api_url:
+      default_farm_id: "8"
+      db_region_lookup_candidates: []
+      region_db_table:
+    sql:
+      dict_rows:
+        sowingmtd:
+          - code: 0
+            code_name: 直播
+        culti_type:
+          - code: 4
+            code_name: 一季晚稻
+        sub_type:
+          - code: 9
+            code_name: 籼稻
+      sub_type_rows:
+        - sub_type: 9
+      region_rows:
+        - region_id: 430100
+          region_name: 长沙市
+    http_response:
+      code: 200
+      message: success
+      data:
+        suitDate:
+          - "2026-03-25"
+          - "2026-03-26"
+        unsuitDate:
+          - ""
+        unsuitReasons:
+          - ""
+    expected:
+      message: success
+      url: http://example.test/bozhong_syd
+      payload:
+        region_id: 430100
+        culti_type: 4
+        sowing_method: 0
+        sub_type: 9
+        crop: 0
+      result_suit_dates:
+        - "2026-03-25"
+        - "2026-03-26"
+      resolved:
+        sub_type: 9
+
+  - id: falls_back_to_default_farm
+    request_payload:
+      variety: 美香占2号
+      culti_type: 一季晚稻
+      planting_method: 移栽
+    config:
+      agri_db_url: postgresql://example
+      business_api_key:
+      business_api_base_url: http://example.test
+      sowing_suitability_api_url:
+      default_farm_id: "12"
+      db_region_lookup_candidates: []
+      region_db_table:
+    sql:
+      dict_rows:
+        sowingmtd:
+          - code: 1
+            code_name: 插秧
+        culti_type:
+          - code: 4
+            code_name: 一季晚稻
+      sub_type_rows:
+        - sub_type: 9
+      region_rows: []
+    http_response:
+      code: 200
+      message: success
+      data:
+        suitDate: []
+    expected:
+      message: success
+      payload:
+        farm_id: 12
+        culti_type: 4
+        sowing_method: 1
+        sub_type: 9
+        crop: 0
+      resolved:
+        farm_id: 12
+
+  - id: returns_followup_when_missing_fields
+    raw_request: 帮我查播种适宜期
+    expected:
+      name: sowing_suitability_lookup
+      message_contains:
+        - 请补充
+      missing_fields:
+        - variety
+        - culti_type
+        - planting_method
+
+  - id: followup_merges_planting_method
+    raw_request_json:
+      query: 美香占2号适合在湖南当早稻种吗
+      followup:
+        prompt: 直播
+        draft:
+          variety: 美香占2号
+          culti_type: 一季晚稻
+          region_id: 长沙
+        missing_fields:
+          - planting_method
+        followup_count: 1
+    config:
+      agri_db_url: postgresql://example
+      business_api_key:
+      business_api_base_url: http://example.test
+      sowing_suitability_api_url:
+      default_farm_id: "12"
+      db_region_lookup_candidates: []
+      region_db_table:
+    sql:
+      dict_rows:
+        sowingmtd:
+          - code: 0
+            code_name: 直播
+        culti_type:
+          - code: 4
+            code_name: 一季晚稻
+      sub_type_rows:
+        - sub_type: 9
+      region_rows:
+        - region_id: 430100
+          region_name: 长沙市
+    http_response:
+      code: 200
+      message: success
+      data:
+        suitDate: []
+    expected:
+      message: success
+      payload:
+        region_id: 430100
+        culti_type: 4
+        sowing_method: 0
+        sub_type: 9
+        crop: 0
+
+  - id: followup_merges_variety_and_alias_culti_type
+    raw_request_json:
+      query: 最近适合播种嘛
+      followup:
+        prompt: 南粳46，一季稻，直播
+        draft:
+          crop: 水稻
+        missing_fields:
+          - variety
+          - culti_type
+          - planting_method
+        followup_count: 1
+    config:
+      agri_db_url: postgresql://example
+      business_api_key:
+      business_api_base_url: http://example.test
+      sowing_suitability_api_url:
+      default_farm_id: "12"
+      db_region_lookup_candidates: []
+      region_db_table:
+    sql:
+      dict_rows:
+        sowingmtd:
+          - code: 0
+            code_name: 直播
+        culti_type:
+          - code: 4
+            code_name: 一季晚稻
+          - code: 3
+            code_name: 中稻
+      sub_type_rows:
+        - sub_type: 9
+      region_rows: []
+    http_response:
+      code: 200
+      message: success
+      data:
+        suitDate: []
+    expected:
+      message: success
+      payload:
+        farm_id: 12
+        culti_type: 4
+        sowing_method: 0
+        sub_type: 9
+        crop: 0
+      resolved:
+        variety: 南粳46
+        culti_type: 一季晚稻
+
+  - id: returns_unsupported_region_message
+    request_payload:
+      variety: 美香占2号
+      culti_type: 一季晚稻
+      planting_method: 直播
+      region_id: 芜湖
+    config:
+      agri_db_url: postgresql://example
+      business_api_key:
+      business_api_base_url: http://example.test
+      sowing_suitability_api_url:
+      default_farm_id: "12"
+      db_region_lookup_candidates: []
+      region_db_table:
+    sql:
+      dict_rows:
+        sowingmtd:
+          - code: 0
+            code_name: 直播
+        culti_type:
+          - code: 4
+            code_name: 一季晚稻
+      sub_type_rows:
+        - sub_type: 9
+      region_rows: []
+    expected:
+      name: sowing_suitability_lookup
+      message: 暂不支持该区域的播期推荐：芜湖

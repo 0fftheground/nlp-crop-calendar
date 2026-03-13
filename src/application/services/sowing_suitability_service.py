@@ -4,16 +4,24 @@ import json
 import re
 from typing import Dict, Mapping, Optional
 
+from pydantic import BaseModel, Field
+
 from ..adapters import (
     DEFAULT_CONFIG_ADAPTER,
     DEFAULT_HTTP_ADAPTER,
     DEFAULT_SQL_ADAPTER,
 )
 from ..ports import ConfigPort, HttpPort, SqlPort
-from ...agent.followup import build_tool_followup_invocation
+from ...agent.followup import build_tool_followup_invocation, resolve_followup_choice
 from ...domain.planting import DEFAULT_CROP, extract_planting_details
+from ...infra.llm_extract import llm_structured_extract
 from ...infra.db_catalog import TABLE_KEY_VARIETY, resolve_db_table
-from ...infra.variety_store import extract_variety_tokens
+from ...infra.variety_store import (
+    extract_variety_tokens,
+    find_exact_variety_in_text,
+    retrieve_variety_candidates,
+)
+from ...prompts.planting_extract import build_planting_extract_prompt
 from ...schemas.models import ToolInvocation
 from .crop_calendar_service import (
     _coerce_region_id_value,
@@ -21,6 +29,7 @@ from .crop_calendar_service import (
     _normalize_sowing_method_code,
     _resolve_code,
     _resolve_region_id_for_payload,
+    resolve_culti_type_label,
     configure_crop_calendar_ports,
 )
 
@@ -28,6 +37,24 @@ from .crop_calendar_service import (
 _CONFIG_PORT: ConfigPort = DEFAULT_CONFIG_ADAPTER
 _HTTP_PORT: HttpPort = DEFAULT_HTTP_ADAPTER
 _SQL_PORT: SqlPort = DEFAULT_SQL_ADAPTER
+
+
+class _SowingPlantingExtract(BaseModel):
+    region_id: Optional[str] = Field(default=None)
+    crop: Optional[str] = None
+    variety: Optional[str] = None
+    culti_type: Optional[str] = None
+    planting_method: Optional[str] = None
+
+
+def _llm_extract_planting_for_sowing(prompt: str) -> Dict[str, object]:
+    return llm_structured_extract(
+        prompt,
+        schema=_SowingPlantingExtract,
+        system_prompt=build_planting_extract_prompt(
+            "播期推荐场景下，若用户提供品种名、稻作类型、播种方式、区域，请尽量准确抽取。"
+        ),
+    )
 
 
 def configure_sowing_suitability_ports(
@@ -150,6 +177,7 @@ def _extract_variety_hint(text: str) -> Optional[str]:
     for pattern in (
         r"(?:品种|种子|种的是|播的是)\s*[:：]?\s*([A-Za-z0-9\u4e00-\u9fff]{2,20})",
         r"([A-Za-z0-9\u4e00-\u9fff]{2,20}(?:号|优\d+|香\d+))",
+        r"([A-Za-z\u4e00-\u9fff]{1,12}\d{1,6}(?:号)?)",
     ):
         match = re.search(pattern, text)
         if match:
@@ -161,6 +189,25 @@ def _extract_variety_hint(text: str) -> Optional[str]:
         if any(ch.isdigit() for ch in token) or "号" in token:
             return token
     return None
+
+
+def _resolve_followup_variety_candidate(payload: Mapping[str, object]) -> Optional[str]:
+    followup = payload.get("followup")
+    if not isinstance(followup, Mapping):
+        return None
+    answer = followup.get("prompt")
+    if not isinstance(answer, str) or not answer.strip():
+        return None
+    draft = followup.get("draft")
+    if not isinstance(draft, Mapping):
+        return None
+    raw_candidates = draft.get("candidates") or draft.get("variety_candidates")
+    if not isinstance(raw_candidates, list):
+        return None
+    candidates = [str(item).strip() for item in raw_candidates if str(item).strip()]
+    if not candidates:
+        return None
+    return resolve_followup_choice(answer.strip(), candidates)
 
 
 def _build_query_from_prompt(prompt: str) -> Dict[str, object]:
@@ -175,6 +222,9 @@ def _build_query_from_prompt(prompt: str) -> Dict[str, object]:
         value = followup.get("prompt")
         if isinstance(value, str) and value.strip():
             followup_prompt = value.strip()
+    chosen_variety = _resolve_followup_variety_candidate(payload)
+    if chosen_variety:
+        draft["variety"] = chosen_variety
     for key in (
         "variety",
         "culti_type",
@@ -188,7 +238,11 @@ def _build_query_from_prompt(prompt: str) -> Dict[str, object]:
         if value is not None and value != "":
             draft[key] = value
     query_text = _extract_query_text(prompt)
-    planting = extract_planting_details(query_text)
+    planting = extract_planting_details(
+        query_text, llm_extract=_llm_extract_planting_for_sowing
+    )
+    if planting.variety and "variety" not in draft:
+        draft["variety"] = planting.variety
     if planting.culti_type and "culti_type" not in draft:
         draft["culti_type"] = planting.culti_type
     if planting.planting_method and "planting_method" not in draft:
@@ -199,7 +253,12 @@ def _build_query_from_prompt(prompt: str) -> Dict[str, object]:
     if planting.crop and "crop" not in draft:
         draft["crop"] = planting.crop
     if followup_prompt:
-        followup_planting = extract_planting_details(followup_prompt)
+        followup_planting = extract_planting_details(
+            followup_prompt, llm_extract=_llm_extract_planting_for_sowing
+        )
+        followup_variety = _extract_variety_hint(followup_prompt)
+        if followup_planting.variety and not draft.get("variety"):
+            draft["variety"] = followup_planting.variety
         if followup_planting.culti_type:
             draft["culti_type"] = followup_planting.culti_type
         if followup_planting.planting_method:
@@ -208,18 +267,23 @@ def _build_query_from_prompt(prompt: str) -> Dict[str, object]:
             draft["region_id"] = followup_planting.region_id
         if followup_planting.crop and not draft.get("crop"):
             draft["crop"] = followup_planting.crop
-    variety = payload.get("variety")
-    if not isinstance(variety, str) or not variety.strip():
-        if isinstance(followup, Mapping):
-            raw_draft = followup.get("draft")
-            if isinstance(raw_draft, Mapping):
-                raw_variety = raw_draft.get("variety")
-                if isinstance(raw_variety, str) and raw_variety.strip():
-                    variety = raw_variety.strip()
-    if not isinstance(variety, str) or not variety.strip():
-        variety = _extract_variety_hint(query_text)
-    if isinstance(variety, str) and variety.strip():
-        draft["variety"] = variety.strip()
+        if followup_variety and not draft.get("variety"):
+            draft["variety"] = followup_variety
+    if not str(draft.get("variety") or "").strip():
+        variety = payload.get("variety")
+        if not isinstance(variety, str) or not variety.strip():
+            if isinstance(followup, Mapping):
+                raw_draft = followup.get("draft")
+                if isinstance(raw_draft, Mapping):
+                    raw_variety = raw_draft.get("variety")
+                    if isinstance(raw_variety, str) and raw_variety.strip():
+                        variety = raw_variety.strip()
+        if not isinstance(variety, str) or not variety.strip():
+            variety = _extract_variety_hint(query_text)
+        if (not isinstance(variety, str) or not variety.strip()) and followup_prompt:
+            variety = _extract_variety_hint(followup_prompt)
+        if isinstance(variety, str) and variety.strip():
+            draft["variety"] = variety.strip()
     if "region_id" not in draft and "region" in draft:
         draft["region_id"] = draft.get("region")
     draft.setdefault("crop", DEFAULT_CROP)
@@ -293,6 +357,34 @@ def _build_followup(prompt: str, *, draft: Mapping[str, object], missing: list[s
         missing_fields=missing,
         draft=dict(draft),
         query=prompt,
+    )
+
+
+def _build_variety_candidate_followup(
+    prompt: str,
+    *,
+    draft: Mapping[str, object],
+    candidates: list[str],
+) -> ToolInvocation:
+    options = [str(item).strip() for item in candidates if str(item).strip()]
+    lines = ["未找到完全匹配的品种。你是不是想查询以下品种："]
+    for idx, name in enumerate(options, start=1):
+        lines.append(f"{idx}. {name}")
+    lines.append("请回复序号或品种名称。")
+    followup_draft = dict(draft)
+    followup_draft["variety"] = None
+    followup_draft["candidates"] = options
+    return build_tool_followup_invocation(
+        name="sowing_suitability_lookup",
+        message="\n".join(lines),
+        missing_fields=["variety"],
+        draft=followup_draft,
+        query=prompt,
+        options=options,
+        choice_hint=True,
+        strict_options_only=True,
+        source="candidate",
+        extra={"candidates": options},
     )
 
 
@@ -374,7 +466,8 @@ def _build_request_payload(query: Mapping[str, object]) -> tuple[dict[str, objec
         request_payload["farm_id"] = farm_id
     return request_payload, {
         "variety": draft.get("variety"),
-        "culti_type": draft.get("culti_type"),
+        "culti_type": resolve_culti_type_label(draft.get("culti_type"))
+        or draft.get("culti_type"),
         "planting_method": draft.get("planting_method"),
         "region_id": region_raw or draft.get("region_id"),
         "farm_id": farm_id,
@@ -393,6 +486,22 @@ def lookup_sowing_suitability(prompt: str) -> ToolInvocation:
     ]
     if missing:
         return _build_followup(text, draft=draft, missing=missing)
+    raw_variety = str(draft.get("variety") or "").strip()
+    if raw_variety and _fetch_variety_sub_type(raw_variety) is None:
+        query_text = _extract_query_text(text)
+        exact_variety = find_exact_variety_in_text(raw_variety) or find_exact_variety_in_text(
+            query_text
+        )
+        if exact_variety:
+            draft["variety"] = exact_variety
+        else:
+            candidates = retrieve_variety_candidates(raw_variety, limit=5)
+            if not candidates and query_text and query_text != raw_variety:
+                candidates = retrieve_variety_candidates(query_text, limit=5)
+            if candidates:
+                return _build_variety_candidate_followup(
+                    text, draft=draft, candidates=candidates
+                )
     try:
         request_payload, resolved = _build_request_payload(draft)
     except ValueError as exc:

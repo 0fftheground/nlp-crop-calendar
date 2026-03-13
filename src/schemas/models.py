@@ -143,6 +143,10 @@ class WeatherQueryInput(BaseModel):
     )
     granularity: Literal["hourly", "daily"] = "daily"
     include_advice: bool = False
+    requested_operations: List[str] = Field(
+        default_factory=list,
+        description="需要展示的农事适宜度标签，如施肥、打药。",
+    )
 
     @field_validator("region", mode="before")
     @classmethod
@@ -168,6 +172,9 @@ class WeatherQueryInput(BaseModel):
         days = (self.end_date - self.start_date).days + 1
         if days > 30:
             raise ValueError("date range must be within 30 days")
+        self.requested_operations = [
+            str(item).strip() for item in self.requested_operations if str(item).strip()
+        ]
         return self
 
 
@@ -314,6 +321,14 @@ class SowingSuitabilityQueryInput(BaseModel):
     region_id: Optional[str] = None
     farm_id: Optional[str] = None
     crop: Optional[str] = None
+
+    @field_validator("region_id", "farm_id", mode="before")
+    @classmethod
+    def _normalize_sowing_lookup_ids(cls, value: object) -> object:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
 
 class PromptInput(BaseModel):

@@ -312,7 +312,6 @@ def extract_planting_details(
         _normalize_culti_type_field(data, prompt)
         _sanitize_crop_field(data, prompt, variety_resolver)
         _apply_rice_default(data)
-        data.pop("variety", None)
         data.setdefault("confidence", 0.9)
         return PlantingDetailsDraft(**data)
 
@@ -320,7 +319,6 @@ def extract_planting_details(
     _normalize_culti_type_field(data, prompt)
     _sanitize_crop_field(data, prompt, variety_resolver)
     _apply_rice_default(data)
-    data.pop("variety", None)
     data["confidence"] = 0.4 if len(data) == 1 else 0.75
     return PlantingDetailsDraft(**data)
 

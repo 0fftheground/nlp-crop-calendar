@@ -14,3 +14,4 @@ opentelemetry-instrumentation-fastapi>=0.46b0
 opentelemetry-instrumentation-httpx>=0.46b0
 psycopg[binary]>=3.1.18
 asyncpg>=0.29.0
+PyYAML>=6.0.0

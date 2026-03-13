@@ -12,6 +12,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Optional
 
+from .config import get_config
 from .postgres import connect_postgres
 
 
@@ -201,7 +202,25 @@ class NoopToolResultCache(ToolResultCache):
 
 
 def build_tool_result_cache() -> ToolResultCache:
-    # Caching disabled: always return a no-op cache.
+    cfg = get_config()
+    store = (cfg.tool_cache_store or "memory").lower()
+    ttl_seconds = cfg.tool_cache_ttl_seconds
+    if store == "postgres":
+        if not cfg.cache_db_url:
+            raise RuntimeError("缺少 CACHE_DB_URL，无法写入工具缓存。")
+        return PostgresToolResultCache(url=cfg.cache_db_url, ttl_seconds=ttl_seconds)
+    if store == "sqlite":
+        if cfg.tool_cache_path:
+            path = Path(cfg.tool_cache_path)
+        else:
+            root = Path(__file__).resolve().parents[2]
+            path = root / ".cache" / "tool_cache.sqlite3"
+        return SqliteToolResultCache(path=path, ttl_seconds=ttl_seconds)
+    if store == "memory":
+        return MemoryToolResultCache(
+            max_items=cfg.tool_cache_max_items,
+            ttl_seconds=ttl_seconds,
+        )
     return NoopToolResultCache()
 
 

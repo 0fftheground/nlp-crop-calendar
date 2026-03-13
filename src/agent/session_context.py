@@ -7,7 +7,15 @@ from typing import Mapping, Optional
 from ..application.services.sowing_suitability_service import (
     build_contextual_sowing_query,
 )
-from ..application.services.weather_service import normalize_weather_prompt
+from ..application.services.weather_service import (
+    extract_weather_operations,
+    normalize_weather_prompt,
+)
+from ..domain.date_parser import (
+    extract_date_range,
+    extract_explicit_dates,
+    extract_relative_date_range,
+)
 from ..domain.planting import extract_planting_details
 from ..infra.variety_store import find_exact_variety_in_text
 from ..schemas.models import ToolInvocation, WorkflowResponse
@@ -45,13 +53,31 @@ _METHOD_LABELS = {
 _INVALID_REGION_TOKENS = (
     "改成",
     "换成",
+    "下周",
+    "上周",
+    "本周",
+    "这周",
+    "下星期",
+    "上星期",
+    "这星期",
+    "本星期",
     "直播",
     "移栽",
     "插秧",
     "播种",
     "生育期",
     "方案",
+    "施肥",
+    "炼苗",
+    "移栽",
+    "翻地",
+    "打药",
+    "喷药",
+    "收割",
+    "收获",
+    "整地",
 )
+_BRIEF_FOLLOWUP_SUFFIX_RE = re.compile(r"(呢|吗|呀|啊|怎么样|如何|行吗|可以吗)$")
 
 
 def build_contextual_plan(
@@ -131,6 +157,15 @@ def extract_session_context_from_tool(
         include_advice = data.get("include_advice")
         if isinstance(include_advice, bool):
             context["include_advice"] = include_advice
+        requested_operations = data.get("requested_operations")
+        if isinstance(requested_operations, list):
+            operations = [
+                str(item).strip()
+                for item in requested_operations
+                if str(item).strip()
+            ]
+            if operations:
+                context["requested_operations"] = operations
         if context.get("start_date") and context.get("end_date"):
             return tool.name, context
         return None
@@ -154,7 +189,11 @@ def extract_session_context_from_tool(
     if tool.name == "sowing_suitability_lookup":
         resolved = data.get("resolved")
         if isinstance(resolved, Mapping):
-            return tool.name, dict(resolved)
+            context = dict(resolved)
+            farm_id = context.get("farm_id")
+            if farm_id not in (None, ""):
+                context["farm_id"] = str(farm_id).strip()
+            return tool.name, context
     return None
 
 
@@ -224,7 +263,15 @@ def _build_contextual_weather_query(
     base = {
         key: value
         for key, value in dict(context).items()
-        if key in {"region", "start_date", "end_date", "granularity", "include_advice"}
+        if key
+        in {
+            "region",
+            "start_date",
+            "end_date",
+            "granularity",
+            "include_advice",
+            "requested_operations",
+        }
         and value not in (None, "")
     }
     if not base:
@@ -241,10 +288,10 @@ def _build_contextual_weather_query(
         region = _extract_region_hint(prompt)
         if region:
             overrides["region"] = region
-        dates = _extract_dates(prompt)
-        if len(dates) >= 2:
-            overrides["start_date"] = dates[0]
-            overrides["end_date"] = dates[1]
+        parsed_range = extract_date_range(prompt, today=date.today())
+        if parsed_range:
+            overrides["start_date"] = parsed_range[0].isoformat()
+            overrides["end_date"] = parsed_range[1].isoformat()
         year = _extract_year(prompt)
         if year is not None and "start_date" in base and "end_date" in base:
             start = _parse_iso_date(base.get("start_date"))
@@ -252,6 +299,15 @@ def _build_contextual_weather_query(
             if start and end:
                 overrides["start_date"] = start.replace(year=year).isoformat()
                 overrides["end_date"] = end.replace(year=year).isoformat()
+    supported_ops, unsupported_ops = extract_weather_operations(
+        prompt, require_suitability_cues=False
+    )
+    if supported_ops:
+        overrides["requested_operations"] = supported_ops
+    if not overrides and (supported_ops or unsupported_ops):
+        if unsupported_ops and not supported_ops and not _is_brief_weather_followup(prompt):
+            return None
+        return dict(base)
     if not overrides:
         return None
     merged = dict(base)
@@ -259,6 +315,17 @@ def _build_contextual_weather_query(
     if not (merged.get("start_date") and merged.get("end_date")):
         return None
     return merged
+
+
+def _is_brief_weather_followup(prompt: str) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+    if len(text) <= 12 and _BRIEF_FOLLOWUP_SUFFIX_RE.search(text):
+        return True
+    if any(text.startswith(prefix) for prefix in ("那", "那就", "那改成", "改成", "换成")):
+        return True
+    return False
 
 
 def _build_contextual_variety_query(
@@ -403,6 +470,8 @@ def _extract_region_hint(text: str) -> Optional[str]:
     prompt = str(text or "").strip()
     if not prompt:
         return None
+    if extract_relative_date_range(prompt, today=date.today()):
+        return None
     for pattern in _REGION_PATTERNS:
         match = re.search(pattern, prompt)
         if not match:
@@ -415,30 +484,7 @@ def _extract_region_hint(text: str) -> Optional[str]:
 
 
 def _extract_dates(text: str) -> list[str]:
-    values: list[str] = []
-    for match in re.finditer(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})", text):
-        try:
-            values.append(
-                date(
-                    int(match.group(1)),
-                    int(match.group(2)),
-                    int(match.group(3)),
-                ).isoformat()
-            )
-        except ValueError:
-            continue
-    for match in re.finditer(r"(20\d{2})(\d{2})(\d{2})", text):
-        try:
-            values.append(
-                date(
-                    int(match.group(1)),
-                    int(match.group(2)),
-                    int(match.group(3)),
-                ).isoformat()
-            )
-        except ValueError:
-            continue
-    return values
+    return [item.isoformat() for item in extract_explicit_dates(text)]
 
 
 def _extract_year(text: str) -> Optional[int]:

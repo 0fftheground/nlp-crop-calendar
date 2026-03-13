@@ -1,0 +1,73 @@
+growth_stage:
+  - id: reuse_latest_session_context
+    session_id: g1
+    seed_turn:
+      prompt: 查询美香占2号的生育期
+      plan_input:
+        prompt: 查询美香占2号的生育期
+      workflow_name: growth_stage_query_workflow
+      workflow_result:
+        message: ok
+        data:
+          workflow:
+            plan_id: '12'
+            plan_filters:
+              variety: 美香占2号
+              region_id: 长沙
+              planting_method: direct_seeding
+              culti_type: 早稻
+              sowing_date: '2026-03-20'
+          planting:
+            variety: 美香占2号
+            region_id: 长沙
+            planting_method: direct_seeding
+            culti_type: 早稻
+            sowing_date: '2026-03-20'
+    followup_turn:
+      prompt: 在芜湖呢
+      workflow_result:
+        message: ok
+        data:
+          workflow:
+            plan_id: '12'
+    expected:
+      workflow_name: growth_stage_query_workflow
+      prompt_contains:
+        - 芜湖
+        - 美香占2号
+        - 生育期
+
+crop_calendar:
+  - id: reuse_latest_session_context
+    session_id: c1
+    seed_turn:
+      prompt: 生成农事方案
+      plan_input:
+        prompt: 生成农事方案
+      workflow_name: crop_calendar_workflow
+      workflow_result:
+        message: ok
+        data:
+          planting:
+            region_id: 长沙
+            crop: 水稻
+            variety: 美香占2号
+            culti_type: 早稻
+            planting_method: transplanting
+            sowing_date: '2026-03-20'
+            transplant_date: '2026-04-05'
+          plant_season_id: 1
+          resolved_region_id: '430100'
+    followup_turn:
+      prompt: 改成直播呢
+      workflow_result:
+        message: ok
+        data:
+          planting:
+            region_id: 长沙
+    expected:
+      workflow_name: crop_calendar_workflow
+      prompt_contains:
+        - 直播
+        - 美香占2号
+        - '2026-03-20'

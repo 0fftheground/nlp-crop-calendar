@@ -1,0 +1,124 @@
+- id: include_operation_suitability
+  data:
+    region: farm:1
+    start_date: '2026-03-03'
+    end_date: '2026-03-12'
+    points:
+      - timestamp: '2026-03-12T00:00:00'
+        temperature_max: 29.3
+        temperature_min: 19.73
+        precipitation: 0.0
+        dy_ws: 0.85
+        dy_reason: 风小无雨，适合打药。
+  contains:
+    - 打药适宜度 0.85
+    - 风小无雨，适合打药。
+  not_contains:
+    - 降水 0.0mm
+
+- id: keep_operation_labels_consistent
+  data:
+    region: farm:1
+    start_date: '2026-03-10'
+    end_date: '2026-03-10'
+    points:
+      - timestamp: '2026-03-10T00:00:00'
+        temperature_max: 24.0
+        temperature_min: 16.0
+        precipitation: 1.5
+        dy_ws: 0.8
+        dy_reason: 风力较小，适合打药。
+        sf_reason: 降水偏多，不建议施肥。
+  contains:
+    - 打药适宜度 0.8
+    - 施肥适宜度（降水偏多，不建议施肥。；降水 1.5mm）
+  not_contains:
+    - 施肥建议
+
+- id: filter_to_requested_operations
+  data:
+    region: farm:1
+    start_date: '2026-03-10'
+    end_date: '2026-03-10'
+    requested_operations: [打药]
+    points:
+      - timestamp: '2026-03-10T00:00:00'
+        dy_ws: 0.8
+        dy_reason: 适合打药。
+        sf_ws: 0.2
+        sf_reason: 不适合施肥。
+  contains:
+    - 打药适宜度 0.8
+  not_contains:
+    - 施肥适宜度
+
+- id: append_weather_factors_from_reason
+  data:
+    region: farm:1
+    start_date: '2026-03-10'
+    end_date: '2026-03-10'
+    requested_operations: [打药]
+    points:
+      - timestamp: '2026-03-10T00:00:00'
+        temperature_max: 24.0
+        temperature_min: 16.0
+        precipitation: 0.0
+        wind_speed: 6.5
+        dy_ws: 0.2
+        dy_reason: 风速较大，不适合打药。
+  contains:
+    - 风速较大，不适合打药。
+    - 风速 6.5m/s
+
+- id: append_multiple_weather_factors_from_reason
+  data:
+    region: farm:1
+    start_date: '2026-03-10'
+    end_date: '2026-03-10'
+    requested_operations: [施肥]
+    points:
+      - timestamp: '2026-03-10T00:00:00'
+        temperature_max: 12.0
+        temperature_min: 7.0
+        precipitation: 9.5
+        sf_ws: 0.1
+        sf_reason: 降雨明显且气温偏低，不适合施肥。
+  contains:
+    - 降水 9.5mm
+    - 气温 7至12°C
+
+- id: do_not_append_weather_factors_when_suitable
+  data:
+    region: farm:1
+    start_date: '2026-03-10'
+    end_date: '2026-03-10'
+    requested_operations: [打药]
+    points:
+      - timestamp: '2026-03-10T00:00:00'
+        wind_speed: 2.5
+        dy_ws: 0.8
+        dy_reason: 风力较小，适合打药。
+  contains:
+    - 风力较小，适合打药。
+  not_contains:
+    - 风速 2.5m/s
+
+- id: avoid_markdown_strikethrough_tokens
+  data:
+    region: farm:1
+    start_date: '2026-03-16'
+    end_date: '2026-03-22'
+    requested_operations: [施肥]
+    points:
+      - timestamp: '2026-03-16T00:00:00'
+        temperature_max: 12.0
+        temperature_min: 7.0
+        precipitation: 2.0
+        sf_ws: 0.2
+        sf_reason: 降雨明显且气温偏低，不适合施肥。
+  contains:
+    - 时间：2026-03-16 至 2026-03-22
+    - 7.0至12.0°C
+  not_contains:
+    - 2026-03-16 ~ 2026-03-22
+    - 7.0~12.0°C
