@@ -7,5 +7,5 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} -r requirements.txt
 COPY . .
 
-EXPOSE 8000 8001
+EXPOSE 8000 18001
 CMD ["python", "run_all.py"]

@@ -418,6 +418,7 @@ def normalize_weather_prompt(
     parsed_range = extract_date_range(source_prompt, today=date.today())
     if parsed_range:
         region = payload.get("region")
+        requested_operations = payload.get("requested_operations")
         try:
             query = WeatherQueryInput(
                 region=str(region).strip() if region not in (None, "") else None,
@@ -428,6 +429,9 @@ def normalize_weather_prompt(
                 if payload.get("granularity") in {"hourly", "daily"}
                 else "daily",
                 include_advice=bool(payload.get("include_advice", False)),
+                requested_operations=requested_operations
+                if isinstance(requested_operations, list)
+                else [],
             )
             canonical = json.dumps(
                 query.model_dump(mode="json"),
@@ -807,6 +811,8 @@ def lookup_weather(
         )
     if cache_prompt is None or query is None:
         cache_prompt, query = normalize_weather_prompt(text)
+    if not supported_ops and query is not None:
+        supported_ops = _dedupe_preserve_order(list(query.requested_operations or []))
     if query is None:
         dates = _extract_dates_from_text(text)
         start_date = dates[0] if len(dates) >= 1 else None

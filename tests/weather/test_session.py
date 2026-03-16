@@ -297,6 +297,61 @@ class WeatherSessionContextTests(unittest.TestCase):
         self.assertEqual(payload.get("end_date"), "2026-03-22")
         self.assertEqual(payload.get("requested_operations"), ["施肥"])
 
+    def test_weather_today_followup_overrides_stale_context_dates(self) -> None:
+        from src.schemas.models import UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "s-weather-today",
+            {
+                "tool_contexts": {
+                    "weather_lookup": {
+                        "region": "长沙",
+                        "start_date": "2024-06-01",
+                        "end_date": "2024-06-07",
+                        "granularity": "daily",
+                        "requested_operations": ["施肥"],
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "weather_lookup"},
+            },
+        )
+
+        weather_payload = self._make_tool_invocation(
+            {
+                "message": "ok",
+                "data": {
+                    "region": "长沙",
+                    "start_date": "2026-03-13",
+                    "end_date": "2026-03-13",
+                    "granularity": "daily",
+                    "requested_operations": ["施肥"],
+                    "points": [],
+                },
+            }
+        )
+        fake_date = self._build_fake_date("2026-03-13")
+        with patch.object(
+            router._intent_router, "plan", return_value=None
+        ) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=weather_payload
+            ) as mocked_execute:
+                with patch("src.application.services.weather_service.date", fake_date):
+                    with patch("src.agent.session_context.date", fake_date):
+                        result = router.handle(
+                            UserRequest(prompt="今天适合施肥吗", session_id="s-weather-today")
+                        )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "weather_lookup")
+        mocked_plan.assert_not_called()
+        payload = json.loads(mocked_execute.call_args[0][1])
+        self.assertEqual(payload.get("region"), "长沙")
+        self.assertEqual(payload.get("start_date"), "2026-03-13")
+        self.assertEqual(payload.get("end_date"), "2026-03-13")
+        self.assertEqual(payload.get("requested_operations"), ["施肥"])
+
     def test_weather_relative_two_weeks_followup_uses_correct_week(self) -> None:
         from src.schemas.models import UserRequest
 

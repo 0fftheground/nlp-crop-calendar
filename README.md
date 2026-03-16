@@ -39,7 +39,7 @@ pip install -r requirements.txt
    ```
 3. Open:
    - API health: `http://127.0.0.1:8000/health`
-   - Chainlit: `http://127.0.0.1:8001`
+   - Chainlit: `http://127.0.0.1:18001`
 
 ## Environment Variables (Minimal)
 
@@ -104,7 +104,7 @@ docker compose -f docker-compose.yml up -d --build
 
 ### 3) Verify
 - API: `http://<server-ip>:8000/health`
-- Chainlit: `http://<server-ip>:8001`
+- Chainlit: `http://<server-ip>:18001`
 - Grafana: `http://<server-ip>:3000` (if enabled)
 
 Recommended LLM check (real request, not just URL connectivity):

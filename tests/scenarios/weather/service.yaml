@@ -1,6 +1,39 @@
 relative_dates:
   today: '2026-03-13'
   cases:
+    - prompt: 今天适合施肥吗
+      start_date: '2026-03-13'
+      end_date: '2026-03-13'
+    - prompt: 昨天适合施肥吗
+      start_date: '2026-03-12'
+      end_date: '2026-03-12'
+    - prompt: 前天适合施肥吗
+      start_date: '2026-03-11'
+      end_date: '2026-03-11'
+    - prompt: 3天后适合施肥吗
+      start_date: '2026-03-16'
+      end_date: '2026-03-16'
+    - prompt: 2天前适合施肥吗
+      start_date: '2026-03-11'
+      end_date: '2026-03-11'
+    - prompt: 3月16号适合施肥吗
+      start_date: '2026-03-16'
+      end_date: '2026-03-16'
+    - prompt: 2026年3月18日适合施肥吗
+      start_date: '2026-03-18'
+      end_date: '2026-03-18'
+    - prompt: 3月中旬适合施肥吗
+      start_date: '2026-03-11'
+      end_date: '2026-03-20'
+    - prompt: 3月下旬适合施肥吗
+      start_date: '2026-03-21'
+      end_date: '2026-03-31'
+    - prompt: 从3月16号到3月20号适合施肥吗
+      start_date: '2026-03-16'
+      end_date: '2026-03-20'
+    - prompt: 从3月16号到20号适合施肥吗
+      start_date: '2026-03-16'
+      end_date: '2026-03-20'
     - prompt: 最近适合打药吗
       start_date: '2026-03-13'
       end_date: '2026-03-19'

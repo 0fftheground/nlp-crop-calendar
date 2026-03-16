@@ -35,7 +35,7 @@ def _load_env_file() -> None:
 
 def build_commands() -> List[list]:
     python = sys.executable
-    chainlit_port = os.getenv("CHAINLIT_PORT", "8001")
+    chainlit_port = os.getenv("CHAINLIT_PORT", "18001")
     fastapi_port = os.getenv("FASTAPI_PORT", "8000")
     fastapi_host = os.getenv("FASTAPI_HOST", os.getenv("HOST", "0.0.0.0"))
     chainlit_host = os.getenv("CHAINLIT_HOST", os.getenv("HOST", "127.0.0.1"))

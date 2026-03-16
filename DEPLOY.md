@@ -33,7 +33,7 @@ python run_all.py
 
 Open:
 - API: http://127.0.0.1:8000/health
-- Chainlit: http://127.0.0.1:8001
+- Chainlit: http://127.0.0.1:18001
 
 ## Server Deployment
 
@@ -83,13 +83,13 @@ Stop:
 Check ports:
 ```bash
 curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8001/
+curl http://127.0.0.1:18001/
 ```
 
 If you need to find the local process by port:
 ```bash
 netstat -ano | findstr :8000
-netstat -ano | findstr :8001
+netstat -ano | findstr :18001
 ```
 
 ### Docker Compose
@@ -175,7 +175,7 @@ docker exec -it nlp-crop-calendar-api tail -n 200 .cache/logs/observability.log
 ### 4) Open ports on the server
 Allow inbound traffic:
 - `8000` (API)
-- `8001` (Chainlit)
+- `18001` (Chainlit)
 - `3000` (Grafana, only if observability stack is enabled)
 
 Optional (only if other machines send OTLP directly):
@@ -184,7 +184,7 @@ Optional (only if other machines send OTLP directly):
 
 ### 5) Verify
 - API health: `http://<server-ip>:8000/health`
-- Chainlit: `http://<server-ip>:8001`
+- Chainlit: `http://<server-ip>:18001`
 - Grafana: `http://<server-ip>:3000` (default `admin/admin`, only if enabled)
 
 Note:
@@ -222,7 +222,7 @@ Example:
 ```yaml
 ports:
   - "18000:8000"
-  - "18001:8001"
+  - "18001:18001"
   - "13000:3000"
 ```
 

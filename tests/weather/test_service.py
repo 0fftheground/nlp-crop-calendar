@@ -240,6 +240,17 @@ class WeatherServiceTests(unittest.TestCase):
             http_port=http,
             sql_port=StubSql(),
         )
+        result = lookup_weather('{"start_date":"2025-01-01","end_date":"2025-01-01"}')
+
+        self.assertEqual(
+            http.last_payload,
+            {
+                "farm_id": "12",
+                "start_date": "20250101",
+                "end_date": "20250101",
+            },
+        )
+        self.assertEqual(result.data.get("region"), "farm:12")
 
     def test_lookup_weather_uses_requested_operations_from_query_payload(self) -> None:
         self._configure_stub_weather_ports(
@@ -276,18 +287,6 @@ class WeatherServiceTests(unittest.TestCase):
         points = result.data.get("points") or []
         self.assertEqual(points[0].get("sf_ws"), 0.2)
         self.assertNotIn("dy_ws", points[0])
-
-        result = lookup_weather('{"start_date":"2025-01-01","end_date":"2025-01-01"}')
-
-        self.assertEqual(
-            http.last_payload,
-            {
-                "farm_id": "12",
-                "start_date": "20250101",
-                "end_date": "20250101",
-            },
-        )
-        self.assertEqual(result.data.get("region"), "farm:12")
 
     def test_normalize_weather_prompt_scenario_ranges(self) -> None:
         from datetime import date as _date

@@ -42,9 +42,9 @@ services:
       - --host
       - 0.0.0.0
       - --port
-      - "8001"
+      - "18001"
     ports:
-      - "8001:8001"
+      - "18001:18001"
     depends_on:
       api:
         condition: service_healthy
@@ -54,7 +54,7 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/', timeout=2)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18001/', timeout=2)"
       interval: 10s
       timeout: 5s
       retries: 5
