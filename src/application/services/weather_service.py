@@ -13,6 +13,7 @@ from ..adapters import (
 from ..ports import ConfigPort, HttpPort, SqlPort
 from ...agent.followup import build_tool_followup_invocation
 from ...domain.date_parser import extract_date_range, extract_explicit_dates
+from ...domain.region_text import build_region_text_variants, normalize_region_token
 from ...infra.db_catalog import resolve_region_lookup_sources
 from ...schemas.models import (
     ToolInvocation,
@@ -500,21 +501,11 @@ def _build_date_followup(
 
 
 def _normalize_region_token(value: object) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    return re.sub(r"[，。；、,.!！?？\s]+", "", text)
+    return normalize_region_token(value)
 
 
 def _region_text_variants(value: object) -> List[str]:
-    normalized = _normalize_region_token(value)
-    if not normalized:
-        return []
-    variants = [normalized]
-    trimmed = _REGION_SUFFIX_RE.sub("", normalized)
-    if trimmed and trimmed not in variants:
-        variants.append(trimmed)
-    return variants
+    return build_region_text_variants(value)
 
 
 def _coerce_region_id_value(value: object) -> Optional[object]:

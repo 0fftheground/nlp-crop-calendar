@@ -18,6 +18,7 @@ if not _MISSING_PYDANTIC_SETTINGS:
         DEFAULT_SQL_ADAPTER,
     )
     from src.application.services.weather_service import (
+        _resolve_region_id,
         configure_weather_ports,
         lookup_weather,
         normalize_weather_prompt,
@@ -184,6 +185,32 @@ class WeatherServiceTests(unittest.TestCase):
         self.assertEqual(points[0].get("sf_reason"), "有小雨，不建议施肥。")
         self.assertEqual(points[0].get("lm_ws"), 0.5)
         self.assertEqual(points[0].get("lm_reason"), "适合炼苗。")
+
+    def test_resolve_region_id_accepts_region_with_province_prefix(self) -> None:
+        class StubConfig:
+            agri_db_url = "postgresql://example"
+            business_api_key = None
+            business_api_base_url = "http://example.test"
+            farm_weather_api_url = None
+            default_farm_id = "9"
+            db_region_lookup_candidates = []
+            region_db_table = None
+
+        class StubSql:
+            def fetch_all(self, url, sql, params=()):
+                return [{"region_id": 430700, "region_name": "常德市"}]
+
+            def quote_identifier(self, name: str) -> str:
+                return f'"{name}"'
+
+        configure_weather_ports(
+            config_port=type("P", (), {"get": staticmethod(lambda: StubConfig())})(),
+            sql_port=StubSql(),
+        )
+
+        self.assertEqual(_resolve_region_id("湖南常德"), 430700)
+        self.assertEqual(_resolve_region_id("中国湖南常德"), 430700)
+        self.assertEqual(_resolve_region_id("湖南省常德市鼎城区"), 430700)
 
     def test_lookup_weather_uses_default_farm_when_region_missing(self) -> None:
         class StubConfig:

@@ -20,6 +20,7 @@ from ..domain.planting import extract_planting_details
 from ..infra.variety_store import find_exact_variety_in_text
 from ..schemas.models import ToolInvocation, WorkflowResponse
 from .followup import get_followup_missing_fields
+from .intent_boundaries import looks_like_sowing_query
 from .planner import ActionPlan
 
 _TOOL_CONTEXT_KEY = "tool_contexts"
@@ -259,6 +260,8 @@ def _build_contextual_weather_query(
     prompt: str, context: Optional[Mapping[str, object]]
 ) -> Optional[dict[str, object]]:
     if not isinstance(context, Mapping):
+        return None
+    if looks_like_sowing_query(prompt):
         return None
     base = {
         key: value

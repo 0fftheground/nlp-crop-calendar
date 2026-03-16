@@ -13,6 +13,7 @@ from ..adapters import (
     DEFAULT_SQL_ADAPTER,
 )
 from ..ports import ConfigPort, HttpPort, SqlPort
+from ...domain.region_text import build_region_text_variants, normalize_region_token
 from ...infra.db_catalog import (
     TABLE_KEY_VARIETY,
     resolve_db_table,
@@ -407,22 +408,11 @@ def _resolve_code(category: str, value: object) -> Optional[int]:
 
 
 def _normalize_region_token(value: object) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    text = re.sub(r"[，。；、,.!！?？\s]+", "", text)
-    return text
+    return normalize_region_token(value)
 
 
 def _region_text_variants(value: object) -> List[str]:
-    normalized = _normalize_region_token(value)
-    if not normalized:
-        return []
-    variants = [normalized]
-    trimmed = _REGION_SUFFIX_RE.sub("", normalized)
-    if trimmed and trimmed not in variants:
-        variants.append(trimmed)
-    return variants
+    return build_region_text_variants(value)
 
 
 def _pick_region_code_from_mapping(

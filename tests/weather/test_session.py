@@ -485,6 +485,51 @@ class WeatherSessionContextTests(unittest.TestCase):
         payload = json.loads(mocked_execute.call_args[0][1])
         self.assertEqual(payload.get("query"), "那播种怎么样")
 
+    def test_transplanting_sowing_question_does_not_get_hijacked_by_weather_context(
+        self,
+    ) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "s-weather-to-transplant-sowing",
+            {
+                "tool_contexts": {
+                    "weather_lookup": {
+                        "region": "湖南常德",
+                        "start_date": "2024-06-01",
+                        "end_date": "2024-06-30",
+                        "granularity": "daily",
+                        "requested_operations": ["移栽"],
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "weather_lookup"},
+            },
+        )
+
+        sowing_payload = ToolInvocation(
+            name="sowing_suitability_lookup",
+            message="ok",
+            data={"resolved": {"variety": "湘早籼24", "region_id": "湖南常德"}},
+        )
+        with patch(
+            "src.agent.router.execute_tool", return_value=sowing_payload
+        ) as mocked_execute:
+            result = router.handle(
+                UserRequest(
+                    prompt="我在常德种植早稻湘早籼24，移栽什么时候播种合适",
+                    session_id="s-weather-to-transplant-sowing",
+                )
+            )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "sowing_suitability_lookup")
+        self.assertEqual(mocked_execute.call_args[0][0], "sowing_suitability_lookup")
+        payload = json.loads(mocked_execute.call_args[0][1])
+        self.assertEqual(
+            payload.get("query"), "我在常德种植早稻湘早籼24，移栽什么时候播种合适"
+        )
+
     def test_recent_sowing_suitability_question_routes_to_sowing_tool(self) -> None:
         from src.schemas.models import ToolInvocation, UserRequest
 

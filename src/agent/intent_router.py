@@ -8,6 +8,7 @@ from threading import Lock
 from typing import Optional
 
 from ..observability.logging_utils import log_event
+from .intent_boundaries import looks_like_sowing_query, normalize_prompt
 from .planner import ActionPlan
 
 
@@ -21,41 +22,6 @@ _WEATHER_REGION_RE = re.compile(
 _YEAR_RE = re.compile(r"(20\d{2})\s*年?")
 _DATE_TEXT_RE = re.compile(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})")
 _DATE_TEXT_COMPACT_RE = re.compile(r"(20\d{2})(\d{2})(\d{2})")
-_SOWING_QUERY_CUES = (
-    "播种",
-    "播期",
-    "适播",
-)
-_SOWING_INTENT_CUES = (
-    "适合",
-    "适宜",
-    "什么时候",
-    "何时",
-    "窗口",
-    "推荐",
-    "怎么播",
-    "播吗",
-    "播嘛",
-    "播呢",
-)
-_PLAN_QUERY_CUES = ("计划", "方案", "生成", "制定", "新增", "创建")
-
-
-def _normalize_prompt(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
-
-
-def _looks_like_sowing_query(text: str) -> bool:
-    prompt = _normalize_prompt(text)
-    if not prompt:
-        return False
-    if any(token in prompt for token in _PLAN_QUERY_CUES):
-        return False
-    if not any(token in prompt for token in _SOWING_QUERY_CUES):
-        return False
-    if any(token in prompt for token in _SOWING_INTENT_CUES):
-        return True
-    return len(prompt) <= 12
 
 
 class _IntentPlanCache:
@@ -150,10 +116,10 @@ class IntentRouter:
         return plan
 
     def _rule_route(self, prompt: str) -> Optional[ActionPlan]:
-        text = _normalize_prompt(prompt)
+        text = normalize_prompt(prompt)
         if not text:
             return None
-        if _looks_like_sowing_query(text):
+        if looks_like_sowing_query(text):
             return ActionPlan(
                 action="tool",
                 name="sowing_suitability_lookup",
@@ -244,7 +210,7 @@ class IntentRouter:
         )
 
     def _build_weather_payload(self, prompt: str) -> Optional[dict]:
-        text = _normalize_prompt(prompt)
+        text = normalize_prompt(prompt)
         if not text:
             return None
         match = _WEATHER_REGION_RE.search(text)
@@ -284,20 +250,20 @@ class IntentRouter:
     ) -> Optional[ActionPlan]:
         if plan is None:
             return None
-        if _looks_like_sowing_query(prompt):
+        if looks_like_sowing_query(prompt):
             if plan.action != "tool" or plan.name != "sowing_suitability_lookup":
                 return ActionPlan(
                     action="tool",
                     name="sowing_suitability_lookup",
                     input=self._default_plan_input(
-                        "tool", "sowing_suitability_lookup", _normalize_prompt(prompt)
+                        "tool", "sowing_suitability_lookup", normalize_prompt(prompt)
                     ),
                     reason="boundary:sowing_query",
                 )
         return plan
 
     def _build_intent_cache_key(self, prompt: str) -> str:
-        text = _normalize_prompt(prompt)
+        text = normalize_prompt(prompt)
         if len(text) < INTENT_CACHE_MIN_PROMPT_LEN:
             return ""
         return text.lower()
