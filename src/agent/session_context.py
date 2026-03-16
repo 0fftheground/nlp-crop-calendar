@@ -79,6 +79,7 @@ _INVALID_REGION_TOKENS = (
     "整地",
 )
 _BRIEF_FOLLOWUP_SUFFIX_RE = re.compile(r"(呢|吗|呀|啊|怎么样|如何|行吗|可以吗)$")
+_WEATHER_QUERY_TOKENS = ("天气", "气象", "气温", "降雨", "降水", "湿度", "风速", "预报")
 
 
 def build_contextual_plan(
@@ -109,6 +110,8 @@ def build_contextual_plan(
                     reason=f"session_context:{name}",
                 )
         if kind == "tool" and name == "sowing_suitability_lookup":
+            if _looks_like_weather_query(text):
+                continue
             payload = build_contextual_sowing_query(text, context)
             if payload:
                 return ActionPlan(
@@ -136,6 +139,18 @@ def build_contextual_plan(
                     reason=f"session_context:{name}",
                 )
     return None
+
+
+def _looks_like_weather_query(prompt: str) -> bool:
+    text = str(prompt or "").strip()
+    if not text or looks_like_sowing_query(text):
+        return False
+    if any(token in text for token in _WEATHER_QUERY_TOKENS):
+        return True
+    supported, unsupported = extract_weather_operations(
+        text, require_suitability_cues=True
+    )
+    return bool(supported or unsupported)
 
 
 def extract_session_context_from_tool(

@@ -18,6 +18,7 @@ if not _MISSING_PYDANTIC_SETTINGS:
         DEFAULT_SQL_ADAPTER,
     )
     from src.application.services.sowing_suitability_service import (
+        _extract_variety_hint,
         configure_sowing_suitability_ports,
         lookup_sowing_suitability,
     )
@@ -266,6 +267,12 @@ class SowingSuitabilityServiceTests(unittest.TestCase):
         self.assertTrue(result.data.get("strict_options_only"))
         self.assertEqual(
             result.data.get("draft", {}).get("candidates"), ["南粳46", "南粳9108"]
+        )
+
+    def test_extract_variety_hint_ignores_sentence_prefix_and_keeps_actual_variety(self) -> None:
+        self.assertEqual(
+            _extract_variety_hint("我在湖南省常德种植早稻湘早籼24号，移栽什么时候播种合适"),
+            "湘早籼24号",
         )
 
     def test_lookup_sowing_suitability_resolves_variety_candidate_followup(self) -> None:

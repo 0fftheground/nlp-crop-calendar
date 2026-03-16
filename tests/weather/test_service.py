@@ -18,6 +18,7 @@ if not _MISSING_PYDANTIC_SETTINGS:
         DEFAULT_SQL_ADAPTER,
     )
     from src.application.services.weather_service import (
+        extract_weather_operations,
         _resolve_region_id,
         configure_weather_ports,
         lookup_weather,
@@ -314,6 +315,17 @@ class WeatherServiceTests(unittest.TestCase):
         points = result.data.get("points") or []
         self.assertEqual(points[0].get("sf_ws"), 0.2)
         self.assertNotIn("dy_ws", points[0])
+
+    def test_extract_weather_operations_supports_generic_fertilizer_and_spray_phrases(
+        self,
+    ) -> None:
+        supported, unsupported = extract_weather_operations("今天是否适合施穗肥呢")
+        self.assertEqual(supported, ["施肥"])
+        self.assertEqual(unsupported, [])
+
+        supported, unsupported = extract_weather_operations("最近适合打纹枯病药吗")
+        self.assertEqual(supported, ["打药"])
+        self.assertEqual(unsupported, [])
 
     def test_normalize_weather_prompt_scenario_ranges(self) -> None:
         from datetime import date as _date

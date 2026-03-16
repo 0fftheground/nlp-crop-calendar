@@ -49,6 +49,13 @@ _SUPPORTED_WEATHER_OPERATION_ALIASES = {
     "收割": ("收割", "收获"),
     "整地": ("整地",),
 }
+_SUPPORTED_WEATHER_OPERATION_PATTERNS = {
+    "施肥": (re.compile(r"施[\u4e00-\u9fffA-Za-z0-9]{0,8}肥"),),
+    "打药": (
+        re.compile(r"打[\u4e00-\u9fffA-Za-z0-9]{0,8}药"),
+        re.compile(r"喷[\u4e00-\u9fffA-Za-z0-9]{0,8}药"),
+    ),
+}
 _WEATHER_OPERATION_FIELD_PREFIXES = {
     "施肥": "sf",
     "炼苗": "lm",
@@ -90,7 +97,10 @@ def extract_weather_operations(
     supported: List[str] = []
     unsupported: List[str] = []
     for label, aliases in _SUPPORTED_WEATHER_OPERATION_ALIASES.items():
-        if any(alias in normalized for alias in aliases):
+        patterns = _SUPPORTED_WEATHER_OPERATION_PATTERNS.get(label, ())
+        if any(alias in normalized for alias in aliases) or any(
+            pattern.search(normalized) for pattern in patterns
+        ):
             supported.append(label)
     for label, aliases in _UNSUPPORTED_WEATHER_OPERATION_ALIASES.items():
         if any(alias in normalized for alias in aliases):

@@ -409,6 +409,62 @@ class WeatherSessionContextTests(unittest.TestCase):
         self.assertEqual(payload.get("end_date"), "2026-03-29")
         self.assertEqual(payload.get("requested_operations"), ["施肥"])
 
+    def test_weather_question_after_sowing_context_does_not_get_hijacked(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "s-sowing-to-weather",
+            {
+                "tool_contexts": {
+                    "sowing_suitability_lookup": {
+                        "variety": "湘早籼24号",
+                        "culti_type": "早稻",
+                        "planting_method": "移栽",
+                        "region_id": "湖南常德",
+                        "crop": "水稻",
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "sowing_suitability_lookup"},
+            },
+        )
+
+        weather_plan = ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input={
+                "region": "湖南常德",
+                "start_date": "2026-03-13",
+                "end_date": "2026-03-13",
+                "year": 2026,
+                "requested_operations": ["施肥"],
+            },
+        )
+        weather_payload = ToolInvocation(
+            name="weather_lookup",
+            message="ok",
+            data={
+                "region": "湖南常德",
+                "start_date": "2026-03-13",
+                "end_date": "2026-03-13",
+                "requested_operations": ["施肥"],
+                "points": [],
+            },
+        )
+        with patch.object(router._intent_router, "plan", return_value=weather_plan) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=weather_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(prompt="今天适合施肥吗", session_id="s-sowing-to-weather")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "weather_lookup")
+        mocked_plan.assert_called_once()
+        self.assertEqual(mocked_execute.call_args[0][0], "weather_lookup")
+
     def test_full_sowing_question_does_not_get_hijacked_by_weather_context(self) -> None:
         from src.schemas.models import ToolInvocation, UserRequest
 

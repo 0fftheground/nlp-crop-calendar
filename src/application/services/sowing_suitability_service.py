@@ -174,6 +174,7 @@ def _extract_query_text(prompt: str) -> str:
 def _extract_variety_hint(text: str) -> Optional[str]:
     if not text:
         return None
+    invalid_cues = ("我在", "种植", "播种", "移栽", "适合", "什么时候", "何时", "合适")
     for pattern in (
         r"(?:品种|种子|种的是|播的是)\s*[:：]?\s*([A-Za-z0-9\u4e00-\u9fff]{2,20})",
         r"([A-Za-z0-9\u4e00-\u9fff]{2,20}(?:号|优\d+|香\d+))",
@@ -182,11 +183,43 @@ def _extract_variety_hint(text: str) -> Optional[str]:
         match = re.search(pattern, text)
         if match:
             value = str(match.group(1) or "").strip("，。；、,.!?！？ ")
-            if value:
+            if value and not any(token in value for token in invalid_cues):
                 return value
+    cue_index = -1
+    cue_length = 0
+    for cue in (
+        "品种",
+        "种子",
+        "种的是",
+        "播的是",
+        "种植",
+        "一季晚稻",
+        "双季晚稻",
+        "双季早稻",
+        "一季稻",
+        "单季稻",
+        "再生稻",
+        "早稻",
+        "中稻",
+        "晚稻",
+    ):
+        index = text.rfind(cue)
+        if index > cue_index:
+            cue_index = index
+            cue_length = len(cue)
+    if cue_index >= 0:
+        tail = text[cue_index + cue_length :]
+        for stop in ("，", ",", "。", "；", ";", "、", "适合", "合适", "什么时候", "何时", "吗", "呢", "移栽", "插秧", "直播", "播种"):
+            if stop in tail:
+                tail = tail.split(stop, 1)[0]
+        tail = tail.strip("，。；、,.!?！？ ")
+        if tail and (any(ch.isdigit() for ch in tail) or "号" in tail):
+            return tail
     tokens = extract_variety_tokens(text)
     for token in tokens:
-        if any(ch.isdigit() for ch in token) or "号" in token:
+        if (any(ch.isdigit() for ch in token) or "号" in token) and not any(
+            cue in token for cue in invalid_cues
+        ):
             return token
     return None
 
