@@ -20,6 +20,7 @@ Required:
 
 Recommended:
 - `BACKEND_URL` is not used in local Python run
+- `BACKEND_TIMEOUT_SECONDS=90` (or another explicit timeout suitable for your model/provider)
 
 Observability (optional):
 - If you do not run an OTEL backend locally, disable exporters:
@@ -58,6 +59,7 @@ If enabling OTEL collector / observability:
 Optional (but recommended):
 - `CHAINLIT_AUTH_*` (enable login)
 - `PUBLIC_BASE_URL=http://<server-ip>:8000` (only if you need absolute URLs in responses)
+- `BACKEND_TIMEOUT_SECONDS=90` (keeps planner/extractor calls from hanging indefinitely)
 
 ### 2) Start base stack (API + Chainlit)
 ```bash
@@ -172,6 +174,17 @@ docker exec -it nlp-crop-calendar-api tail -n 200 .cache/logs/api_errors.log
 docker exec -it nlp-crop-calendar-api tail -n 200 .cache/logs/observability.log
 ```
 
+Useful events in `observability.log`:
+- `request_received`
+- `pending_resume`
+- `session_candidate_built`
+- `session_candidate_selected`
+- `llm_extract_call`
+- `llm_extract_response`
+- `llm_extract_model_error`
+- `llm_extract_error`
+- `response_ready`
+
 ### 4) Open ports on the server
 Allow inbound traffic:
 - `8000` (API)
@@ -212,6 +225,33 @@ Success criteria:
 - Endpoint is reachable from the server (DNS/TLS/network OK)
 - `OPENAI_API_KEY` is valid
 - The provider supports the configured model (default in code: `gpt-4.1-mini`)
+
+## Troubleshooting Request Failures
+
+If the UI only shows `请求失败:`:
+
+1. Find the request chain in `.cache/logs/observability.log`.
+   ```bash
+   docker exec -it nlp-crop-calendar-api tail -n 200 .cache/logs/observability.log
+   ```
+2. Check whether the request reached `response_ready`.
+   - If yes, the backend finished successfully and the issue is likely outside the main request handler.
+   - If no, look at the last event before the gap.
+3. Check `.cache/logs/api_errors.log` for uncaught exceptions.
+   ```bash
+   docker exec -it nlp-crop-calendar-api tail -n 200 .cache/logs/api_errors.log
+   ```
+4. For extractor-related failures, look specifically for:
+   - `llm_extract_model_error`: model construction/config failure
+   - `llm_extract_error`: invocation/runtime failure after the call started
+5. If OTEL is enabled, inspect the request trace for:
+   - `session.contextual_candidate`
+   - `session.standalone_plan`
+   - `session.resolution`
+
+Notes:
+- `interactions` records are written after a successful request response is produced. Failed requests may therefore be absent from the interaction store.
+- Repeated `Failed to export logs` messages usually mean OTEL exporters are enabled without a reachable collector; disable them locally if you are not using OTEL.
 
 ## Port Conflicts
 

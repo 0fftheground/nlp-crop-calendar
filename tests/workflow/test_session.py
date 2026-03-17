@@ -143,6 +143,83 @@ class WorkflowSessionContextTests(unittest.TestCase):
             {"kind": "workflow", "name": "crop_calendar_workflow"},
         )
 
+    def test_plan_list_context_can_resume_growth_stage_workflow(self) -> None:
+        from src.schemas.models import UserRequest, WorkflowResponse
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "w-plan-growth",
+            {
+                "tool_contexts": {
+                    "plant_plan_list_active": {
+                        "plans": [
+                            {"plan_id": "11", "plan_name": "早稻计划"},
+                            {"plan_id": "12", "plan_name": "晚稻计划"},
+                        ]
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "plant_plan_list_active"},
+            },
+        )
+
+        workflow_payload = WorkflowResponse(message="ok", data={"workflow": {"plan_id": "11"}})
+        with patch.object(router._intent_router, "plan", return_value=None) as mocked_plan:
+            with patch.object(
+                router, "_run_named_workflow", return_value=workflow_payload
+            ) as mocked_run:
+                result = router.handle(
+                    UserRequest(prompt="查询第1个计划的生育期", session_id="w-plan-growth")
+                )
+
+        self.assertEqual(result.mode, "workflow")
+        self.assertIsNotNone(result.plan)
+        mocked_plan.assert_not_called()
+        self.assertEqual(mocked_run.call_args[0][1], "growth_stage_query_workflow")
+        self.assertIn("id=11", mocked_run.call_args[0][0])
+
+    def test_crop_calendar_context_can_resume_delete_tool(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "w-crop-delete",
+            {
+                "workflow_contexts": {
+                    "crop_calendar_workflow": {
+                        "planting": {
+                            "region_id": "长沙",
+                            "crop": "水稻",
+                            "variety": "美香占2号",
+                            "culti_type": "早稻",
+                            "planting_method": "direct_seeding",
+                        },
+                        "plant_season_id": 21,
+                    }
+                },
+                "last_context": {"kind": "workflow", "name": "crop_calendar_workflow"},
+            },
+        )
+
+        tool_payload = ToolInvocation(
+            name="plant_plan_delete",
+            message="已删除种植计划。",
+            data={"plant_season_id": "21", "response": {"ok": True}},
+        )
+        with patch.object(router._intent_router, "plan", return_value=None) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(prompt="删除这个计划", session_id="w-crop-delete")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertIsNotNone(result.tool)
+        self.assertEqual(result.tool.name, "plant_plan_delete")
+        mocked_plan.assert_not_called()
+        self.assertEqual(mocked_execute.call_args[0][0], "plant_plan_delete")
+        self.assertIn('"plant_season_id": "21"', mocked_execute.call_args[0][1])
+
 
 if __name__ == "__main__":
     unittest.main()

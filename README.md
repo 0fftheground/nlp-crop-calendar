@@ -11,6 +11,7 @@ This project requires a real OpenAI-compatible LLM API (no mock LLM).
 - Simple requests: planner picks a single tool (e.g. weather / variety)
 - Complex crop-calendar requests: LangGraph workflow runs fixed steps (extract planting info -> follow-up -> query services -> generate result)
 - Growth-stage queries: workflow resolves planting plan and growth-stage result through business APIs
+- Session-aware follow-up merge: short follow-up turns such as region/date/operation refinements are merged with the active task before standalone routing is finalized
 
 ## Main Components
 - `chainlit_app.py`: Chat frontend
@@ -18,6 +19,7 @@ This project requires a real OpenAI-compatible LLM API (no mock LLM).
 - `src/agent/router.py`: Request orchestration
 - `src/agent/intent_router.py`: Intent planning/routing
 - `src/agent/pending_manager.py`: Follow-up state management
+- `src/agent/session_context.py`: Session-aware contextual candidate builder and standalone/contextual resolver
 - `src/agent/plan_executor.py`: Tool/workflow execution
 - `src/agent/followup.py`: Shared follow-up contract/accessors/builders
 - `src/agent/workflows/`: Crop calendar / growth-stage workflows
@@ -57,6 +59,8 @@ Common optional values:
 - `OPENAI_API_BASE` (OpenAI-compatible gateway/proxy base URL, usually ends with `/v1`)
 - `PUBLIC_BASE_URL`
 - `BUSINESS_API_BASE_URL` / `BUSINESS_API_KEY` (required for planting plan / growth-stage / farm weather business APIs)
+- `BACKEND_TIMEOUT_SECONDS` (LLM request timeout for planner/extractor calls; default `90`)
+- `OTEL_TRACES_EXPORTER` / `OTEL_LOGS_EXPORTER` (set to `none` locally if you do not run an OTEL backend)
 
 Notes:
 - If `EXTRACTOR_API_KEY` is empty, extraction falls back to `OPENAI_API_KEY`.
@@ -120,11 +124,36 @@ More deployment details:
 
 ## Development Notes
 - Planner logic: `src/agent/planner.py`, `src/agent/router.py`
+- Session routing/merge: `src/agent/session_context.py`
 - Workflow state/nodes: `src/agent/workflows/state.py`, `src/agent/workflows/*.py`
 - Follow-up state contract: `src/agent/followup.py` and `src/agent/pending_manager.py`
   - Unified keys are `draft`, `options`, `missing_fields`, `followup_count`, `pending_message`
 - Prompts and user-facing workflow copy: `src/prompts/`
 - Infrastructure adapters (LLM, DB, cache, config): `src/infra/`
+
+## Session Routing
+- Request handling now resolves turns in this order: `pending` resume -> `session_context` contextual candidate -> standalone intent routing -> final standalone/contextual resolution.
+- Contextual follow-up merge is currently supported for:
+  - `weather_lookup`
+  - `variety_lookup`
+  - `sowing_suitability_lookup`
+  - `plant_plan_list_active` follow-ups into `plant_plan_delete` / `growth_stage_query_workflow`
+  - `crop_calendar_workflow` follow-ups into itself, `plant_plan_delete`, or `growth_stage_query_workflow`
+  - `growth_stage_query_workflow` follow-ups into itself
+- `memory_clear` intentionally does not participate in contextual merge.
+
+## Observability And Debugging
+- Local request diagnostics are written to `.cache/logs/observability.log` and `.cache/logs/api_errors.log`.
+- The router writes session-resolution details into the active trace/span under:
+  - `session.contextual_candidate`
+  - `session.standalone_plan`
+  - `session.resolution`
+- Structured extraction logs:
+  - `llm_extract_call`
+  - `llm_extract_response`
+  - `llm_extract_model_error`
+  - `llm_extract_error`
+- If you do not run an OTEL backend locally, set `OTEL_TRACES_EXPORTER=none` and `OTEL_LOGS_EXPORTER=none` to avoid exporter noise such as `Failed to export logs`.
 
 ## Tests
 
@@ -144,6 +173,7 @@ Recommended targeted runs:
   python -m unittest tests.sowing.test_service tests.sowing.test_session
   python -m unittest tests.variety.test_service tests.variety.test_session
   python -m unittest tests.workflow.test_service tests.workflow.test_session
+  python -m unittest tests.router.test_planner tests.router.test_intent_rules tests.infra.test_llm_extract
   ```
 
 Current test layout:

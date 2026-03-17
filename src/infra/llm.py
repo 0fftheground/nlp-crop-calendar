@@ -14,6 +14,7 @@ def get_chat_model() -> BaseChatModel:
         "api_key": cfg.openai_api_key,
         "temperature": 0.2,
         "model": "gpt-4.1-mini",
+        "timeout": max(1, int(cfg.backend_timeout_seconds or 90)),
     }
     if cfg.openai_api_base:
         kwargs["base_url"] = cfg.openai_api_base
@@ -33,6 +34,7 @@ def get_extractor_model() -> BaseChatModel:
         "api_key": api_key,
         "temperature": cfg.extractor_temperature,
         "model": cfg.extractor_model,
+        "timeout": max(1, int(cfg.backend_timeout_seconds or 90)),
     }
     base_url = cfg.extractor_api_base or cfg.openai_api_base
     if base_url:

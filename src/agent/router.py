@@ -3,14 +3,17 @@ from pathlib import Path
 from typing import Optional
 
 from .session_context import (
-    build_contextual_plan,
+    build_contextual_candidate,
     extract_session_context_from_tool,
     extract_session_context_from_workflow,
+    resolve_session_plan,
+    should_short_circuit_contextual_candidate,
 )
 from ..infra.config import get_config
 from ..infra.pending_store import build_pending_followup_store
 from ..infra.session_context_store import build_session_context_store
 from ..observability.logging_utils import log_event
+from ..observability.otel import annotate_current_span, build_span_attributes
 from ..schemas.models import HandleResponse, UserRequest, WorkflowResponse
 from .fast_intent import FastIntentRouter
 from .intent_router import IntentRouter
@@ -107,11 +110,9 @@ class RequestRouter:
     def _clear_session_tool_contexts(self, session_id: str) -> None:
         self._session_context_store.delete(session_id)
 
-    def _maybe_build_contextual_plan(
-        self, prompt: str, session_id: str
-    ) -> Optional[ActionPlan]:
+    def _get_contextual_candidate(self, prompt: str, session_id: str):
         payload = self._get_session_context_payload(session_id)
-        return build_contextual_plan(prompt, payload)
+        return build_contextual_candidate(prompt, payload)
 
     def handle(self, request: UserRequest) -> HandleResponse:
         session_id = request.session_id or request.user_id or "default"
@@ -135,16 +136,84 @@ class RequestRouter:
                 # New question: clear stale pending to avoid misrouting follow-ups.
                 self._pending_manager.delete(session_id)
                 pending = None
-            contextual_plan = self._maybe_build_contextual_plan(prompt, session_id)
-            if contextual_plan:
-                return self._execute_with_validation(
-                    contextual_plan, prompt, pending, session_id
+            contextual_candidate = self._get_contextual_candidate(prompt, session_id)
+            if contextual_candidate:
+                contextual_summary = {
+                    "action": contextual_candidate.plan.action,
+                    "name": contextual_candidate.plan.name,
+                    "reason": contextual_candidate.plan.reason,
+                    "confidence": contextual_candidate.confidence,
+                    "evidence": list(contextual_candidate.evidence),
+                }
+                log_event(
+                    "session_candidate_built",
+                    **contextual_summary,
                 )
-            plan = self._intent_router.plan(
+                annotate_current_span(
+                    build_span_attributes(
+                        "session.contextual_candidate", contextual_summary
+                    )
+                )
+            if should_short_circuit_contextual_candidate(contextual_candidate):
+                selection_summary = {
+                    "selected": "contextual",
+                    "strategy": "short_circuit",
+                    "action": contextual_candidate.plan.action,
+                    "name": contextual_candidate.plan.name,
+                }
+                log_event(
+                    "session_candidate_selected",
+                    **selection_summary,
+                )
+                annotate_current_span(
+                    build_span_attributes("session.resolution", selection_summary)
+                )
+                return self._execute_with_validation(
+                    contextual_candidate.plan, prompt, pending, session_id
+                )
+            standalone_plan = self._intent_router.plan(
                 prompt,
                 pending=pending,
                 intent_mode=self._intent_mode,
             )
+            if standalone_plan:
+                standalone_summary = {
+                    "action": standalone_plan.action,
+                    "name": standalone_plan.name,
+                    "reason": standalone_plan.reason,
+                }
+                annotate_current_span(
+                    build_span_attributes("session.standalone_plan", standalone_summary)
+                )
+            plan = resolve_session_plan(standalone_plan, contextual_candidate)
+            if plan:
+                selected = "contextual" if contextual_candidate and plan is contextual_candidate.plan else "standalone"
+                resolution_summary = {
+                    "selected": selected,
+                    "strategy": "resolved",
+                    "action": plan.action,
+                    "name": plan.name,
+                    "reason": plan.reason,
+                }
+                annotate_current_span(
+                    build_span_attributes("session.resolution", resolution_summary)
+                )
+            if contextual_candidate and plan is contextual_candidate.plan:
+                log_event(
+                    "session_candidate_selected",
+                    selected="contextual",
+                    strategy="resolved",
+                    action=plan.action,
+                    name=plan.name,
+                )
+            elif standalone_plan:
+                log_event(
+                    "session_candidate_selected",
+                    selected="standalone",
+                    strategy="resolved",
+                    action=standalone_plan.action,
+                    name=standalone_plan.name,
+                )
             if not plan:
                 return self._fallback_from_planner(prompt, pending, session_id)
             return self._execute_with_validation(plan, prompt, pending, session_id)
@@ -201,15 +270,9 @@ class RequestRouter:
             memory_id=self._memory_id_ctx.get(),
             execute_tool_fn=execute_tool,
         )
-        tool = response.tool
-        if tool and tool.name == "memory_clear":
-            self._clear_session_tool_contexts(session_id)
-        session_context = extract_session_context_from_tool(tool)
-        if session_context:
-            name, context = session_context
-            self._set_session_named_context(
-                session_id, kind="tool", name=name, context=context
-            )
+        self._update_session_context_from_response(
+            response, session_id=session_id, pending=pending, plan=plan
+        )
         return response
 
     def _execute_workflow_plan(
@@ -226,18 +289,9 @@ class RequestRouter:
             session_id=session_id,
             run_named_workflow=self._run_named_workflow,
         )
-        workflow_name = plan.name
-        if not workflow_name and pending and pending.get("mode") == "workflow":
-            workflow_name = pending.get("workflow_name")
-        if workflow_name:
-            session_context = extract_session_context_from_workflow(
-                workflow_name, response.plan
-            )
-            if session_context:
-                name, context = session_context
-                self._set_session_named_context(
-                    session_id, kind="workflow", name=name, context=context
-                )
+        self._update_session_context_from_response(
+            response, session_id=session_id, pending=pending, plan=plan
+        )
         return response
 
     def _respond_none(
@@ -255,7 +309,7 @@ class RequestRouter:
     def _fallback_from_planner(
         self, prompt: str, pending: Optional[dict], session_id: str
     ) -> HandleResponse:
-        return self._plan_executor.fallback_from_planner(
+        response = self._plan_executor.fallback_from_planner(
             prompt,
             pending,
             session_id=session_id,
@@ -263,11 +317,15 @@ class RequestRouter:
             run_named_workflow=self._run_named_workflow,
             execute_tool_fn=execute_tool,
         )
+        self._update_session_context_from_response(
+            response, session_id=session_id, pending=pending
+        )
+        return response
 
     def _resume_pending(
         self, prompt: str, pending: dict, session_id: str
     ) -> HandleResponse:
-        return self._plan_executor.resume_pending(
+        response = self._plan_executor.resume_pending(
             prompt,
             pending,
             session_id=session_id,
@@ -275,6 +333,46 @@ class RequestRouter:
             run_named_workflow=self._run_named_workflow,
             execute_tool_fn=execute_tool,
         )
+        self._update_session_context_from_response(
+            response, session_id=session_id, pending=pending
+        )
+        return response
+
+    def _update_session_context_from_response(
+        self,
+        response: HandleResponse,
+        *,
+        session_id: str,
+        pending: Optional[dict] = None,
+        plan: Optional[ActionPlan] = None,
+    ) -> None:
+        if response.mode == "tool":
+            tool = response.tool
+            if tool and tool.name == "memory_clear":
+                self._clear_session_tool_contexts(session_id)
+            session_context = extract_session_context_from_tool(tool)
+            if session_context:
+                name, context = session_context
+                self._set_session_named_context(
+                    session_id, kind="tool", name=name, context=context
+                )
+            return None
+        if response.mode != "workflow":
+            return None
+        workflow_name = plan.name if plan else None
+        if not workflow_name and pending and pending.get("mode") == "workflow":
+            workflow_name = pending.get("workflow_name")
+        if not workflow_name:
+            return None
+        session_context = extract_session_context_from_workflow(
+            workflow_name, response.plan
+        )
+        if session_context:
+            name, context = session_context
+            self._set_session_named_context(
+                session_id, kind="workflow", name=name, context=context
+            )
+        return None
 
     def _run_named_workflow(
         self, prompt: str, workflow_name: Optional[str]

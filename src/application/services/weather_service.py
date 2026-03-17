@@ -30,7 +30,57 @@ _WEATHER_REGION_RE = re.compile(
     r"(?P<region>[\u4e00-\u9fa5]{2,20})(?:的)?"
     r"(?:天气|气温|气象|降雨|降水|湿度|风速|预报)"
 )
+_WEATHER_REGION_PREFIX_PATTERNS = (
+    re.compile(
+        r"^(?P<region>[\u4e00-\u9fa5]{2,20}?)(?=(?:今天|明天|后天|昨天|前天|本周|这周|下周|下下周|最近|未来|从|20\d{2}年|\d{1,2}月|\d{1,2}[日号]))"
+    ),
+    re.compile(
+        r"^(?P<region>[\u4e00-\u9fa5]{2,20}?)(?=(?:是否|能否|能不能|可否|适合|适宜|可以).*(?:施肥|炼苗|移栽|翻地|打药|收割|整地))"
+    ),
+)
 _REGION_SUFFIX_RE = re.compile(r"(特别行政区|自治区|自治州|省|市|州|盟|地区|区|县)$")
+_REGION_PREFIX_NOISE_RE = re.compile(
+    r"^(?:我在|我想问|我想咨询|我想了解|请问一下|请问|问下|问一下|帮我看下|帮我看看|麻烦看下|麻烦问下|在)"
+)
+_REGION_STOPWORDS = (
+    "今天",
+    "明天",
+    "后天",
+    "昨天",
+    "前天",
+    "最近",
+    "未来",
+    "本周",
+    "这周",
+    "下周",
+    "下下周",
+    "今年",
+    "去年",
+)
+_REGION_NOISE_TOKENS = (
+    "天气",
+    "气温",
+    "气象",
+    "降雨",
+    "降水",
+    "湿度",
+    "风速",
+    "预报",
+    "适合",
+    "适宜",
+    "是否",
+    "能否",
+    "能不能",
+    "可否",
+    "可以",
+    "施肥",
+    "炼苗",
+    "移栽",
+    "翻地",
+    "打药",
+    "收割",
+    "整地",
+)
 _SUPPORTED_WEATHER_OPERATIONS = (
     "施肥",
     "炼苗",
@@ -216,10 +266,29 @@ def _extract_region_from_text(text: str) -> Optional[str]:
     if not text:
         return None
     match = _WEATHER_REGION_RE.search(text)
-    if not match:
+    if match:
+        region = _normalize_weather_region_candidate(match.group("region"))
+        return region or None
+    for pattern in _WEATHER_REGION_PREFIX_PATTERNS:
+        match = pattern.search(str(text).strip())
+        if match:
+            region = _normalize_weather_region_candidate(match.group("region"))
+            if region:
+                return region
+    return None
+
+
+def _normalize_weather_region_candidate(value: object) -> Optional[str]:
+    region = normalize_region_token(value)
+    if not region:
         return None
-    region = str(match.group("region") or "").strip()
-    return region or None
+    region = _REGION_PREFIX_NOISE_RE.sub("", region)
+    region = region.removesuffix("的")
+    if not region or region in _REGION_STOPWORDS:
+        return None
+    if any(token in region for token in _REGION_NOISE_TOKENS):
+        return None
+    return region
 
 
 def _extract_weather_source_prompt(prompt: str) -> str:
@@ -429,6 +498,8 @@ def normalize_weather_prompt(
     parsed_range = extract_date_range(source_prompt, today=date.today())
     if parsed_range:
         region = payload.get("region")
+        if region in (None, ""):
+            region = _extract_region_from_text(source_prompt)
         requested_operations = payload.get("requested_operations")
         try:
             query = WeatherQueryInput(

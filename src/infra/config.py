@@ -33,6 +33,9 @@ class AppConfig(BaseSettings):
     extractor_temperature: float = Field(
         default=0.0, validation_alias="EXTRACTOR_TEMPERATURE"
     )
+    backend_timeout_seconds: int = Field(
+        default=90, validation_alias="BACKEND_TIMEOUT_SECONDS"
+    )
     default_region: str = Field(default="global", validation_alias="DEFAULT_REGION")
     fastapi_port: int = Field(default=8000, validation_alias="FASTAPI_PORT")
     agri_db_url: Optional[str] = Field(

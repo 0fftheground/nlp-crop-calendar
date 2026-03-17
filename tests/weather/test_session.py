@@ -352,6 +352,233 @@ class WeatherSessionContextTests(unittest.TestCase):
         self.assertEqual(payload.get("end_date"), "2026-03-13")
         self.assertEqual(payload.get("requested_operations"), ["施肥"])
 
+    def test_weather_operation_followup_preserves_region_for_generic_fertilizer_phrase(
+        self,
+    ) -> None:
+        from src.schemas.models import UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "s-weather-generic-op",
+            {
+                "tool_contexts": {
+                    "weather_lookup": {
+                        "region": "芜湖",
+                        "start_date": "2026-03-23",
+                        "end_date": "2026-03-29",
+                        "granularity": "daily",
+                        "requested_operations": ["施肥"],
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "weather_lookup"},
+            },
+        )
+
+        weather_payload = self._make_tool_invocation(
+            {
+                "message": "ok",
+                "data": {
+                    "region": "芜湖",
+                    "start_date": "2026-03-23",
+                    "end_date": "2026-03-29",
+                    "granularity": "daily",
+                    "requested_operations": ["施肥"],
+                    "points": [],
+                },
+            }
+        )
+        with patch.object(
+            router._intent_router, "plan", return_value=None
+        ) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=weather_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(prompt="施穗肥呢", session_id="s-weather-generic-op")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "weather_lookup")
+        mocked_plan.assert_not_called()
+        payload = json.loads(mocked_execute.call_args[0][1])
+        self.assertEqual(payload.get("region"), "芜湖")
+        self.assertEqual(payload.get("start_date"), "2026-03-23")
+        self.assertEqual(payload.get("end_date"), "2026-03-29")
+        self.assertEqual(payload.get("requested_operations"), ["施肥"])
+
+    def test_session_resolver_prefers_contextual_weather_slots_for_same_tool(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "s-weather-resolver",
+            {
+                "tool_contexts": {
+                    "weather_lookup": {
+                        "region": "长沙",
+                        "start_date": "2024-06-01",
+                        "end_date": "2024-06-07",
+                        "granularity": "daily",
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "weather_lookup"},
+            },
+        )
+
+        standalone_plan = ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input={
+                "start_date": "2026-03-13",
+                "end_date": "2026-03-13",
+                "year": 2026,
+            },
+            reason="standalone:weather",
+        )
+        weather_payload = self._make_tool_invocation(
+            {
+                "message": "ok",
+                "data": {
+                    "region": "长沙",
+                    "start_date": "2026-03-13",
+                    "end_date": "2026-03-13",
+                    "granularity": "daily",
+                    "points": [],
+                },
+            }
+        )
+        fake_date = self._build_fake_date("2026-03-13")
+        with patch.object(
+            router._intent_router, "plan", return_value=standalone_plan
+        ) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=weather_payload
+            ) as mocked_execute:
+                with patch("src.application.services.weather_service.date", fake_date):
+                    with patch("src.agent.session_context.date", fake_date):
+                        result = router.handle(
+                            UserRequest(
+                                prompt="今天的情况请帮我详细看一下",
+                                session_id="s-weather-resolver",
+                            )
+                        )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "weather_lookup")
+        mocked_plan.assert_called_once()
+        payload = json.loads(mocked_execute.call_args[0][1])
+        self.assertEqual(payload.get("region"), "长沙")
+        self.assertEqual(payload.get("start_date"), "2026-03-13")
+        self.assertEqual(payload.get("end_date"), "2026-03-13")
+        self.assertEqual(payload.get("requested_operations"), [])
+
+    def test_weather_followup_with_prefixed_region_overrides_default_farm(self) -> None:
+        from src.schemas.models import UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "s-weather-region-override",
+            {
+                "tool_contexts": {
+                    "weather_lookup": {
+                        "start_date": "2026-03-16",
+                        "end_date": "2026-03-16",
+                        "granularity": "daily",
+                        "requested_operations": ["施肥"],
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "weather_lookup"},
+            },
+        )
+
+        weather_payload = self._make_tool_invocation(
+            {
+                "message": "ok",
+                "data": {
+                    "region": "芜湖",
+                    "start_date": "2026-03-16",
+                    "end_date": "2026-03-16",
+                    "granularity": "daily",
+                    "requested_operations": ["施肥"],
+                    "points": [],
+                },
+            }
+        )
+        fake_date = self._build_fake_date("2026-03-16")
+        with patch.object(
+            router._intent_router, "plan", return_value=None
+        ) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=weather_payload
+            ) as mocked_execute:
+                with patch("src.application.services.weather_service.date", fake_date):
+                    with patch("src.agent.session_context.date", fake_date):
+                        result = router.handle(
+                            UserRequest(
+                                prompt="芜湖今天可以施肥吗",
+                                session_id="s-weather-region-override",
+                            )
+                        )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "weather_lookup")
+        mocked_plan.assert_not_called()
+        payload = json.loads(mocked_execute.call_args[0][1])
+        self.assertEqual(payload.get("region"), "芜湖")
+        self.assertEqual(payload.get("start_date"), "2026-03-16")
+        self.assertEqual(payload.get("end_date"), "2026-03-16")
+        self.assertEqual(payload.get("requested_operations"), ["施肥"])
+
+    def test_session_context_trace_annotations_are_emitted(self) -> None:
+        from src.schemas.models import UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "s-session-trace",
+            {
+                "tool_contexts": {
+                    "weather_lookup": {
+                        "region": "长沙",
+                        "start_date": "2026-03-16",
+                        "end_date": "2026-03-16",
+                        "granularity": "daily",
+                        "requested_operations": ["施肥"],
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "weather_lookup"},
+            },
+        )
+
+        weather_payload = self._make_tool_invocation(
+            {
+                "message": "ok",
+                "data": {
+                    "region": "长沙",
+                    "start_date": "2026-03-16",
+                    "end_date": "2026-03-16",
+                    "granularity": "daily",
+                    "requested_operations": ["施肥"],
+                    "points": [],
+                },
+            }
+        )
+        fake_date = self._build_fake_date("2026-03-16")
+        with patch("src.agent.router.annotate_current_span") as mocked_annotate:
+            with patch(
+                "src.agent.router.execute_tool", return_value=weather_payload
+            ):
+                with patch("src.application.services.weather_service.date", fake_date):
+                    with patch("src.agent.session_context.date", fake_date):
+                        router.handle(
+                            UserRequest(
+                                prompt="今天适合施肥吗",
+                                session_id="s-session-trace",
+                            )
+                        )
+
+        self.assertGreaterEqual(mocked_annotate.call_count, 2)
+
     def test_weather_relative_two_weeks_followup_uses_correct_week(self) -> None:
         from src.schemas.models import UserRequest
 
@@ -464,6 +691,93 @@ class WeatherSessionContextTests(unittest.TestCase):
         self.assertEqual(result.tool.name, "weather_lookup")
         mocked_plan.assert_called_once()
         self.assertEqual(mocked_execute.call_args[0][0], "weather_lookup")
+
+    def test_pending_resumed_sowing_tool_updates_session_context_for_followup(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        session_id = "s-pending-sowing-context"
+        router._session_context_store.set(
+            session_id,
+            {
+                "tool_contexts": {
+                    "weather_lookup": {
+                        "region": "芜湖",
+                        "start_date": "2026-03-17",
+                        "end_date": "2026-03-17",
+                        "granularity": "daily",
+                        "requested_operations": ["打药"],
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "weather_lookup"},
+            },
+        )
+        router._pending_store.set(
+            session_id,
+            {
+                "mode": "tool",
+                "tool_name": "sowing_suitability_lookup",
+                "query": "适合种美香占2号吗",
+                "draft": {"variety": "美香占2号"},
+                "missing_fields": ["culti_type", "planting_method"],
+                "followup_count": 0,
+            },
+        )
+
+        first_payload = ToolInvocation(
+            name="sowing_suitability_lookup",
+            message="success",
+            data={
+                "resolved": {
+                    "variety": "美香占2号",
+                    "culti_type": "早稻",
+                    "planting_method": "direct_seeding",
+                    "region_id": "芜湖",
+                    "crop": "水稻",
+                }
+            },
+        )
+        second_payload = ToolInvocation(
+            name="sowing_suitability_lookup",
+            message="success",
+            data={
+                "resolved": {
+                    "variety": "美香占2号",
+                    "culti_type": "早稻",
+                    "planting_method": "direct_seeding",
+                    "region_id": "常德",
+                    "crop": "水稻",
+                }
+            },
+        )
+        with patch.object(
+            router._intent_router, "plan", return_value=None
+        ) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool",
+                side_effect=[first_payload, second_payload],
+            ) as mocked_execute:
+                first_result = router.handle(
+                    UserRequest(prompt="早稻，直播", session_id=session_id)
+                )
+                second_result = router.handle(
+                    UserRequest(prompt="常德呢", session_id=session_id)
+                )
+
+        self.assertEqual(first_result.mode, "tool")
+        self.assertEqual(first_result.tool.name, "sowing_suitability_lookup")
+        self.assertEqual(second_result.mode, "tool")
+        self.assertEqual(second_result.tool.name, "sowing_suitability_lookup")
+        mocked_plan.assert_not_called()
+        self.assertEqual(mocked_execute.call_args_list[0][0][0], "sowing_suitability_lookup")
+        self.assertEqual(mocked_execute.call_args_list[1][0][0], "sowing_suitability_lookup")
+        second_call_payload = json.loads(mocked_execute.call_args_list[1][0][1])
+        self.assertEqual(second_call_payload.get("region_id"), "常德")
+        session_payload = router._session_context_store.get(session_id) or {}
+        self.assertEqual(
+            session_payload.get("last_context"),
+            {"kind": "tool", "name": "sowing_suitability_lookup"},
+        )
 
     def test_full_sowing_question_does_not_get_hijacked_by_weather_context(self) -> None:
         from src.schemas.models import ToolInvocation, UserRequest

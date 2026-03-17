@@ -198,6 +198,101 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertIsNone(self.router._pending_store.get("s4"))
         self.assertEqual(result.plan.message, "ok")
 
+    def test_pending_missing_field_reply_still_resumes(self) -> None:
+        from src.schemas.models import HandleResponse, ToolInvocation, UserRequest
+
+        self.router._pending_store.set(
+            "s-pending-reply",
+            {
+                "mode": "tool",
+                "tool_name": "weather_lookup",
+                "draft": {"start_date": "2026-03-23", "end_date": "2026-03-29"},
+                "missing_fields": ["region"],
+                "followup_count": 0,
+            },
+        )
+        pending_response = HandleResponse(
+            mode="tool",
+            tool=ToolInvocation(name="weather_lookup", message="ok", data={}),
+        )
+        with patch.object(
+            self.router, "_resume_pending", return_value=pending_response
+        ) as mocked_resume:
+            with patch.object(self.router._intent_router, "plan") as mocked_plan:
+                result = self.router.handle(
+                    UserRequest(prompt="芜湖", session_id="s-pending-reply")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        mocked_resume.assert_called_once()
+        mocked_plan.assert_not_called()
+
+    def test_pending_new_question_falls_through_to_standalone_router(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import UserRequest
+
+        self.router._pending_store.set(
+            "s-pending-new-question",
+            {
+                "mode": "tool",
+                "tool_name": "weather_lookup",
+                "draft": {"start_date": "2026-03-23", "end_date": "2026-03-29"},
+                "missing_fields": ["region"],
+                "followup_count": 0,
+            },
+        )
+        plan = ActionPlan(action="none", response="ok")
+        with patch.object(self.router, "_resume_pending") as mocked_resume:
+            with patch.object(
+                self.router._intent_router, "plan", return_value=plan
+            ) as mocked_plan:
+                result = self.router.handle(
+                    UserRequest(
+                        prompt="今天适合施肥吗", session_id="s-pending-new-question"
+                    )
+                )
+
+        self.assertEqual(result.mode, "none")
+        mocked_resume.assert_not_called()
+        mocked_plan.assert_called_once()
+        self.assertIsNone(self.router._pending_store.get("s-pending-new-question"))
+
+    def test_fallback_from_planner_updates_session_context_from_response(self) -> None:
+        from src.schemas.models import HandleResponse, ToolInvocation, UserRequest
+
+        response = HandleResponse(
+            mode="tool",
+            tool=ToolInvocation(
+                name="sowing_suitability_lookup",
+                message="success",
+                data={
+                    "resolved": {
+                        "variety": "美香占2号",
+                        "culti_type": "早稻",
+                        "planting_method": "direct_seeding",
+                        "region_id": "常德",
+                        "crop": "水稻",
+                    }
+                },
+            ),
+        )
+        with patch.object(self.router._intent_router, "plan", return_value=None):
+            with patch.object(
+                self.router._plan_executor,
+                "fallback_from_planner",
+                return_value=response,
+            ):
+                result = self.router.handle(
+                    UserRequest(prompt="常德呢", session_id="s-fallback-context")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        session_context = self.router._session_context_store.get("s-fallback-context")
+        self.assertEqual(
+            session_context.get("last_context"),
+            {"kind": "tool", "name": "sowing_suitability_lookup"},
+        )
+
     def test_rule_interrupts_pending_for_plan_list(self) -> None:
         from src.schemas.models import ToolInvocation, UserRequest
 
@@ -256,6 +351,44 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "sowing_suitability_lookup")
         self.assertEqual(mocked_execute.call_args[0][0], "sowing_suitability_lookup")
+
+    def test_plan_list_context_can_resume_delete_tool(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        self.router._session_context_store.set(
+            "s-plan-delete",
+            {
+                "tool_contexts": {
+                    "plant_plan_list_active": {
+                        "plans": [
+                            {"plan_id": "11", "plan_name": "早稻计划"},
+                            {"plan_id": "12", "plan_name": "晚稻计划"},
+                        ]
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "plant_plan_list_active"},
+            },
+        )
+
+        tool_payload = ToolInvocation(
+            name="plant_plan_delete",
+            message="已删除种植计划。",
+            data={"plant_season_id": "12", "response": {"ok": True}},
+        )
+        with patch.object(self.router._intent_router, "plan", return_value=None) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = self.router.handle(
+                    UserRequest(prompt="删除第2个计划", session_id="s-plan-delete")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertIsNotNone(result.tool)
+        self.assertEqual(result.tool.name, "plant_plan_delete")
+        mocked_plan.assert_not_called()
+        self.assertEqual(mocked_execute.call_args[0][0], "plant_plan_delete")
+        self.assertIn('"plant_season_id": "12"', mocked_execute.call_args[0][1])
 
     def test_input_validation_reports_invalid_field_format_instead_of_missing(self) -> None:
         from src.agent.planner import ActionPlan

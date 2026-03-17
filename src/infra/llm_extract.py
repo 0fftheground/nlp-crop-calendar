@@ -21,7 +21,13 @@ def llm_structured_extract(
         return {}
     try:
         llm = get_extractor_model()
-    except Exception:
+    except Exception as exc:
+        log_event(
+            "llm_extract_model_error",
+            error=str(exc),
+            prompt_summary=summarize_text(prompt),
+            schema=schema.__name__,
+        )
         return {}
     try:
         extractor = llm.with_structured_output(schema)
@@ -55,5 +61,11 @@ def llm_structured_extract(
             response_keys=sorted(payload.keys()) if isinstance(payload, dict) else [],
         )
         return payload if isinstance(payload, dict) else {}
-    except Exception:
+    except Exception as exc:
+        log_event(
+            "llm_extract_error",
+            error=str(exc),
+            prompt_summary=summarize_text(prompt),
+            schema=schema.__name__,
+        )
         return {}

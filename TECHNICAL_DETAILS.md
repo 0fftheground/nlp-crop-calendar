@@ -6,7 +6,7 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 
 1. **Chainlit (`chainlit_app.py`)** sends user input to `POST /api/v1/handle` with `session_id` for multi-session isolation (optionally `user_id` for user-level context). The response indicates whether a tool or a LangGraph plan ran, and traces are shown separately.
 2. **FastAPI (`src/api/server.py`)** exposes `/health` and `/api/v1/handle`; all requests/responses use unified Pydantic models.
-3. **Planner Router (`src/agent/router.py`)** calls the LLM planner to choose tool/workflow/none, then executes and persists follow-up state by `session_id`.
+3. **Planner Router (`src/agent/router.py`)** first checks pending follow-up state, then builds a session-context candidate, runs standalone intent routing, resolves contextual vs standalone plans, and finally executes/persists state by `session_id`.
 4. **LangGraph (`src/agent/workflows/crop_calendar_graph.py`/`src/agent/workflows/growth_stage_graph.py`)**
    - The crop calendar workflow implements extraction -> follow-up -> external crop calendar API -> recommendation output.
    - The growth-stage workflow implements extraction -> follow-up -> business API lookup (planting plan + growth-stage result) -> response formatting.
@@ -16,8 +16,8 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 ## Core Modules
 - `src/infra/config.py` - Reads `.env` and exposes `AppConfig`.
 - `src/infra/db_catalog.py` - Central DB table metadata and region-lookup source resolution.
-- `src/infra/llm.py` - Creates `ChatOpenAI` for the planner and extractor models.
-- `src/infra/llm_extract.py` - Common wrapper for structured extraction.
+- `src/infra/llm.py` - Creates `ChatOpenAI` for the planner and extractor models, including backend timeout configuration.
+- `src/infra/llm_extract.py` - Common wrapper for structured extraction with request/response/error observability.
 - `src/infra/cache_keys.py` - Utility for generating cache keys from `PlantingDetails`.
 - `src/infra/tool_provider.py` - Provider normalization helpers.
 - `src/infra/variety_store.py` - Lightweight variety lookup (Postgres via `AGRI_DB_URL`).
@@ -32,6 +32,7 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 - `src/agent/router.py` - Orchestrator that composes intent routing, pending management, and execution.
 - `src/agent/intent_router.py` - Intent planning/routing (rules/fast path/LLM planner).
 - `src/agent/pending_manager.py` - Pending follow-up state lifecycle.
+- `src/agent/session_context.py` - Session-context candidate builder, candidate scoring, and standalone/contextual resolution helpers.
 - `src/agent/followup.py` - Shared follow-up contract, accessors, renderers, and payload builders.
 - `src/agent/plan_executor.py` - Tool/workflow execution and validation path.
 - `src/application/services/*` - Application-layer services (variety/weather/recommendation/crop calendar/planting extraction) used by tools and workflows.
@@ -45,7 +46,7 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 ## Agent Module Map
 - `src/agent/router.py`
   - Top-level request entry for the agent layer.
-  - Wires together rule engine, fast intent, LLM planner, pending manager, and executor.
+  - Wires together rule engine, fast intent, session-context candidate building, standalone/contextual resolution, pending manager, and executor.
 - `src/agent/intent_router.py`
   - Decision layer for intent routing.
   - Combines rule hits, fast-intent results, planner output, and a small in-memory cache.
@@ -64,6 +65,10 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 - `src/agent/pending_manager.py`
   - Persistence-facing lifecycle manager for follow-up state.
   - Decides whether a user turn should resume pending work or start a new topic.
+- `src/agent/session_context.py`
+  - Builds contextual candidates from the active session state.
+  - Supports session-aware follow-up merge for weather, variety, sowing suitability, planting-plan, crop-calendar, and growth-stage flows.
+  - Produces confidence/evidence metadata used by the router and trace annotations.
 - `src/agent/followup.py`
   - Shared protocol layer for follow-up payloads.
   - Centralizes accessors, option parsing, message rendering, pending summaries, and builder helpers for tool/workflow follow-up state.
@@ -105,9 +110,18 @@ Growth-stage workflow specifics:
   - `IntentRouter` (plan generation),
   - `PendingManager` (follow-up state),
   - `PlanExecutor` (action execution).
+- Effective request order is:
+  1. Resume `pending` follow-up if the new turn still matches the pending question.
+  2. Build a `session_context` contextual candidate from the active session state.
+  3. Run standalone intent routing through `IntentRouter`.
+  4. Resolve standalone vs contextual candidates and execute the winner.
 - Tools are invoked via `execute_tool`; workflows execute the corresponding LangGraph. `HandleResponse.mode` tells the frontend "tool / workflow / none"; `tool.data` or `plan.recommendations` carry results.
 - Tool handlers in `src/agent/tools/registry.py` return `ToolInvocation` (structured `name/message/data`) for UI rendering.
 - Pending state is persisted in the pending store (memory/sqlite/postgres optional) with TTL; pending summaries are injected into the planner to decide follow-up or switch to new questions.
+- Session resolution is annotated into the current trace/span under:
+  - `session.contextual_candidate`
+  - `session.standalone_plan`
+  - `session.resolution`
 
 ## Config Governance
 - Environment-level config (DB URL/API keys/providers) stays in `.env`/`AppConfig`.
@@ -138,7 +152,8 @@ Growth-stage workflow specifics:
 ## Deployment Notes
 - Deploy FastAPI with `uvicorn`/`gunicorn` and HTTPS; Chainlit can be reverse-proxied or deployed separately.
 - For streaming output, provide WebSocket/SSE and forward LangGraph stream events to the frontend.
-- Add structured logging around `router.handle` and tool handlers to analyze routing accuracy.
+- Structured logging is already emitted to `.cache/logs/observability.log` and `.cache/logs/api_errors.log`; extractor failures now surface as `llm_extract_model_error` / `llm_extract_error`.
+- If you do not run an OTEL backend locally, disable OTEL exporters to avoid local export-noise logs.
 
 ## Tests
 - `python -m unittest` runs the basic test suite.

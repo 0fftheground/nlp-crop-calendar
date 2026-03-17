@@ -346,6 +346,26 @@ class WeatherServiceTests(unittest.TestCase):
                     self.assertEqual(query.start_date.isoformat(), case["start_date"])
                     self.assertEqual(query.end_date.isoformat(), case["end_date"])
 
+    def test_normalize_weather_prompt_extracts_prefixed_region_for_suitability_query(
+        self,
+    ) -> None:
+        from datetime import date as _date
+
+        class FakeDate(_date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 3, 16)
+
+        with patch("src.application.services.weather_service.date", FakeDate):
+            _, query = normalize_weather_prompt(
+                json.dumps({"query": "芜湖今天可以施肥吗"}, ensure_ascii=False)
+            )
+
+        self.assertIsNotNone(query)
+        self.assertEqual(query.region, "芜湖")
+        self.assertEqual(query.start_date.isoformat(), "2026-03-16")
+        self.assertEqual(query.end_date.isoformat(), "2026-03-16")
+
     def test_lookup_weather_operation_scenarios(self) -> None:
         scenarios = load_yaml_scenarios("weather/service.yaml")
         base_payload = scenarios["operation_cases"]["base_payload"]

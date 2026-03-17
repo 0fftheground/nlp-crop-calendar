@@ -129,6 +129,20 @@ def _set_span_attributes(span: object, attributes: Optional[Dict[str, object]]) 
                 pass
 
 
+def annotate_current_span(attributes: Optional[Dict[str, object]]) -> None:
+    if not attributes:
+        return None
+    try:
+        from opentelemetry import trace
+    except Exception:
+        return None
+    try:
+        span = trace.get_current_span()
+    except Exception:
+        return None
+    _set_span_attributes(span, attributes)
+
+
 @contextmanager
 def start_span(name: str, attributes: Optional[Dict[str, object]] = None):
     try:

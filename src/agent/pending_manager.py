@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 from .followup import (
@@ -60,6 +61,14 @@ _PENDING_INTERRUPT_RULE_NAMES = {
     "plant_plan_delete",
     "memory_clear",
 }
+_UNKNOWN_REPLY_TOKENS = {
+    "不知道",
+    "不确定",
+    "不清楚",
+    "不晓得",
+    "不太清楚",
+}
+_FOLLOWUP_REPLY_SPLIT_RE = re.compile(r"[，,、/\s]+")
 
 
 class PendingManager:
@@ -250,7 +259,7 @@ class PendingManager:
             return True
         if self._looks_like_new_question(prompt):
             return False
-        return True
+        return self._looks_like_pending_field_reply(prompt, pending)
 
     @staticmethod
     def _extract_pending_candidates(pending: Optional[dict]) -> list[str]:
@@ -293,8 +302,30 @@ class PendingManager:
                 return True
         if "?" in text or "？" in text:
             return True
-        if len(text) >= 12:
-            for token in _QUESTION_HINTS:
-                if token in text:
-                    return True
+        if text.endswith(("吗", "么")):
+            return True
+        for token in _QUESTION_HINTS:
+            if token in text:
+                return True
         return False
+
+    @staticmethod
+    def _looks_like_pending_field_reply(prompt: str, pending: Optional[dict]) -> bool:
+        text = (prompt or "").strip()
+        if not text:
+            return False
+        missing_fields = get_followup_missing_fields(pending)
+        if not missing_fields:
+            return False
+        if text in _UNKNOWN_REPLY_TOKENS:
+            return True
+        pieces = [
+            piece.strip()
+            for piece in _FOLLOWUP_REPLY_SPLIT_RE.split(text)
+            if piece.strip()
+        ]
+        if len(missing_fields) == 1:
+            return len(text) <= 16
+        if pieces and len(pieces) <= len(missing_fields) + 1 and len(text) <= 32:
+            return True
+        return len(text) <= 20
