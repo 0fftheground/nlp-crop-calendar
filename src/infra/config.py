@@ -78,6 +78,9 @@ class AppConfig(BaseSettings):
     planting_plan_detail_api_url: Optional[str] = Field(
         default=None, validation_alias="PLANTING_PLAN_DETAIL_API_URL"
     )
+    recent_week_farm_work_api_url: Optional[str] = Field(
+        default=None, validation_alias="RECENT_WEEK_FARM_WORK_API_URL"
+    )
     farm_weather_api_url: Optional[str] = Field(
         default=None, validation_alias="FARM_WEATHER_API_URL"
     )

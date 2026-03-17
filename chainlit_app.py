@@ -1,10 +1,13 @@
 import os
+from datetime import date, timedelta
 from urllib.parse import urlparse
 from typing import Optional
 
 import chainlit as cl
 import httpx
 import uuid
+
+from src.infra.config import get_config
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 try:
@@ -22,6 +25,19 @@ _USER_ID_KEY = "user_id"
 def _build_capability_guide() -> str:
     return """欢迎使用农事助手。
 
+支持的 Tool：
+
+- `weather_lookup`：查询天气与农事适宜度
+- `variety_lookup`：查询水稻品种基础信息
+- `sowing_suitability_lookup`：查询播期推荐
+- `plant_plan_list_active`：查询当前启用的种植计划
+- `plant_plan_delete`：删除指定种植计划
+
+支持的 Workflow：
+
+- `crop_calendar_workflow`：生成完整种植计划与农事方案
+- `growth_stage_query_workflow`：查询计划对应的生育期预测结果
+
 你可以直接这样问：
 
 - 种植计划：`帮我做一份水稻种植计划`
@@ -34,6 +50,183 @@ def _build_capability_guide() -> str:
 提问时尽量带上：`地区 / 品种 / 稻作类型 / 播种方式 / 日期或计划ID`
 如需保存计划，默认使用系统配置的 `DEFAULT_FARM_ID`。
 """
+
+
+def _build_api_headers(*, api_key: Optional[str] = None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    token = str(api_key or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-API-KEY"] = token
+    return headers
+
+
+def _join_api_url(base_url: Optional[str], suffix: str) -> Optional[str]:
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        return None
+    return f"{base}/{suffix.lstrip('/')}"
+
+
+def _get_recent_week_farm_work_api_url(farm_id: object) -> Optional[str]:
+    cfg = get_config()
+    raw = str(getattr(cfg, "recent_week_farm_work_api_url", "") or "").strip()
+    if raw:
+        if "{farm_id}" in raw:
+            return raw.format(farm_id=farm_id)
+        return f"{raw.rstrip('/')}/{farm_id}"
+    return _join_api_url(
+        getattr(cfg, "business_api_base_url", None),
+        f"/farm-work/recent-week/{farm_id}",
+    )
+
+
+def _extract_recent_farm_work_items(plan: object) -> list[tuple[str, str]]:
+    if not isinstance(plan, dict):
+        return []
+    raw_items = None
+    for key in (
+        "farm_works",
+        "farmWorks",
+        "works",
+        "tasks",
+        "items",
+        "list",
+        "farmworks",
+    ):
+        value = plan.get(key)
+        if value is not None:
+            raw_items = value
+            break
+    if isinstance(raw_items, dict):
+        normalized: list[tuple[str, str]] = []
+        for name, work_date in raw_items.items():
+            name_text = str(name).strip()
+            date_text = str(work_date).strip()
+            if name_text or date_text:
+                normalized.append((date_text, name_text))
+        return normalized
+    if not isinstance(raw_items, list):
+        return []
+    normalized = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            name = ""
+            for key in ("name", "title", "task_name", "taskName", "work_name", "workName"):
+                value = item.get(key)
+                if str(value or "").strip():
+                    name = str(value).strip()
+                    break
+            work_date = ""
+            for key in ("date", "work_date", "task_date", "taskDate", "day"):
+                value = item.get(key)
+                if str(value or "").strip():
+                    work_date = str(value).strip()
+                    break
+            if name or work_date:
+                normalized.append((work_date, name))
+            continue
+        text = str(item).strip()
+        if text:
+            normalized.append(("", text))
+    return normalized
+
+
+def _format_recent_farm_work_summary(payload: object, *, farm_id: object) -> str:
+    farm_id_text = str(farm_id).strip()
+    today = date.today()
+    end_day = today + timedelta(days=6)
+    date_range_text = f"{today.isoformat()} 至 {end_day.isoformat()}"
+    if not isinstance(payload, dict):
+        return (
+            f"默认农场（farm_id={farm_id_text}）未来 7 天农事"
+            f"（{date_range_text}）暂时无法加载。"
+        )
+    code = str(payload.get("code", "")).strip()
+    data = payload.get("data")
+    plans = data.get("plans") if isinstance(data, dict) else None
+    if code == "204" or not isinstance(plans, list) or not plans:
+        return (
+            f"默认农场（farm_id={farm_id_text}）未来 7 天农事"
+            f"（{date_range_text}）暂无安排。"
+        )
+    lines = [
+        f"默认农场（farm_id={farm_id_text}）未来 7 天农事（{date_range_text}）："
+    ]
+    shown = 0
+    for plan in plans:
+        if not isinstance(plan, dict):
+            continue
+        items = _extract_recent_farm_work_items(plan)
+        if not items:
+            continue
+        plan_name = ""
+        for key in (
+            "plan_name",
+            "name",
+            "planTitle",
+            "title",
+            "plan",
+            "crop_name",
+            "crop",
+        ):
+            value = plan.get(key)
+            if str(value or "").strip():
+                plan_name = str(value).strip()
+                break
+        if not plan_name:
+            plan_id = str(plan.get("plan_id") or plan.get("id") or "").strip()
+            plan_name = f"计划 {plan_id}" if plan_id else "未命名计划"
+        preview = []
+        for work_date, name in items[:4]:
+            if work_date and name:
+                preview.append(f"{work_date} {name}")
+            elif work_date:
+                preview.append(work_date)
+            elif name:
+                preview.append(name)
+        if len(items) > 4:
+            preview.append(f"等 {len(items)} 项")
+        if preview:
+            lines.append(f"- {plan_name}：{'；'.join(preview)}")
+            shown += 1
+        if shown >= 5:
+            remaining = max(0, len(plans) - shown)
+            if remaining:
+                lines.append(f"- 其余 {remaining} 个计划已省略")
+            break
+    if shown == 0:
+        return (
+            f"默认农场（farm_id={farm_id_text}）未来 7 天农事"
+            f"（{date_range_text}）暂无安排。"
+        )
+    return "\n".join(lines)
+
+
+async def _fetch_recent_farm_work_summary() -> str:
+    cfg = get_config()
+    farm_id = str(getattr(cfg, "default_farm_id", None) or "").strip()
+    if not farm_id:
+        return ""
+    url = _get_recent_week_farm_work_api_url(farm_id)
+    if not url:
+        return ""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(BACKEND_TIMEOUT_SECONDS),
+            trust_env=_trust_env_for_backend(url),
+        ) as client:
+            response = await client.get(
+                url,
+                headers=_build_api_headers(
+                    api_key=getattr(cfg, "business_api_key", None)
+                ),
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return _format_recent_farm_work_summary(None, farm_id=farm_id)
+    return _format_recent_farm_work_summary(payload, farm_id=farm_id)
 
 
 def _is_capability_help_prompt(prompt: str) -> bool:
@@ -430,6 +623,9 @@ async def start():
     cl.user_session.set("history", [])
     _ensure_session_ids()
     await cl.Message(content=_build_capability_guide()).send()
+    recent_work_summary = await _fetch_recent_farm_work_summary()
+    if recent_work_summary:
+        await cl.Message(content=recent_work_summary).send()
 
 
 @cl.on_chat_resume
