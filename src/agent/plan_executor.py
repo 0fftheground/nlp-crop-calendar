@@ -12,11 +12,11 @@ from ..observability.otel import (
     start_span,
     summarize_state,
 )
-from ..prompts.input_validation import (
+from ..messages.input_validation import (
     INPUT_SCHEMA_FALLBACK_MESSAGE,
     format_input_validation_message,
 )
-from ..prompts.tool_messages import (
+from ..messages.tool_messages import (
     TOOL_FOLLOWUP_MISSING_NAME_MESSAGE,
     TOOL_NOT_FOUND_MESSAGE,
 )

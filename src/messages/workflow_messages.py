@@ -32,6 +32,7 @@ PLANTING_METHOD_LABELS = {
     "transplanting": "移栽",
 }
 
+
 def format_missing_question(
     missing_fields: List[str],
     field_labels: Dict[str, str],
@@ -70,6 +71,8 @@ def build_crop_calendar_missing_question(
         allow_unknown=allow_unknown,
         optional_fields=optional_fields,
     )
+
+
 def build_future_weather_warning(
     sowing_date: Optional[date],
     *,

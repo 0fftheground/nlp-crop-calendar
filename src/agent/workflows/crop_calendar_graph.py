@@ -45,7 +45,7 @@ from ...schemas import (
     Recommendation,
     WorkflowResponse,
 )
-from ...prompts.workflow_messages import (
+from ...messages.workflow_messages import (
     CROP_CALENDAR_MISSING_PREFIX,
     GROWTH_STAGE_ORDER,
     build_crop_calendar_missing_question,

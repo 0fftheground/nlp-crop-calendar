@@ -27,7 +27,7 @@ from ...observability.otel import (
     start_span,
     summarize_state,
 )
-from ...prompts.workflow_messages import (
+from ...messages.workflow_messages import (
     GROWTH_STAGE_MISSING_PREFIX,
     GROWTH_STAGE_ORDER,
     format_growth_stage_message,
