@@ -48,6 +48,15 @@ class WorkflowSessionContextTests(unittest.TestCase):
             data=dict(payload.get("data") or {}),
         )
 
+    def _make_tool_payload(self, name: str, payload: dict):
+        from src.schemas.models import ToolInvocation
+
+        return ToolInvocation(
+            name=name,
+            message=str(payload.get("message") or ""),
+            data=dict(payload.get("data") or {}),
+        )
+
     def test_workflow_session_context_scenarios(self) -> None:
         from src.agent.planner import ActionPlan
         from src.schemas.models import UserRequest
@@ -57,50 +66,98 @@ class WorkflowSessionContextTests(unittest.TestCase):
             for scenario in scenario_sets[group_name]:
                 with self.subTest(group=group_name, scenario=scenario["id"]):
                     router = build_test_router()
-                    seed_plan = ActionPlan(
-                        action="workflow",
-                        name=scenario["seed_turn"]["workflow_name"],
-                        input=dict(scenario["seed_turn"]["plan_input"]),
-                    )
-                    seed_payload = self._make_workflow_response(
-                        scenario["seed_turn"]["workflow_result"]
-                    )
-                    with patch.object(router._intent_router, "plan", return_value=seed_plan):
-                        with patch.object(
-                            router, "_run_named_workflow", return_value=seed_payload
-                        ):
-                            router.handle(
-                                UserRequest(
-                                    prompt=scenario["seed_turn"]["prompt"],
-                                    session_id=scenario["session_id"],
+                    if "tool_name" in scenario["seed_turn"]:
+                        seed_plan = ActionPlan(
+                            action="tool",
+                            name=scenario["seed_turn"]["tool_name"],
+                            input=dict(scenario["seed_turn"]["plan_input"]),
+                        )
+                        seed_payload = self._make_tool_payload(
+                            scenario["seed_turn"]["tool_name"],
+                            scenario["seed_turn"]["tool_result"],
+                        )
+                        with patch.object(router._intent_router, "plan", return_value=seed_plan):
+                            with patch(
+                                "src.agent.router.execute_tool", return_value=seed_payload
+                            ):
+                                router.handle(
+                                    UserRequest(
+                                        prompt=scenario["seed_turn"]["prompt"],
+                                        session_id=scenario["session_id"],
+                                    )
                                 )
-                            )
 
-                    followup_payload = self._make_workflow_response(
-                        scenario["followup_turn"]["workflow_result"]
-                    )
-                    with patch.object(
-                        router._intent_router, "plan", return_value=None
-                    ) as mocked_plan:
+                        followup_payload = self._make_tool_payload(
+                            scenario["expected"]["name"],
+                            scenario["followup_turn"]["tool_result"],
+                        )
                         with patch.object(
-                            router,
-                            "_run_named_workflow",
-                            return_value=followup_payload,
-                        ) as mocked_run:
-                            result = router.handle(
-                                UserRequest(
-                                    prompt=scenario["followup_turn"]["prompt"],
-                                    session_id=scenario["session_id"],
+                            router._intent_router, "plan", return_value=None
+                        ) as mocked_plan:
+                            with patch(
+                                "src.agent.router.execute_tool",
+                                return_value=followup_payload,
+                            ) as mocked_execute:
+                                result = router.handle(
+                                    UserRequest(
+                                        prompt=scenario["followup_turn"]["prompt"],
+                                        session_id=scenario["session_id"],
+                                    )
                                 )
-                            )
 
-                    self.assertEqual(result.mode, "workflow")
-                    mocked_plan.assert_not_called()
-                    self.assertEqual(
-                        mocked_run.call_args[0][1],
-                        scenario["expected"]["workflow_name"],
-                    )
-                    merged_prompt = mocked_run.call_args[0][0]
+                        self.assertEqual(result.mode, "tool")
+                        mocked_plan.assert_not_called()
+                        self.assertEqual(
+                            mocked_execute.call_args[0][0],
+                            scenario["expected"]["name"],
+                        )
+                        merged_prompt = mocked_execute.call_args[0][1]
+                    else:
+                        seed_plan = ActionPlan(
+                            action="workflow",
+                            name=scenario["seed_turn"]["workflow_name"],
+                            input=dict(scenario["seed_turn"]["plan_input"]),
+                        )
+                        seed_payload = self._make_workflow_response(
+                            scenario["seed_turn"]["workflow_result"]
+                        )
+                        with patch.object(router._intent_router, "plan", return_value=seed_plan):
+                            with patch.object(
+                                router, "_run_named_workflow", return_value=seed_payload
+                            ):
+                                router.handle(
+                                    UserRequest(
+                                        prompt=scenario["seed_turn"]["prompt"],
+                                        session_id=scenario["session_id"],
+                                    )
+                                )
+
+                        followup_payload = self._make_workflow_response(
+                            scenario["followup_turn"]["workflow_result"]
+                        )
+                        with patch.object(
+                            router._intent_router, "plan", return_value=None
+                        ) as mocked_plan:
+                            with patch.object(
+                                router,
+                                "_run_named_workflow",
+                                return_value=followup_payload,
+                            ) as mocked_run:
+                                result = router.handle(
+                                    UserRequest(
+                                        prompt=scenario["followup_turn"]["prompt"],
+                                        session_id=scenario["session_id"],
+                                    )
+                                )
+
+                        self.assertEqual(result.mode, "workflow")
+                        mocked_plan.assert_not_called()
+                        self.assertEqual(
+                            mocked_run.call_args[0][1],
+                            scenario["expected"]["name"],
+                        )
+                        merged_prompt = mocked_run.call_args[0][0]
+
                     for snippet in scenario["expected"]["prompt_contains"]:
                         self.assertIn(snippet, merged_prompt)
 
@@ -143,8 +200,8 @@ class WorkflowSessionContextTests(unittest.TestCase):
             {"kind": "workflow", "name": "crop_calendar_workflow"},
         )
 
-    def test_plan_list_context_can_resume_growth_stage_workflow(self) -> None:
-        from src.schemas.models import UserRequest, WorkflowResponse
+    def test_plan_list_context_can_resume_growth_stage_tool(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
 
         router = build_test_router()
         router._session_context_store.set(
@@ -162,20 +219,25 @@ class WorkflowSessionContextTests(unittest.TestCase):
             },
         )
 
-        workflow_payload = WorkflowResponse(message="ok", data={"workflow": {"plan_id": "11"}})
+        tool_payload = ToolInvocation(
+            name="growth_stage_lookup",
+            message="ok",
+            data={"plan_id": "11"},
+        )
         with patch.object(router._intent_router, "plan", return_value=None) as mocked_plan:
-            with patch.object(
-                router, "_run_named_workflow", return_value=workflow_payload
-            ) as mocked_run:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
                 result = router.handle(
                     UserRequest(prompt="查询第1个计划的生育期", session_id="w-plan-growth")
                 )
 
-        self.assertEqual(result.mode, "workflow")
-        self.assertIsNotNone(result.plan)
+        self.assertEqual(result.mode, "tool")
+        self.assertIsNotNone(result.tool)
         mocked_plan.assert_not_called()
-        self.assertEqual(mocked_run.call_args[0][1], "growth_stage_query_workflow")
-        self.assertIn("id=11", mocked_run.call_args[0][0])
+        self.assertEqual(mocked_execute.call_args[0][0], "growth_stage_lookup")
+        self.assertIn('"query"', mocked_execute.call_args[0][1])
+        self.assertIn("id=11", mocked_execute.call_args[0][1])
 
     def test_crop_calendar_context_can_resume_delete_tool(self) -> None:
         from src.schemas.models import ToolInvocation, UserRequest

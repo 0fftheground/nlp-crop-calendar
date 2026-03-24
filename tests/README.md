@@ -1,5 +1,23 @@
 # Tests Guide
 
+## Scope Boundary
+
+This repository keeps `eval` and `tests` intentionally separate:
+
+- `src/eval_platform/`
+  - Answers: "Can this model or prompt version ship?"
+  - Used for release gates, model comparison, and production-audit review.
+  - Focuses on LLM-sensitive behavior and a small set of deterministic session-continuity checks that directly affect model rollout decisions.
+- `tests/`
+  - Answers: "Did this code change break the system?"
+  - Used for service correctness, router state transitions, workflow continuity, formatting, and regression protection.
+  - Should remain the main home for system behavior, dependency boundaries, and non-model logic.
+
+In short:
+
+- `eval` is for model quality governance.
+- `tests` is for system correctness and regression coverage.
+
 ## Directory Layout
 
 Tests are organized by domain instead of a flat `test_*.py` list:
@@ -24,6 +42,27 @@ Scenario data is grouped under:
 - `tests/scenarios/variety/`
 - `tests/scenarios/workflow/`
 
+These two layers have different roles:
+
+- `tests/<domain>/`
+  - test executors and assertions
+  - Python test files that call services, router logic, workflows, or scenario loaders
+- `tests/scenarios/<domain>/`
+  - scenario fixtures
+  - YAML case data such as prompts, multi-turn steps, expected payloads, and expected messages
+
+Examples:
+
+- [tests/sowing/test_session.py](/f:/workspace/nlp-crop-calendar/tests/sowing/test_session.py)
+  - contains the Python test logic for sowing session behavior
+- [tests/scenarios/sowing/session.yaml](/f:/workspace/nlp-crop-calendar/tests/scenarios/sowing/session.yaml)
+  - contains the replayable sowing session scenarios consumed by tests
+
+In short:
+
+- `tests/<domain>` = how to run and assert the test
+- `tests/scenarios/<domain>` = what business scenarios are being tested
+
 ## Scenario-Driven Tests
 
 Use `YAML + executor` for tests that are fundamentally user/business scenarios:
@@ -42,6 +81,30 @@ Recommended YAML split:
 - `regression.yaml`: end-to-end regression playback when needed
 
 In this repository, weather uses `service/session/ui`, while other domains currently use the subset they need.
+
+## Recommended Test Categories
+
+Within `tests/`, prefer these categories:
+
+- `service`
+  - Domain logic, payload assembly, provider integration behavior, and returned business data.
+- `session`
+  - Multi-turn continuity, pending follow-up resume, session-context reuse, and stateful domain behavior.
+- `regression`
+  - Higher-level end-to-end conversation playback for previously broken or high-risk flows.
+- `ui`
+  - Rendering, display formatting, and user-facing message shaping.
+- `router`
+  - Cross-domain routing, planner fallback, and executor state transitions.
+- `architecture`
+  - Dependency boundaries and import hygiene.
+- `domain`
+  - Pure domain logic and utility-level business rules.
+- `infra`
+  - Local infrastructure helpers and non-domain adapters.
+
+If a case is primarily about shipping or comparing a model, prefer `src/eval_platform/`.
+If a case is primarily about protecting product logic after code changes, prefer `tests/`.
 
 ## When To Keep Plain Python Tests
 

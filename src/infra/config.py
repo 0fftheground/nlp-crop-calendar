@@ -14,6 +14,10 @@ class AppConfig(BaseSettings):
     )
 
     llm_provider: str = Field(default="openai", validation_alias="LLM_PROVIDER")
+    llm_model: str = Field(default="gpt-4.1-mini", validation_alias="LLM_MODEL")
+    audit_judge_model: Optional[str] = Field(
+        default=None, validation_alias="AUDIT_JUDGE_MODEL"
+    )
     openai_api_key: Optional[str] = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_api_base: Optional[str] = Field(
         default=None, validation_alias="OPENAI_API_BASE"

@@ -268,6 +268,9 @@ def _summarize_response(response: HandleResponse) -> dict:
     if response.plan:
         summary["recommendations_count"] = len(response.plan.recommendations or [])
         summary["trace_count"] = len(response.plan.trace or [])
+        workflow_name = str((response.plan.data or {}).get("workflow_name") or "").strip()
+        if workflow_name:
+            summary["workflow_name"] = workflow_name
     return summary
 
 

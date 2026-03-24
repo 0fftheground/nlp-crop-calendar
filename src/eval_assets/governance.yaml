@@ -1,0 +1,78 @@
+version: 1
+profiles:
+  expert_blocking_gate:
+    description: >
+      Release gate for high-risk expert-maintained cases. Any blocking failure
+      blocks rollout or model promotion.
+    datasets:
+      - path: src/eval_assets/expert/planner.yaml
+        line: expert
+        include_gates: [blocking]
+      - path: src/eval_assets/expert/extractor.yaml
+        line: expert
+        include_gates: [blocking]
+      - path: src/eval_assets/expert/variety_match.yaml
+        line: expert
+        include_gates: [blocking]
+      - path: src/eval_assets/expert/session_context.yaml
+        line: expert
+        include_gates: [blocking]
+      - path: src/eval_assets/expert/followup_resume.yaml
+        line: expert
+        include_gates: [blocking]
+      - path: src/eval_assets/expert/workflow_extract.yaml
+        line: expert
+        include_gates: [blocking]
+    policy:
+      max_blocking_failures: 0
+      min_pass_rate: 1.0
+      enforce_exit_code: true
+
+  expert_regression_gate:
+    description: >
+      Broader expert-maintained regression set used for model comparison after
+      the blocking gate passes.
+    datasets:
+      - path: src/eval_assets/expert/planner.yaml
+        line: expert
+        include_gates: [blocking, regression]
+      - path: src/eval_assets/expert/extractor.yaml
+        line: expert
+        include_gates: [blocking, regression]
+      - path: src/eval_assets/expert/variety_match.yaml
+        line: expert
+        include_gates: [blocking, regression]
+      - path: src/eval_assets/expert/session_context.yaml
+        line: expert
+        include_gates: [blocking, regression]
+      - path: src/eval_assets/expert/followup_resume.yaml
+        line: expert
+        include_gates: [blocking, regression]
+      - path: src/eval_assets/expert/workflow_extract.yaml
+        line: expert
+        include_gates: [blocking, regression]
+    policy:
+      max_blocking_failures: 0
+      min_pass_rate: 0.95
+      max_latency_regression_ratio: 1.5
+      max_total_tokens_regression_ratio: 1.5
+      enforce_exit_code: true
+
+  production_audit_review:
+    description: >
+      Real user interactions sampled from production. This profile is for AI
+      judge review and human spot checks, not for hard release gating.
+    datasets:
+      - path: src/eval_assets/production_audit/planner.yaml
+        line: production_audit
+        include_gates: [audit]
+      - path: src/eval_assets/production_audit/extractor.yaml
+        line: production_audit
+        include_gates: [audit]
+      - path: src/eval_assets/production_audit/variety_match.yaml
+        line: production_audit
+        include_gates: [audit]
+    policy:
+      max_blocking_failures: 999999
+      min_pass_rate: 0.0
+      enforce_exit_code: false

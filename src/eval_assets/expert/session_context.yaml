@@ -1,0 +1,83 @@
+task: session_context
+line: expert
+owner: business_expert
+cases:
+  - id: weather_region_followup_reuses_last_context
+    gate: blocking
+    description: 上一轮已经查过“常德今天是否适合施肥”，本轮用户只补充“芜湖呢”，应复用天气查询上下文，只替换地区。
+    input:
+      prompt: 芜湖呢
+      prior_prompt: 今天常德适合施肥吗
+      prior_result_summary: 已返回常德 2026-03-17 当天的施肥适宜度
+      session_context:
+        last_context:
+          kind: tool
+          name: weather_lookup
+        tool_contexts:
+          weather_lookup:
+            region: 常德
+            start_date: "2026-03-17"
+            end_date: "2026-03-17"
+            requested_operations:
+              - 施肥
+    expected:
+      matched: true
+      action: tool
+      name: weather_lookup
+      input:
+        region: 芜湖
+        start_date: "2026-03-17"
+        end_date: "2026-03-17"
+        requested_operations:
+          - 施肥
+
+  - id: sowing_region_followup_reuses_last_context
+    gate: blocking
+    description: 上一轮已经基于常德/早稻/湘早籼24号/移栽查过播期，本轮用户只说“芜湖呢”，应复用原播期查询上下文并替换地区。
+    input:
+      prompt: 芜湖呢
+      prior_prompt: 我在常德种植早稻湘早籼24号，移栽什么时候播种合适
+      prior_result_summary: 已按常德、早稻、湘早籼24号、移栽场景返回播期建议
+      session_context:
+        last_context:
+          kind: tool
+          name: sowing_suitability_lookup
+        tool_contexts:
+          sowing_suitability_lookup:
+            crop: 水稻
+            variety: 湘早籼24号
+            region_id: 常德
+            culti_type: 早稻
+            planting_method: transplanting
+    expected:
+      matched: true
+      action: tool
+      name: sowing_suitability_lookup
+      input:
+        crop: 水稻
+        variety: 湘早籼24号
+        region_id: 芜湖
+        culti_type: 早稻
+        planting_method: transplanting
+
+  - id: variety_region_followup_reuses_last_context
+    gate: regression
+    description: 上一轮已经在看美香占2号的地区审定信息，本轮用户追问“湖南呢”，应复用品种查询上下文并把地区改成湖南。
+    input:
+      prompt: 湖南呢
+      prior_prompt: 芜湖这边种美香占2号应该看哪条审定记录？
+      prior_result_summary: 已返回美香占2号在芜湖的候选审定记录
+      session_context:
+        last_context:
+          kind: tool
+          name: variety_lookup
+        tool_contexts:
+          variety_lookup:
+            variety: 美香占2号
+            region_choice: 芜湖
+    expected:
+      matched: true
+      action: tool
+      name: variety_lookup
+      input:
+        query: 查询品种美香占2号在湖南的审定信息。用户补充：湖南呢

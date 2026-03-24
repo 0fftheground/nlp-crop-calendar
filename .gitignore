@@ -1,4 +1,5 @@
 .cache/
+.state/
 *.sqlite3
 *.log
 *.log.*

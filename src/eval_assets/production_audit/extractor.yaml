@@ -1,0 +1,19 @@
+task: extractor
+line: production_audit
+review:
+  primary: ai_judge
+  secondary: human_spotcheck
+cases:
+  - id: interaction_240_extract_sowing_request
+    gate: audit
+    source:
+      interaction_id: 240
+      provenance: deidentified_interactions_table
+    input:
+      prompt: 我在湖南省常德种植早稻湘早籼24号，移栽什么时候播种合适
+    expected:
+      crop: 水稻
+      variety: 湘早籼24号
+      region_id: 湖南省常德
+      culti_type: 早稻
+      planting_method: transplanting

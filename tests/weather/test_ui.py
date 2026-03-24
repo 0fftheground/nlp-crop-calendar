@@ -109,9 +109,10 @@ class ChainlitFormattingTests(unittest.TestCase):
         self.assertIn("支持的 Tool：", guide)
         self.assertIn("weather_lookup", guide)
         self.assertIn("plant_plan_delete", guide)
+        self.assertIn("growth_stage_lookup", guide)
         self.assertIn("支持的 Workflow：", guide)
         self.assertIn("crop_calendar_workflow", guide)
-        self.assertIn("growth_stage_query_workflow", guide)
+        self.assertNotIn("growth_stage_query_workflow", guide)
         self.assertIn("你可以直接这样问：", guide)
 
     def test_recent_farm_work_summary_handles_request_failure(self) -> None:

@@ -1,0 +1,89 @@
+task: followup_resume
+line: expert
+owner: business_expert
+cases:
+  - id: weather_followup_reply_resumes_missing_region_tool
+    gate: blocking
+    description: 上一轮天气查询缺地区，系统已追问地区；本轮用户只回复“芜湖”，应继续 weather_lookup，而不是当成新问题。
+    input:
+      prompt: 芜湖
+      prior_prompt: 今天适合施肥吗
+      prior_pending_message: 你想查询哪个地区的天气/农事适宜度？
+      memory_id: eval-user
+      pending:
+        mode: tool
+        tool_name: weather_lookup
+        query: 今天适合施肥吗
+        draft:
+          start_date: "2026-03-17"
+          end_date: "2026-03-17"
+        missing_fields:
+          - region
+        followup_count: 0
+    expected:
+      should_resume: true
+      mode: tool
+      tool_name: weather_lookup
+      followup_payload:
+        user_id: eval-user
+        query: 今天适合施肥吗
+        followup:
+          prompt: 芜湖
+          draft:
+            start_date: "2026-03-17"
+            end_date: "2026-03-17"
+          missing_fields:
+            - region
+          followup_count: 0
+
+  - id: crop_calendar_followup_reply_resumes_missing_region_workflow
+    gate: blocking
+    description: 上一轮 crop calendar workflow 仅缺地区，系统已追问地区；本轮用户只回复“常德”，应继续 workflow 并复用已有 draft。
+    input:
+      prompt: 常德
+      prior_prompt: 帮我生成一个早稻种植计划，方式是移栽
+      prior_pending_message: 请补充地区
+      pending:
+        mode: workflow
+        workflow_name: crop_calendar_workflow
+        draft:
+          crop: 水稻
+          culti_type: 早稻
+          planting_method: transplanting
+        missing_fields:
+          - region_id
+        followup_count: 1
+        pending_message: 请补充地区
+    expected:
+      should_resume: true
+      mode: workflow
+      workflow_name: crop_calendar_workflow
+      resume_state:
+        draft:
+          crop: 水稻
+          culti_type: 早稻
+          planting_method: transplanting
+        missing_fields:
+          - region_id
+        followup_count: 1
+        pending_message: 请补充地区
+
+  - id: explicit_new_question_does_not_resume_weather_pending
+    gate: regression
+    description: 上一轮天气查询仍缺地区，但本轮用户改问一个新的完整问题，应中断 pending，而不是继续补地区。
+    input:
+      prompt: 今天适合施肥吗
+      prior_prompt: 帮我查天气
+      prior_pending_message: 你想查询哪个地区的天气/农事适宜度？
+      pending:
+        mode: tool
+        tool_name: weather_lookup
+        draft:
+          start_date: "2026-03-17"
+          end_date: "2026-03-17"
+        missing_fields:
+          - region
+        followup_count: 0
+    expected:
+      should_resume: false
+      mode: tool

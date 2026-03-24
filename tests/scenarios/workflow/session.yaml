@@ -4,19 +4,18 @@ growth_stage:
     seed_turn:
       prompt: 查询美香占2号的生育期
       plan_input:
-        prompt: 查询美香占2号的生育期
-      workflow_name: growth_stage_query_workflow
-      workflow_result:
+        query: 查询美香占2号的生育期
+      tool_name: growth_stage_lookup
+      tool_result:
         message: ok
         data:
-          workflow:
-            plan_id: '12'
-            plan_filters:
-              variety: 美香占2号
-              region_id: 长沙
-              planting_method: direct_seeding
-              culti_type: 早稻
-              sowing_date: '2026-03-20'
+          plan_id: '12'
+          plan_filters:
+            variety: 美香占2号
+            region_id: 长沙
+            planting_method: direct_seeding
+            culti_type: 早稻
+            sowing_date: '2026-03-20'
           planting:
             variety: 美香占2号
             region_id: 长沙
@@ -25,13 +24,13 @@ growth_stage:
             sowing_date: '2026-03-20'
     followup_turn:
       prompt: 在芜湖呢
-      workflow_result:
+      tool_result:
         message: ok
         data:
-          workflow:
-            plan_id: '12'
+          plan_id: '12'
     expected:
-      workflow_name: growth_stage_query_workflow
+      action: tool
+      name: growth_stage_lookup
       prompt_contains:
         - 芜湖
         - 美香占2号
@@ -66,7 +65,8 @@ crop_calendar:
           planting:
             region_id: 长沙
     expected:
-      workflow_name: crop_calendar_workflow
+      action: workflow
+      name: crop_calendar_workflow
       prompt_contains:
         - 直播
         - 美香占2号

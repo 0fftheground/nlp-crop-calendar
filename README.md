@@ -106,6 +106,8 @@ App only (no Grafana/Tempo/Loki):
 docker compose -f docker-compose.yml up -d --build
 ```
 
+The runtime image excludes `tests/`, `src/eval_platform/`, and `src/eval_assets/` via `.dockerignore`; model-evaluation and test assets stay out of production containers by default.
+
 ### 3) Verify
 - API: `http://<server-ip>:8000/health`
 - Chainlit: `http://<server-ip>:18001`
@@ -137,9 +139,9 @@ More deployment details:
   - `weather_lookup`
   - `variety_lookup`
   - `sowing_suitability_lookup`
-  - `plant_plan_list_active` follow-ups into `plant_plan_delete` / `growth_stage_query_workflow`
-  - `crop_calendar_workflow` follow-ups into itself, `plant_plan_delete`, or `growth_stage_query_workflow`
-  - `growth_stage_query_workflow` follow-ups into itself
+  - `plant_plan_list_active` follow-ups into `plant_plan_delete` / `growth_stage_lookup`
+  - `crop_calendar_workflow` follow-ups into itself, `plant_plan_delete`, or `growth_stage_lookup`
+  - `growth_stage_lookup` follow-ups into itself
 - `memory_clear` intentionally does not participate in contextual merge.
 
 ## Observability And Debugging
@@ -196,6 +198,191 @@ See also:
 
 - `tests/README.md`
 
+## LLM Eval
+
+There is now a minimal eval runner for comparing real-model output quality on three tasks:
+
+- `planner`
+- `extractor` (planting info extraction)
+- `variety_match`
+
+The eval system is organized into two lines:
+
+- `expert`: business-expert-maintained release gates and regression sets
+- `production_audit`: deidentified real-interaction samples for AI judge review and human spot checks
+
+Boundary with `tests/`:
+
+- `src/eval_platform` answers whether a model or prompt variant is safe to ship.
+- `tests/` answers whether a code change broke routing, services, workflows, or state handling.
+- Session continuity appears in both places on purpose:
+  - `src/eval_platform` keeps only a small release-gating subset such as `session_context` and `followup_resume`
+  - `tests/` remains the main system-regression surface for broader multi-turn behavior
+
+Governance profiles are defined in `src/eval_assets/governance.yaml`.
+
+`production_audit` also has a closed-loop utility pipeline:
+
+1. sample deidentified interactions into audit batches
+2. run AI judge to generate review files
+3. build a human spot-check queue
+4. export expert promotion candidates from confirmed issues
+
+Run the hard release gate:
+
+```bash
+python -m src.eval_platform run --profile expert_blocking_gate
+```
+
+Run the broader expert regression set:
+
+```bash
+python -m src.eval_platform run --profile expert_regression_gate
+```
+
+Run the production-audit line:
+
+```bash
+python -m src.eval_platform run --profile production_audit_review
+```
+
+Compare candidate models on the expert regression line:
+
+```bash
+python -m src.eval_platform run \
+  --profile expert_regression_gate \
+  --llm-model gpt-5-mini \
+  --extractor-model gpt-5-mini \
+  --json-out .cache/eval/release-regression.json
+```
+
+Run a full baseline-vs-candidate release comparison:
+
+```bash
+python -m src.eval_platform compare \
+  --baseline-llm-model gpt-4.1-mini \
+  --baseline-extractor-model gpt-4.1-mini \
+  --candidate-llm-model gpt-5-mini \
+  --candidate-extractor-model gpt-5-mini \
+  --json-out .cache/eval/release-compare.json
+```
+
+If `--json-out` is omitted, compare now writes to `.cache/eval/release_compare/latest.json` by default.
+The terminal output is intentionally reduced to a short summary plus the JSON path; detailed per-dataset results live in the JSON file.
+
+`compare` now detects which model dimension actually changed and only runs the impacted tasks:
+
+- `llm-model` changes: `planner`, `variety_match`
+- `extractor-model` changes: `extractor`, `workflow_extract`
+- deterministic continuity tasks such as `session_context` and `followup_resume` are skipped in model-vs-model compare because they do not depend on model choice
+
+If baseline and candidate resolve to the same `llm-model` and `extractor-model`, `compare` exits early without running dataset comparisons.
+
+If you only want to compare one dimension, explicitly pin the other one on both sides.
+
+Compare only `llm-model`:
+
+```bash
+python -m src.eval_platform compare \
+  --baseline-llm-model gpt-4.1-mini \
+  --candidate-llm-model gpt-5-mini \
+  --baseline-extractor-model gpt-4.1-mini \
+  --candidate-extractor-model gpt-4.1-mini
+```
+
+Compare only `extractor-model`:
+
+```bash
+python -m src.eval_platform compare \
+  --baseline-llm-model gpt-4.1-mini \
+  --candidate-llm-model gpt-4.1-mini \
+  --baseline-extractor-model gpt-4.1-mini \
+  --candidate-extractor-model gpt-5-mini
+```
+
+If you omit one side, that model falls back to the current environment configuration, so explicit pinning is safer for controlled comparisons.
+
+If a provided model name does not exist or is not accessible on the configured OpenAI-compatible endpoint, the experiment now stops during preflight validation before any eval datasets run.
+
+Notes:
+
+- `LLM_MODEL` now controls the shared chat model used by planner and variety match.
+- `EXTRACTOR_MODEL` controls the structured extraction model.
+- `AUDIT_JUDGE_MODEL` controls the production-audit AI judge model. If it is empty, audit judge falls back to `LLM_MODEL`.
+- Dataset grading is subset-based: only the fields in `expected` are scored.
+- `blocking` cases are hard gates; `regression` cases are broader comparison sets; `audit` cases are monitor-only by default.
+- Expert gates now also cover deterministic session continuity via `session_context` and `followup_resume` datasets.
+- Expert gates now also cover crop-calendar workflow extraction via `workflow_extract`.
+- Eval summaries now include `avg_latency_ms`, `p95_latency_ms`, and `estimated_*_tokens`.
+- `expert_regression_gate` also checks relative latency and token regression against the baseline model.
+- Token metrics are lightweight estimates from the active model tokenizer; there is no pricing-table-based cost calculation yet.
+- Detailed governance rules, the end-to-end operating flow, and an operator guide for `run / compare / audit / promote` live in `EVAL_GOVERNANCE.md`.
+
+Production-audit closed loop:
+
+```bash
+python -m src.eval_platform audit sample --limit 50 --days 30 --out-dir .cache/eval/production_audit/batches/manual
+python -m src.eval_platform audit judge --batch .cache/eval/production_audit/batches/manual/planner.yaml --batch .cache/eval/production_audit/batches/manual/extractor.yaml --batch .cache/eval/production_audit/batches/manual/variety_match.yaml --out-dir .cache/eval/production_audit/reviews
+python -m src.eval_platform audit review-queue --review .cache/eval/production_audit/reviews/planner.review.yaml --review .cache/eval/production_audit/reviews/extractor.review.yaml --review .cache/eval/production_audit/reviews/variety_match.review.yaml --out-dir .cache/eval/production_audit/queues
+python -m src.eval_platform audit export-csv --queue .cache/eval/production_audit/queues/planner.review.queue.yaml --out-dir .cache/eval/production_audit/csv
+python -m src.eval_platform audit import-csv --csv .cache/eval/production_audit/csv/planner.review.queue.csv
+python -m src.eval_platform audit promote --review .cache/eval/production_audit/reviews/planner.review.yaml --review .cache/eval/production_audit/reviews/extractor.review.yaml --review .cache/eval/production_audit/reviews/variety_match.review.yaml --out-dir .cache/eval/production_audit/promotions
+```
+
+One-shot latest production-audit cycle:
+
+```bash
+python -m src.eval_platform audit run-latest --limit 50 --days 30 --out-dir .cache/eval/production_audit/runs/latest
+```
+
+Production-audit sampling now uses a persisted cursor in `.state/eval/production_audit/sampling_state.json`.
+That means repeated `sample` / `run-latest` calls continue from the last sampled `(created_at, id)` watermark instead of always re-reading the latest rows.
+Use `--reset-cursor` to bootstrap again from the current date window.
+
+Import promotion candidates and rerun expert gates:
+
+```bash
+python -m src.eval_platform promote \
+  --promotion .cache/eval/production_audit/promotions/planner.review.planner.promotion.yaml \
+  --rerun-profile expert_blocking_gate \
+  --rerun-profile expert_regression_gate
+```
+
+By default, `promote` also removes matching cases from `src/eval_assets/production_audit/` after they are imported into `expert`, so the same sample does not stay in both lines. Use `--keep-production-audit` if you want to retain the audit copy.
+
+Default `.cache/eval` layout:
+
+- `.cache/eval/release_compare/`
+  - compare JSON outputs
+- `.cache/eval/production_audit/batches/`
+  - `audit sample` outputs
+- `.cache/eval/production_audit/runs/`
+  - `audit run-latest` full one-shot runs
+- `.cache/eval/production_audit/reviews/`
+  - `audit judge` outputs
+- `.cache/eval/production_audit/queues/`
+  - `audit review-queue` outputs
+- `.cache/eval/production_audit/csv/`
+  - Excel-friendly CSV exports for human review
+- `.cache/eval/production_audit/promotions/`
+  - `audit promote` outputs
+
+Asset layout:
+
+- `src/eval_assets/expert/`: offline expert-maintained release datasets
+- `src/eval_assets/production_audit/`: production-audit sample datasets and templates
+
+PowerShell wrappers are also available:
+
+- `scripts/run_eval_release_compare.ps1`
+- `scripts/run_production_audit_cycle.ps1`
+- `scripts/register_production_audit_task.ps1`
+- `scripts/import_promotion_candidates.ps1`
+
+`sample` also emits `*.context_dependent.yaml` batches for short follow-up turns such as `芜湖呢`.
+Those files are marked `judge_only`: they carry a deidentified multi-turn `context_window` from the same session for AI judge review, but are not counted as deterministic single-turn replay cases.
+
 ## More Docs
 - Deployment details: `DEPLOY.md`
 - Technical details: `TECHNICAL_DETAILS.md`
+- Test organization and scope boundary: `tests/README.md`

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 from .crop_calendar_graph import build_crop_calendar_graph
-from .growth_stage_graph import build_growth_stage_graph
 
 
 @dataclass(frozen=True)
@@ -15,7 +14,6 @@ class WorkflowSpec:
 
 
 CROP_WORKFLOW_NAME = "crop_calendar_workflow"
-GROWTH_WORKFLOW_NAME = "growth_stage_query_workflow"
 
 _WORKFLOWS = (
     WorkflowSpec(
@@ -26,14 +24,6 @@ _WORKFLOWS = (
             "与种植无关不要调用"
         ),
         builder=build_crop_calendar_graph,
-    ),
-    WorkflowSpec(
-        name=GROWTH_WORKFLOW_NAME,
-        description=(
-            "生育期预测结果查询工作流（解析品种/计划-查询种植计划-读取生育期）。"
-            "当问题涉及生育期结果查询或需要选择种植计划时使用。"
-        ),
-        builder=build_growth_stage_graph,
     ),
 )
 _WORKFLOW_INDEX: Dict[str, WorkflowSpec] = {spec.name: spec for spec in _WORKFLOWS}

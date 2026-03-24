@@ -1,0 +1,40 @@
+task: extractor
+line: expert
+owner: business_expert
+cases:
+  - id: extract_direct_seeding_rice
+    gate: blocking
+    description: 单轮完整种植句子，包含地区、作物、品种、播种方式和播种日期，纯抽取应直接命中这些字段。
+    input:
+      prompt: 我在长沙种水稻美香占2号，2026-03-20直播。
+    expected:
+      crop: 水稻
+      variety: 美香占2号
+      region_id: 长沙
+      planting_method: direct_seeding
+      sowing_date: "2026-03-20"
+
+  - id: extract_transplanting_with_culti_type
+    gate: blocking
+    description: 单轮完整种植句子，包含地区、稻作类型、品种和插秧日期，纯抽取应识别为移栽场景。
+    input:
+      prompt: 常德早稻南粳46，2026年4月2日插秧。
+    expected:
+      crop: 水稻
+      variety: 南粳46
+      region_id: 常德
+      culti_type: 早稻
+      planting_method: transplanting
+      transplant_date: "2026-04-02"
+
+  - id: extract_prompt_without_date
+    gate: regression
+    description: 用户是在询问播期，但句子里已包含地区、稻作类型、品种和移栽方式；纯抽取应保留这些已知字段，即使没有明确日期。
+    input:
+      prompt: 我在湖南省常德种植早稻湘早籼24号，移栽什么时候播种合适
+    expected:
+      crop: 水稻
+      variety: 湘早籼24号
+      region_id: 湖南省常德
+      culti_type: 早稻
+      planting_method: transplanting

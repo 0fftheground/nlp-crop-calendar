@@ -71,6 +71,11 @@ TOOL_INPUT_SPECS: Dict[str, InputSpec] = {
         field_labels=QUERY_FIELD_LABELS,
         to_prompt=_to_json_payload,
     ),
+    "growth_stage_lookup": InputSpec(
+        model=QueryInput,
+        field_labels=QUERY_FIELD_LABELS,
+        to_prompt=_to_json_payload,
+    ),
     "memory_clear": InputSpec(
         model=MemoryClearInput,
         field_labels=MEMORY_CLEAR_FIELD_LABELS,
@@ -80,11 +85,6 @@ TOOL_INPUT_SPECS: Dict[str, InputSpec] = {
 
 WORKFLOW_INPUT_SPECS: Dict[str, InputSpec] = {
     "crop_calendar_workflow": InputSpec(
-        model=PromptInput,
-        field_labels=PROMPT_FIELD_LABELS,
-        to_prompt=lambda payload: str(payload.prompt),
-    ),
-    "growth_stage_query_workflow": InputSpec(
         model=PromptInput,
         field_labels=PROMPT_FIELD_LABELS,
         to_prompt=lambda payload: str(payload.prompt),

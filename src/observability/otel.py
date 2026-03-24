@@ -106,11 +106,6 @@ def summarize_state(state: object) -> object:
         summary["planting"] = planting.model_dump(mode="json")
     elif isinstance(planting, dict):
         summary["planting"] = planting
-    query = state.get("query")
-    if hasattr(query, "model_dump"):
-        summary["query"] = query.model_dump(mode="json")
-    elif isinstance(query, dict):
-        summary["query"] = query
     return summary
 
 

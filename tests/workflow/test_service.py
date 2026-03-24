@@ -16,7 +16,7 @@ if not _MISSING_PYDANTIC_SETTINGS:
     from tests.scenario_loader import load_yaml_scenarios
     from src.agent.workflows.crop_calendar_graph import _ask_node
     from src.agent.workflows.crop_calendar_graph import _extract_node
-    from src.agent.workflows.growth_stage_graph import _growth_predict_node
+    from src.agent.tools.plant_plan import growth_stage_lookup
     from src.infra.config import get_config
     from src.infra.tool_cache import get_tool_result_cache
     from src.schemas import GrowthStageResult, PlantingDetailsDraft
@@ -70,25 +70,25 @@ class WorkflowServiceScenarioTests(unittest.TestCase):
                     }
                 )
                 with patch(
-                    "src.agent.workflows.growth_stage_graph.resolve_planting_from_plan_id",
+                    "src.agent.tools.plant_plan.resolve_planting_from_plan_id",
                     return_value=planting,
                 ), patch(
-                    "src.agent.workflows.growth_stage_graph.query_growth_stage_from_plan_id",
+                    "src.agent.tools.plant_plan.query_growth_stage_from_plan_id",
                     return_value=growth_payload,
                 ):
-                    state = _growth_predict_node(
-                        {
-                            "user_prompt": scenario["user_prompt"],
-                            "plan_id": str(
-                                scenario["search_result"]["records"][0]["id"]
-                            ),
-                            "plan_filters": {},
-                            "trace": [],
-                            "user_id": "u1",
-                        }
+                    result = growth_stage_lookup.invoke(
+                        json.dumps(
+                            {
+                                "query": scenario["user_prompt"],
+                                "plan_id": str(
+                                    scenario["search_result"]["records"][0]["id"]
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
                     )
 
-                message = state.get("message", "")
+                message = result.message
                 for snippet in scenario["expected"]["message_contains"]:
                     self.assertIn(snippet, message)
                 for snippet in scenario["expected"]["message_not_contains"]:

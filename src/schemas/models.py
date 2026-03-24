@@ -9,19 +9,6 @@ from ..domain.planting_models import PlantingDetails
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-class FarmerQuery(BaseModel):
-    """Normalized attributes extracted from the farmer's free-form query."""
-
-    crop: Optional[str] = None
-    variety: Optional[str] = None
-    region: Optional[str] = None
-    growth_stage: Optional[str] = Field(
-        default=None, description="Canonical stage id (e.g., tillering, fruiting)"
-    )
-    sowing_date: Optional[date] = None
-    question: Optional[str] = None
-
-
 class UserRequest(BaseModel):
     """Incoming request payload from UI clients."""
 
@@ -51,7 +38,6 @@ class Recommendation(BaseModel):
 class WorkflowResponse(BaseModel):
     """LangGraph workflow output."""
 
-    query: Optional[FarmerQuery] = None
     recommendations: List[Recommendation] = Field(default_factory=list)
     growth_stage: Optional[GrowthStageResult] = None
     message: str = ""
@@ -233,70 +219,6 @@ class WeatherSeries(BaseModel):
     )
 
 
-class WeatherSeriesDraft(BaseModel):
-    """Weather intent extracted from user language before hitting data services."""
-
-    source_text: Optional[str] = Field(
-        default=None, description="原始语句，用于追踪或重写提示。"
-    )
-    region: Optional[str] = Field(
-        default=None, description="自然语言·地区，如“武汉”或“松滋市”。"
-    )
-    year: Optional[int] = Field(
-        default=None, description="自然语言中的年份。"
-    )
-    start_date: Optional[date] = None
-    end_date: Optional[date] = None
-    granularity: Optional[Literal["hourly", "daily"]] = None
-    variables: List[str] = Field(
-        default_factory=list,
-        description="用户提及的要素，如温度/降水/湿度。",
-    )
-    include_advice: Optional[bool] = None
-    confidence: Optional[float] = Field(
-        default=None, ge=0.0, le=1.0, description="抽取置信度。"
-    )
-
-    def to_query(self, *, defaults: Optional["WeatherQueryInput"] = None) -> "WeatherQueryInput":
-        """
-        Transform the draft intent into a concrete WeatherQueryInput.
-
-        Args:
-            defaults: Optional defaults, e.g., from user profile or workflow state.
-        Raises:
-            ValueError: if region or year is still missing.
-        """
-        base = defaults.model_dump() if defaults else {}
-        merged: Dict[str, Any] = {**base, **self.model_dump(exclude_none=True)}
-        year = merged.get("year")
-        start_date = merged.get("start_date")
-        end_date = merged.get("end_date")
-        if year is None:
-            if start_date and end_date and start_date.year != end_date.year:
-                raise ValueError("start_date and end_date must be in the same year")
-            if start_date:
-                year = start_date.year
-            elif end_date:
-                year = end_date.year
-            else:
-                year = date.today().year
-        merged["year"] = year
-        if merged.get("start_date") is None or merged.get("end_date") is None:
-            raise ValueError("Missing required fields for WeatherQueryInput: start_date,end_date")
-        merged.setdefault("granularity", "daily")
-        merged.setdefault("include_advice", False)
-        allowed = {
-            "region",
-            "start_date",
-            "end_date",
-            "year",
-            "granularity",
-            "include_advice",
-        }
-        filtered = {k: v for k, v in merged.items() if k in allowed}
-        return WeatherQueryInput(**filtered)
-
-
 class QueryInput(BaseModel):
     """Generic query wrapper for tool invocation."""
 
@@ -348,20 +270,6 @@ class MemoryClearInput(BaseModel):
         default=None,
         description="清除记忆的原因或备注。",
     )
-
-
-class FarmWorkRecommendInput(BaseModel):
-    """Input payload for requesting farm operation recommendations."""
-
-    weatherSeries: WeatherSeries
-    planting: PlantingDetails = Field(
-        default=None,
-        description="种植详情，便于推荐引擎共享上下文。",
-    )
-
-    @property
-    def crop(self) -> str:
-        return self.planting.crop
 
 
 class OperationItem(BaseModel):

@@ -32,11 +32,11 @@ def _build_capability_guide() -> str:
 - `sowing_suitability_lookup`：查询播期推荐
 - `plant_plan_list_active`：查询当前启用的种植计划
 - `plant_plan_delete`：删除指定种植计划
+- `growth_stage_lookup`：根据已有种植计划查询生育期结果
 
 支持的 Workflow：
 
 - `crop_calendar_workflow`：生成完整种植计划与农事方案
-- `growth_stage_query_workflow`：查询计划对应的生育期预测结果
 
 你可以直接这样问：
 

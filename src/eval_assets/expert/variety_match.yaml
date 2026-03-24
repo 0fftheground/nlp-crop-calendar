@@ -1,0 +1,62 @@
+task: variety_match
+line: expert
+owner: business_expert
+cases:
+  - id: choose_hunan_record
+    gate: blocking
+    description: 同一品种有湖南和安徽两条记录，用户明确提到“湖南”，应选湖南记录。
+    input:
+      prompt: 我在湖南种美香占2号，帮我看审定信息。
+      region_tokens:
+        - 湖南
+      candidates:
+        - index: 0
+          品种名称: 美香占2号
+          审定区域: 湖南
+          审定年份: "2020"
+        - index: 1
+          品种名称: 美香占2号
+          审定区域: 安徽
+          审定年份: "2021"
+    expected:
+      index: 0
+
+  - id: choose_wuhu_record
+    gate: blocking
+    description: 同一品种有湖南和芜湖两条记录，用户明确追问“芜湖这边”，应选芜湖记录。
+    input:
+      prompt: 芜湖这边种美香占2号应该看哪条审定记录？
+      region_tokens:
+        - 芜湖
+      candidates:
+        - index: 0
+          品种名称: 美香占2号
+          审定区域: 湖南
+          审定年份: "2020"
+        - index: 1
+          品种名称: 美香占2号
+          审定区域: 芜湖
+          审定年份: "2021"
+    expected:
+      index: 1
+
+  - id: choose_hunan_when_two_realistic_regions
+    gate: regression
+    description: 两条候选都看起来合理，但用户明确说“在湖南的审定信息”，应稳定选湖南记录。
+    input:
+      prompt: 帮我查一下美香占2号在湖南的审定信息
+      region_tokens:
+        - 湖南
+      candidates:
+        - index: 0
+          品种名称: 美香占2号
+          审定区域: 湖南
+          审定年份: "2019"
+          审定编号: "(湘)引种[2019]第1号0001"
+        - index: 1
+          品种名称: 美香占2号
+          审定区域: 芜湖
+          审定年份: "2022"
+          审定编号: "地方大米0001"
+    expected:
+      index: 0

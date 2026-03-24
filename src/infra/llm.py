@@ -13,7 +13,24 @@ def get_chat_model() -> BaseChatModel:
     kwargs = {
         "api_key": cfg.openai_api_key,
         "temperature": 0.2,
-        "model": "gpt-4.1-mini",
+        "model": cfg.llm_model,
+        "timeout": max(1, int(cfg.backend_timeout_seconds or 90)),
+    }
+    if cfg.openai_api_base:
+        kwargs["base_url"] = cfg.openai_api_base
+    return ChatOpenAI(**kwargs)
+
+
+def get_audit_judge_model() -> BaseChatModel:
+    cfg = get_config()
+    if cfg.llm_provider != "openai":
+        raise ValueError("仅支持 OpenAI 作为 LLM 提供商，请设置 LLM_PROVIDER=openai")
+    if not cfg.openai_api_key:
+        raise ValueError("OPENAI_API_KEY 未配置，无法调用 OpenAI API")
+    kwargs = {
+        "api_key": cfg.openai_api_key,
+        "temperature": 0.0,
+        "model": cfg.audit_judge_model or cfg.llm_model,
         "timeout": max(1, int(cfg.backend_timeout_seconds or 90)),
     }
     if cfg.openai_api_base:

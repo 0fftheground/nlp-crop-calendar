@@ -1,0 +1,47 @@
+task: planner
+line: expert
+owner: business_expert
+cases:
+  - id: route_weather_query
+    gate: blocking
+    description: 用户明确在查天气，应直接路由到 weather_lookup。
+    input:
+      prompt: 查询长沙未来一周天气
+    expected:
+      action: tool
+      name: weather_lookup
+
+  - id: route_crop_calendar_workflow
+    gate: blocking
+    description: 用户目标是生成完整种植计划，即使句子里含品种信息，也应走 crop_calendar_workflow。
+    input:
+      prompt: 帮我生成一个水稻种植计划，品种是美香占2号
+    expected:
+      action: workflow
+      name: crop_calendar_workflow
+
+  - id: route_growth_stage_lookup
+    gate: blocking
+    description: 用户是在查询已有计划的生育期结果，不再走 workflow，而应路由到 growth_stage_lookup。
+    input:
+      prompt: 查询第1个计划的生育期
+    expected:
+      action: tool
+      name: growth_stage_lookup
+
+  - id: route_variety_lookup
+    gate: regression
+    description: 用户只是在查品种基础信息，应路由到 variety_lookup。
+    input:
+      prompt: 帮我查查南粳46
+    expected:
+      action: tool
+      name: variety_lookup
+
+  - id: route_none_smalltalk
+    gate: regression
+    description: 与农事无关的闲聊，应返回 none。
+    input:
+      prompt: 你是？
+    expected:
+      action: none

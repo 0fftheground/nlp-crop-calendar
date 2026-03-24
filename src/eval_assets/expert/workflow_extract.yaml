@@ -1,0 +1,57 @@
+task: workflow_extract
+line: expert
+owner: business_expert
+cases:
+  - id: crop_calendar_initial_extract_leaves_region_missing
+    gate: blocking
+    description: 首轮生成种植计划时，已抽出主要种植信息，但缺地区，workflow 应保留 draft 并标记 region_id 仍需追问。
+    input:
+      prompt: 我种早稻美香占2号，2026-03-20直播，帮我生成种植计划
+    expected:
+      draft:
+        crop: 水稻
+        variety: 美香占2号
+        culti_type: 早稻
+        planting_method: direct_seeding
+        sowing_date: "2026-03-20"
+      missing_fields:
+        - region_id
+
+  - id: crop_calendar_followup_fill_region_into_existing_draft
+    gate: blocking
+    description: 上一轮仅缺地区，系统已追问地区；本轮用户只回复“常德”，workflow 应把该回答 merge 回已有 draft。
+    input:
+      prompt: 常德
+      prior_prompt: 我种早稻美香占2号，2026-03-20直播，帮我生成种植计划
+      prior_pending_message: 你种植的地区是哪里？
+      draft:
+        crop: 水稻
+        variety: 美香占2号
+        culti_type: 早稻
+        planting_method: direct_seeding
+        sowing_date: "2026-03-20"
+      missing_fields: [region_id]
+      followup_count: 0
+    expected:
+      draft:
+        crop: 水稻
+        variety: 美香占2号
+        region_id: 常德
+        culti_type: 早稻
+        planting_method: direct_seeding
+        sowing_date: "2026-03-20"
+      missing_fields: []
+
+  - id: crop_calendar_initial_extract_sparse_prompt_reports_missing_fields
+    gate: regression
+    description: 首轮 prompt 仅给出作物和品种，workflow 应返回部分 draft，并把后续必须追问的字段列入 missing_fields。
+    input:
+      prompt: 帮我生成一个水稻种植计划，品种是美香占2号
+    expected:
+      draft:
+        crop: 水稻
+        variety: 美香占2号
+      missing_fields:
+        - planting_method
+        - sowing_date
+        - culti_type

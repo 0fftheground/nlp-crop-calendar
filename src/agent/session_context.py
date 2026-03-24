@@ -235,25 +235,27 @@ def build_contextual_candidate(
             if query:
                 return ContextualPlanCandidate(
                     plan=ActionPlan(
-                        action="workflow",
-                        name="growth_stage_query_workflow",
-                        input={"prompt": query},
-                        reason="session_context:plant_plan_list_active->growth_stage_query_workflow",
+                        action="tool",
+                        name="growth_stage_lookup",
+                        input={"query": query},
+                        reason="session_context:plant_plan_list_active->growth_stage_lookup",
                     ),
                     confidence=_score_plan_action_contextual_candidate(text),
                     kind=kind,
                     name=name,
                     evidence=_collect_growth_stage_candidate_evidence(text, query),
                 )
-        if kind == "workflow" and name == "growth_stage_query_workflow":
+        if (kind == "tool" and name == "growth_stage_lookup") or (
+            kind == "workflow" and name == "growth_stage_query_workflow"
+        ):
             query = _build_contextual_growth_prompt(text, context)
             if query:
                 return ContextualPlanCandidate(
                     plan=ActionPlan(
-                        action="workflow",
-                        name=name,
-                        input={"prompt": query},
-                        reason=f"session_context:{name}",
+                        action="tool",
+                        name="growth_stage_lookup",
+                        input={"query": query},
+                        reason="session_context:growth_stage_lookup",
                     ),
                     confidence=_score_workflow_contextual_candidate(text),
                     kind=kind,
@@ -279,10 +281,10 @@ def build_contextual_candidate(
             if growth_query:
                 return ContextualPlanCandidate(
                     plan=ActionPlan(
-                        action="workflow",
-                        name="growth_stage_query_workflow",
-                        input={"prompt": growth_query},
-                        reason="session_context:crop_calendar_workflow->growth_stage_query_workflow",
+                        action="tool",
+                        name="growth_stage_lookup",
+                        input={"query": growth_query},
+                        reason="session_context:crop_calendar_workflow->growth_stage_lookup",
                     ),
                     confidence=_score_plan_action_contextual_candidate(text),
                     kind=kind,
@@ -548,6 +550,18 @@ def extract_session_context_from_tool(
         plan_id = data.get("plant_season_id")
         if plan_id not in (None, ""):
             return tool.name, {"plant_season_id": str(plan_id).strip()}
+    if tool.name == "growth_stage_lookup":
+        context: dict[str, object] = {}
+        plan_id = data.get("plan_id")
+        if plan_id not in (None, ""):
+            context["plan_id"] = str(plan_id).strip()
+        plan_filters = data.get("plan_filters")
+        if isinstance(plan_filters, Mapping) and plan_filters:
+            context["plan_filters"] = dict(plan_filters)
+        planting = _reduce_planting_context(data.get("planting"))
+        if planting:
+            context["planting"] = planting
+        return (tool.name, context) if context else None
     return None
 
 

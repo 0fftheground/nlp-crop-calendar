@@ -1,0 +1,28 @@
+task: variety_match
+line: production_audit
+review:
+  primary: ai_judge
+  secondary: human_spotcheck
+cases:
+  - id: interaction_226_meixiangzhan2_multi_region
+    gate: audit
+    source:
+      interaction_id: 226
+      provenance: deidentified_interactions_table
+    input:
+      prompt: 帮我查查美香占2号
+      region_tokens:
+        - 湖南
+      candidates:
+        - index: 0
+          品种名称: 美香占2号
+          审定区域: 湖南
+          审定年份: "2019"
+          审定编号: "(湘)引种[2019]第1号0001"
+        - index: 1
+          品种名称: 美香占2号
+          审定区域: 芜湖
+          审定年份: "2022"
+          审定编号: "地方大米0001"
+    expected:
+      index: 0

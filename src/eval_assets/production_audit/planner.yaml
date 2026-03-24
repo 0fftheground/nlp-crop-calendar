@@ -1,0 +1,48 @@
+task: planner
+line: production_audit
+review:
+  primary: ai_judge
+  secondary: human_spotcheck
+cases:
+  - id: interaction_242_weather_advice
+    gate: audit
+    source:
+      interaction_id: 242
+      provenance: deidentified_interactions_table
+    input:
+      prompt: 今天适合施肥吗
+    expected:
+      action: tool
+      name: weather_lookup
+
+  - id: interaction_240_sowing_query
+    gate: audit
+    source:
+      interaction_id: 240
+      provenance: deidentified_interactions_table
+    input:
+      prompt: 我在湖南省常德种植早稻湘早籼24号，移栽什么时候播种合适
+    expected:
+      action: tool
+      name: sowing_suitability_lookup
+
+  - id: interaction_226_variety_lookup
+    gate: audit
+    source:
+      interaction_id: 226
+      provenance: deidentified_interactions_table
+    input:
+      prompt: 帮我查查美香占2号
+    expected:
+      action: tool
+      name: variety_lookup
+
+  - id: interaction_214_none
+    gate: audit
+    source:
+      interaction_id: 214
+      provenance: deidentified_interactions_table
+    input:
+      prompt: 你是？
+    expected:
+      action: none

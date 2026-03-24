@@ -48,6 +48,26 @@ class PlanExecutor:
         self._get_workflow_spec = get_workflow_spec_fn
         self._workflow_graphs: dict[str, object] = {}
 
+    @staticmethod
+    def _annotate_workflow_response(
+        plan_payload: WorkflowResponse, workflow_name: str
+    ) -> WorkflowResponse:
+        data = dict(plan_payload.data or {})
+        if data.get("workflow_name") == workflow_name:
+            return plan_payload
+        data["workflow_name"] = workflow_name
+        return plan_payload.model_copy(update={"data": data})
+
+    @staticmethod
+    def _build_workflow_state_snapshot(state: dict) -> dict:
+        snapshot: dict[str, object] = {}
+        for key in ("draft", "missing_fields", "followup_count", "pending_message", "options"):
+            value = state.get(key)
+            if value in (None, "", []):
+                continue
+            snapshot[key] = value
+        return snapshot
+
     def apply_input_validation(
         self,
         plan,
@@ -233,6 +253,7 @@ class PlanExecutor:
         if isinstance(plan.input, str) and plan.input.strip():
             workflow_prompt = plan.input
         plan_payload = run_named_workflow(workflow_prompt, workflow_name)
+        plan_payload = self._annotate_workflow_response(plan_payload, workflow_name)
         return HandleResponse(mode="workflow", plan=plan_payload)
 
     def respond_none(
@@ -293,7 +314,10 @@ class PlanExecutor:
                 execute_tool_fn=execute_tool_fn,
             )
             return HandleResponse(mode="tool", tool=tool_payload)
-        plan = run_named_workflow(prompt, pending.get("workflow_name"))
+        workflow_name = str(pending.get("workflow_name") or "").strip()
+        plan = run_named_workflow(prompt, workflow_name)
+        if workflow_name:
+            plan = self._annotate_workflow_response(plan, workflow_name)
         return HandleResponse(mode="workflow", plan=plan)
 
     def run_named_workflow(
@@ -357,13 +381,16 @@ class PlanExecutor:
                         span.set_attribute(key, value)
                     except Exception:
                         pass
+            data = dict(state.get("data", {}) or {})
+            workflow_state = self._build_workflow_state_snapshot(state)
+            if workflow_state:
+                data["workflow_state"] = workflow_state
             return WorkflowResponse(
-                query=state.get("query"),
                 recommendations=state.get("recommendations", []),
                 growth_stage=state.get("growth_stage"),
                 message=state.get("message", ""),
                 trace=state.get("trace", []),
-                data=state.get("data", {}),
+                data=data,
             )
 
     def run_tool_followup(
