@@ -15,6 +15,7 @@ if not _MISSING_PYDANTIC_SETTINGS:
     from src.agent.workflows.common import build_fallback_planting
     from src.application.services.crop_calendar_service import (
         _build_crop_calendar_payload,
+        _format_crop_calendar_http_error,
         _build_operation_plan_from_farmworks,
         build_operation_plan,
         fetch_weather,
@@ -114,6 +115,20 @@ class DomainServiceTests(unittest.TestCase):
         self.assertEqual(draft.variety, "南粳46")
         self.assertEqual(draft.culti_type, "一季稻")
 
+    def test_extract_planting_details_normalizes_partial_date_to_current_year(self) -> None:
+        class FakeDate(date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 3, 26)
+
+        with patch("src.domain.planting.date", FakeDate):
+            draft = extract_planting_details(
+                "5月1日",
+                llm_extract=lambda _: {"sowing_date": FakeDate(2023, 5, 1)},
+            )
+
+        self.assertEqual(draft.sowing_date, date(2026, 5, 1))
+
     def test_build_crop_calendar_payload_allows_empty_transplant_date(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"
         get_config.cache_clear()
@@ -148,7 +163,7 @@ class DomainServiceTests(unittest.TestCase):
             payload, _ = _build_crop_calendar_payload(planting)
         self.assertEqual(payload.get("transp_date"), "")
 
-    def test_build_crop_calendar_payload_requires_transplant_date_for_transplanting(self) -> None:
+    def test_build_crop_calendar_payload_allows_empty_transplant_date_for_transplanting(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"
         get_config.cache_clear()
         planting = PlantingDetails(
@@ -162,8 +177,8 @@ class DomainServiceTests(unittest.TestCase):
             "src.application.services.crop_calendar_service._fetch_variety_id_by_name",
             return_value=1001,
         ):
-            with self.assertRaisesRegex(RuntimeError, "transp_date"):
-                _build_crop_calendar_payload(planting)
+            payload, _ = _build_crop_calendar_payload(planting)
+        self.assertEqual(payload.get("transp_date"), "")
 
     def test_build_crop_calendar_payload_requires_culti_type(self) -> None:
         os.environ["DEFAULT_FARM_ID"] = "1"
@@ -318,6 +333,16 @@ class DomainServiceTests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 _build_crop_calendar_payload(planting)
+
+    def test_format_crop_calendar_http_error_prefers_code_and_msg(self) -> None:
+        message = _format_crop_calendar_http_error(
+            status_code=400,
+            response_text='{"code":"0404400","msg":"种植方式为移栽时 移栽日期 为必填","data":""}',
+        )
+        self.assertEqual(
+            message,
+            "外部计算接口错误（错误码 0404400）：种植方式为移栽时 移栽日期 为必填",
+        )
 
 
 if __name__ == "__main__":

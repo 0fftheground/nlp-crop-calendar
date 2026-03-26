@@ -1,8 +1,10 @@
 import importlib.util
+import asyncio
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -57,6 +59,7 @@ if _MISSING_CHAINLIT:
 from tests.scenario_loader import load_yaml_scenarios
 from chainlit_app import (
     _build_capability_guide,
+    _fetch_recent_farm_work_summary,
     _format_recent_farm_work_summary,
     _format_weather_tool_details,
 )
@@ -119,6 +122,50 @@ class ChainlitFormattingTests(unittest.TestCase):
         summary = _format_recent_farm_work_summary(None, farm_id=1)
         self.assertIn("farm_id=1", summary)
         self.assertIn("暂时无法加载", summary)
+
+    def test_recent_farm_work_summary_logs_request_failure(self) -> None:
+        class _FakeResponse:
+            status_code = 503
+            text = "upstream unavailable"
+
+            def raise_for_status(self):
+                import httpx
+
+                request = httpx.Request("GET", "https://example.test/farm-work/recent-week/1")
+                raise httpx.HTTPStatusError(
+                    "503 Service Unavailable", request=request, response=self
+                )
+
+            def json(self):
+                return {}
+
+        class _FakeAsyncClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return _FakeResponse()
+
+        class _Cfg:
+            default_farm_id = 1
+            recent_week_farm_work_api_url = "https://example.test/farm-work/recent-week/{farm_id}"
+            business_api_base_url = ""
+            business_api_key = ""
+
+        with patch("chainlit_app.get_config", return_value=_Cfg()):
+            with patch("chainlit_app.httpx.AsyncClient", return_value=_FakeAsyncClient()):
+                with patch(
+                    "chainlit_app._append_recent_farm_work_observability_log"
+                ) as mocked_obs:
+                    with patch("chainlit_app._append_recent_farm_work_error_log") as mocked_append:
+                        summary = asyncio.run(_fetch_recent_farm_work_summary())
+
+        self.assertIn("暂时无法加载", summary)
+        mocked_obs.assert_called_once()
+        mocked_append.assert_called_once()
 
 
 if __name__ == "__main__":

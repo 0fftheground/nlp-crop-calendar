@@ -4,6 +4,7 @@ import re
 from datetime import date
 from typing import Callable, Dict, List, Optional
 
+from .date_parser import extract_explicit_dates
 from .planting_models import PlantingDetails, PlantingDetailsDraft
 
 
@@ -291,6 +292,22 @@ def _apply_rice_default(data: Dict[str, object]) -> None:
     data["crop"] = DEFAULT_CROP
 
 
+def _normalize_partial_date_fields(data: Dict[str, object], prompt: str) -> None:
+    text = str(prompt or "").strip()
+    if not text:
+        return
+    if re.search(r"20\d{2}[-/年]", text):
+        return
+    explicit_dates = extract_explicit_dates(text, today=date.today())
+    if len(explicit_dates) != 1:
+        return
+    target = explicit_dates[0]
+    for field in ("sowing_date", "transplant_date"):
+        value = data.get(field)
+        if isinstance(value, date):
+            data[field] = target
+
+
 def extract_planting_details(
     prompt: str,
     *,
@@ -311,6 +328,7 @@ def extract_planting_details(
         _normalize_variety_field(data, prompt, variety_resolver)
         _normalize_culti_type_field(data, prompt)
         _sanitize_crop_field(data, prompt, variety_resolver)
+        _normalize_partial_date_fields(data, prompt)
         _apply_rice_default(data)
         data.setdefault("confidence", 0.9)
         return PlantingDetailsDraft(**data)
@@ -318,6 +336,7 @@ def extract_planting_details(
     _apply_heuristics(data, prompt, variety_resolver)
     _normalize_culti_type_field(data, prompt)
     _sanitize_crop_field(data, prompt, variety_resolver)
+    _normalize_partial_date_fields(data, prompt)
     _apply_rice_default(data)
     data["confidence"] = 0.4 if len(data) == 1 else 0.75
     return PlantingDetailsDraft(**data)

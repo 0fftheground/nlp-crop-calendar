@@ -123,3 +123,25 @@ crop_calendar_graph_cases:
         - transplant_date
       assumptions_prefix:
         - "transplant_date: 用户不知道"
+
+  - id: unknown_culti_type_proceeds_with_default
+    mode: extract_node
+    user_prompt: 不知道
+    prior_draft:
+      crop: 水稻
+      variety: 美香占2号
+      planting_method: transplanting
+      sowing_date: "2025-05-01"
+    followup_draft: {}
+    missing_fields:
+      - culti_type
+    followup_count: 1
+    exact_variety_in_text:
+    retrieve_variety_candidates: []
+    expected:
+      draft:
+        culti_type: 中稻
+      missing_fields_not_contains:
+        - culti_type
+      assumptions_prefix:
+        - "culti_type: 用户不知道"

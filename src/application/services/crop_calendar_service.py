@@ -88,6 +88,27 @@ def _post_json(
     )
 
 
+def _format_crop_calendar_http_error(
+    *, status_code: Optional[object], response_text: str
+) -> str:
+    text = str(response_text or "").strip()
+    if text:
+        try:
+            payload = json.loads(text)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            code = str(payload.get("code") or "").strip()
+            msg = str(payload.get("msg") or payload.get("message") or "").strip()
+            if code and msg:
+                return f"外部计算接口错误（错误码 {code}）：{msg}"
+            if msg:
+                return f"外部计算接口错误：{msg}"
+    if status_code not in (None, ""):
+        return f"外部计算接口请求失败（status={status_code}）。"
+    return "外部计算接口请求失败。"
+
+
 class CropCalendarArtifacts(TypedDict):
     planting: PlantingDetails
     weather_series: WeatherSeries
@@ -676,8 +697,6 @@ def _build_crop_calendar_payload(
     sowing_method = _normalize_sowing_method_code(planting_method_value)
     if sowing_method is None:
         raise RuntimeError("无法解析 sowing_method 代码。")
-    if planting.transplant_date is None and planting_method_value != "direct_seeding":
-        raise RuntimeError("非直播模式必须提供 transp_date。")
     if not planting.culti_type:
         raise RuntimeError("缺少稻作类型信息，无法生成种植计划。")
     culti_type_code = _normalize_culti_type_code(planting.culti_type)
@@ -836,7 +855,9 @@ def request_crop_calendar_plan(
                 response_text=response_text,
             )
             raise RuntimeError(
-                f"外部计算接口请求失败(status={status_code}): {response_text}"
+                _format_crop_calendar_http_error(
+                    status_code=status_code, response_text=response_text
+                )
             ) from exc
         log_event(
             "crop_calendar_api_request_error",

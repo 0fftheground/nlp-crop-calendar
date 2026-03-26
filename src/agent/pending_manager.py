@@ -8,6 +8,7 @@ from .followup import (
     build_followup_options,
     get_followup_count,
     get_followup_draft,
+    get_followup_kind,
     get_followup_message,
     get_followup_missing_fields,
     get_followup_options,
@@ -69,6 +70,27 @@ _UNKNOWN_REPLY_TOKENS = {
     "不太清楚",
 }
 _FOLLOWUP_REPLY_SPLIT_RE = re.compile(r"[，,、/\s]+")
+_YES_REPLY_TOKENS = {"是", "好", "好的", "确认", "要", "保存", "继续", "yes", "y", "ok"}
+_NO_REPLY_TOKENS = {"否", "不", "取消", "不用了", "不保存", "算了", "no", "n"}
+_CLARIFICATION_CONTINUE_TOKENS = {
+    "继续当前",
+    "继续当前的",
+    "当前",
+    "前一个",
+    "上一个",
+    "第一个",
+    "1",
+}
+_CLARIFICATION_NEW_TOKENS = {
+    "新的",
+    "新任务",
+    "新问题",
+    "新的那个",
+    "后一个",
+    "下一个",
+    "第二个",
+    "2",
+}
 
 
 class PendingManager:
@@ -100,6 +122,7 @@ class PendingManager:
             "followup_count": get_followup_count(pending),
             "options": options,
             "pending_message": get_followup_message(pending),
+            "pending_kind": get_followup_kind(pending),
             "future_sowing_date_warning": pending.get(
                 "future_sowing_date_warning", False
             ),
@@ -156,6 +179,7 @@ class PendingManager:
                 "missing_fields": missing,
                 "followup_count": get_followup_count(state),
                 "pending_message": get_followup_message(state),
+                "pending_kind": get_followup_kind(state),
                 "future_sowing_date_warning": state.get(
                     "future_sowing_date_warning", False
                 ),
@@ -204,6 +228,7 @@ class PendingManager:
                 "missing_fields": missing,
                 "followup_count": followup_count,
                 "pending_message": tool_payload.message,
+                "pending_kind": get_followup_kind(data),
             }
             query = data.get("query") or data.get("prompt")
             if isinstance(query, str) and query.strip():
@@ -232,7 +257,7 @@ class PendingManager:
     def should_resume_pending(self, prompt: str, pending: Optional[dict]) -> bool:
         if not isinstance(pending, dict):
             return False
-        if pending.get("mode") not in {"tool", "workflow"}:
+        if pending.get("mode") not in {"tool", "workflow", "clarification"}:
             return False
         rule = self._rule_engine.match(prompt or "")
         if (
@@ -253,6 +278,11 @@ class PendingManager:
                 return True
             if retrieve_variety_candidates(prompt, limit=3):
                 return True
+        pending_kind = get_followup_kind(pending)
+        if pending_kind == "clarification":
+            return self._matches_pending_clarification(prompt, pending)
+        if pending_kind == "confirmation":
+            return self._matches_pending_confirmation(prompt)
         if pending.get("strict_options_only"):
             return self._matches_pending_choice(prompt, pending)
         if self._matches_pending_choice(prompt, pending):
@@ -291,6 +321,37 @@ class PendingManager:
         if parse_followup_index(text) is not None and message and "序号" in message:
             return True
         return False
+
+    @staticmethod
+    def _matches_pending_confirmation(prompt: str) -> bool:
+        text = (prompt or "").strip().lower()
+        if not text:
+            return False
+        return text in _YES_REPLY_TOKENS or text in _NO_REPLY_TOKENS
+
+    def resolve_pending_clarification_choice(
+        self, prompt: str, pending: Optional[dict]
+    ) -> Optional[str]:
+        text = (prompt or "").strip().lower()
+        if not text:
+            return None
+        if text in _CLARIFICATION_CONTINUE_TOKENS:
+            return "contextual"
+        if text in _CLARIFICATION_NEW_TOKENS:
+            return "standalone"
+        choice = resolve_followup_choice(text, self._extract_pending_options(pending))
+        if not choice:
+            return None
+        if "继续当前" in choice:
+            return "contextual"
+        if "开启新" in choice or "新任务" in choice:
+            return "standalone"
+        return None
+
+    def _matches_pending_clarification(
+        self, prompt: str, pending: Optional[dict]
+    ) -> bool:
+        return self.resolve_pending_clarification_choice(prompt, pending) is not None
 
     @staticmethod
     def _looks_like_new_question(prompt: str) -> bool:

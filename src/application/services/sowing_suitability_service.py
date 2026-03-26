@@ -13,9 +13,19 @@ from ..adapters import (
 )
 from ..ports import ConfigPort, HttpPort, SqlPort
 from ...agent.followup import build_tool_followup_invocation, resolve_followup_choice
+from ...agent.field_updates import (
+    extract_planting_field_overrides,
+    extract_region_followup_hint,
+)
+from ...agent.intent_boundaries import looks_like_sowing_query
 from ...domain.planting import DEFAULT_CROP, extract_planting_details
+from ...domain.region_text import build_region_text_variants, normalize_region_token
 from ...infra.llm_extract import llm_structured_extract
 from ...infra.db_catalog import TABLE_KEY_VARIETY, resolve_db_table
+from ...infra.variety_db_schema import (
+    VARIETY_PG_COLUMN_MAP,
+    VARIETY_PG_NAME_COLUMN,
+)
 from ...infra.variety_store import (
     extract_variety_tokens,
     find_exact_variety_in_text,
@@ -37,6 +47,43 @@ from .crop_calendar_service import (
 _CONFIG_PORT: ConfigPort = DEFAULT_CONFIG_ADAPTER
 _HTTP_PORT: HttpPort = DEFAULT_HTTP_ADAPTER
 _SQL_PORT: SqlPort = DEFAULT_SQL_ADAPTER
+
+_PROVINCE_CODE_MAP = {
+    "11": "北京",
+    "12": "天津",
+    "13": "河北",
+    "14": "山西",
+    "15": "内蒙古",
+    "21": "辽宁",
+    "22": "吉林",
+    "23": "黑龙江",
+    "31": "上海",
+    "32": "江苏",
+    "33": "浙江",
+    "34": "安徽",
+    "35": "福建",
+    "36": "江西",
+    "37": "山东",
+    "41": "河南",
+    "42": "湖北",
+    "43": "湖南",
+    "44": "广东",
+    "45": "广西",
+    "46": "海南",
+    "50": "重庆",
+    "51": "四川",
+    "52": "贵州",
+    "53": "云南",
+    "54": "西藏",
+    "61": "陕西",
+    "62": "甘肃",
+    "63": "青海",
+    "64": "宁夏",
+    "65": "新疆",
+    "71": "台湾",
+    "81": "香港",
+    "82": "澳门",
+}
 
 
 class _SowingPlantingExtract(BaseModel):
@@ -324,21 +371,26 @@ def _build_query_from_prompt(prompt: str) -> Dict[str, object]:
 
 
 def _extract_contextual_region_hint(text: str) -> Optional[str]:
-    prompt = str(text or "").strip()
-    if not prompt:
-        return None
-    for pattern in (
-        r"^在([\u4e00-\u9fff]{2,20})(?:呢|吗|怎么样|如何|可以吗)?$",
-        r"^([\u4e00-\u9fff]{2,20})(?:呢|吗|怎么样|如何|可以吗)$",
+    return extract_region_followup_hint(text, invalid_tokens=())
+
+
+def _extract_contextual_sowing_overrides(text: str) -> dict[str, object]:
+    overrides = extract_planting_field_overrides(
+        text,
+        include_variety=True,
+        include_dates=False,
+        include_crop=True,
+        variety_matcher=find_exact_variety_in_text,
+    )
+    # Short follow-ups like "早稻呢" / "直播呢" should only override the explicitly
+    # extracted field, not be reinterpreted as a region.
+    if "region_id" not in overrides and not any(
+        key in overrides for key in ("variety", "culti_type", "planting_method")
     ):
-        match = re.search(pattern, prompt)
-        if not match:
-            continue
-        region = str(match.group(1) or "").strip()
-        region = re.sub(r"(呢|吗|呀|啊)$", "", region).strip()
-        if region:
-            return region
-    return None
+        region_hint = _extract_contextual_region_hint(text)
+        if region_hint:
+            overrides["region_id"] = region_hint
+    return overrides
 
 
 def build_contextual_sowing_query(
@@ -357,22 +409,12 @@ def build_contextual_sowing_query(
     }
     if not base:
         return None
-    current = _build_query_from_prompt(json.dumps({"query": text}, ensure_ascii=False))
-    overrides = {
-        key: value
-        for key, value in current.items()
-        if key in {"variety", "culti_type", "planting_method", "region_id", "farm_id", "crop"}
-        and value not in (None, "")
-    }
-    if "region_id" not in overrides:
-        region_hint = _extract_contextual_region_hint(text)
-        if region_hint:
-            overrides["region_id"] = region_hint
-            overrides.pop("farm_id", None)
-    if not overrides:
-        return None
+    overrides = _extract_contextual_sowing_overrides(text)
     merged = dict(base)
-    merged.update(overrides)
+    if overrides:
+        merged.update(overrides)
+    elif not looks_like_sowing_query(text):
+        return None
     merged["query"] = text
     return merged
 
@@ -421,31 +463,139 @@ def _build_variety_candidate_followup(
     )
 
 
-def _fetch_variety_sub_type(variety_name: str) -> Optional[int]:
+def _fetch_variety_records(variety_name: str) -> list[dict[str, object]]:
     if not variety_name:
-        return None
+        return []
     url = _require_db_url()
     table = resolve_db_table(_cfg(), TABLE_KEY_VARIETY)
     try:
         sql = (
-            f"SELECT {_qid('sub_type')} AS sub_type FROM {_qid(table)} "
-            f"WHERE {_qid('name')} = %s LIMIT 1"
+            f"SELECT "
+            f"{_qid(VARIETY_PG_NAME_COLUMN)} AS name, "
+            f"{_qid(VARIETY_PG_COLUMN_MAP['subspecies_type'])} AS sub_type, "
+            f"{_qid(VARIETY_PG_COLUMN_MAP['rice_type'])} AS culti_type, "
+            f"{_qid(VARIETY_PG_COLUMN_MAP['approval_region'])} AS approve_region, "
+            f"{_qid(VARIETY_PG_COLUMN_MAP['suitable_region'])} AS suitable_region, "
+            f"{_qid(VARIETY_PG_COLUMN_MAP['approval_year'])} AS approve_year "
+            f"FROM {_qid(table)} "
+            f"WHERE {_qid(VARIETY_PG_NAME_COLUMN)} = %s"
         )
         rows = _fetch_all(url, sql, (variety_name,))
     except Exception:
+        return []
+    return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
+def _parse_int_like(value: object) -> Optional[int]:
+    if value is None:
         return None
-    if not rows or not isinstance(rows[0], dict):
-        return None
-    raw = rows[0].get("sub_type")
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-        return int(raw)
-    text = str(raw).strip()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    text = str(value).strip()
     if not text:
         return None
     if text.isdigit():
         return int(text)
+    return None
+
+
+def _parse_approve_year(value: object) -> int:
+    text = str(value or "").strip()
+    if text.isdigit() and len(text) == 4:
+        return int(text)
+    match = re.search(r"(20\d{2})", text)
+    return int(match.group(1)) if match else 0
+
+
+def _resolve_variety_record_by_region(
+    records: list[dict[str, object]],
+    region_text: str,
+    resolved_region_id: object = None,
+) -> Optional[dict[str, object]]:
+    if not records:
+        return None
+    variants = build_region_text_variants(region_text)
+    province = ""
+    region_id_text = str(resolved_region_id or "").strip()
+    region_id_match = re.match(r"^(\d{2})\d{4,10}$", region_id_text)
+    if region_id_match:
+        province = _PROVINCE_CODE_MAP.get(region_id_match.group(1), "")
+    if province:
+        variants.extend(build_region_text_variants(province))
+    if not variants:
+        return None
+    best_record: Optional[dict[str, object]] = None
+    best_score = -1
+    for record in records:
+        approval_region = normalize_region_token(record.get("approve_region"))
+        suitable_region = normalize_region_token(record.get("suitable_region"))
+        if not approval_region:
+            approval_region = ""
+        if not suitable_region:
+            suitable_region = ""
+        score = 0
+        for variant in variants:
+            normalized = normalize_region_token(variant)
+            if not normalized:
+                continue
+            for candidate_region, weight_exact, weight_contains, weight_reverse in (
+                (approval_region, 120, 100, 90),
+                (suitable_region, 110, 95, 85),
+            ):
+                if not candidate_region:
+                    continue
+                if normalized == candidate_region:
+                    score = max(score, weight_exact)
+                elif normalized in candidate_region:
+                    score = max(score, weight_contains)
+                elif candidate_region in normalized:
+                    score = max(score, weight_reverse)
+        if score <= 0:
+            continue
+        if (
+            score > best_score
+            or (
+                score == best_score
+                and _parse_approve_year(record.get("approve_year"))
+                > _parse_approve_year(best_record.get("approve_year") if best_record else None)
+            )
+        ):
+            best_record = record
+            best_score = score
+    return best_record
+
+
+def _resolve_variety_metadata(
+    variety_name: str,
+    region_text: str = "",
+    resolved_region_id: object = None,
+) -> tuple[Optional[dict[str, object]], bool]:
+    records = _fetch_variety_records(variety_name)
+    if not records:
+        return None, False
+    if region_text.strip():
+        matched = _resolve_variety_record_by_region(records, region_text, resolved_region_id)
+        return matched, True
+    best_record = max(
+        records,
+        key=lambda item: _parse_approve_year(item.get("approve_year")),
+    )
+    return best_record, False
+
+
+def _fetch_variety_sub_type(variety_name: str) -> Optional[int]:
+    record, _ = _resolve_variety_metadata(variety_name)
+    if not record:
+        return None
+    raw = record.get("sub_type")
+    if raw is None:
+        return None
+    parsed = _parse_int_like(raw)
+    if parsed is not None:
+        return parsed
+    text = str(raw).strip()
+    if not text:
+        return None
     return _resolve_code("sub_type", text)
 
 
@@ -458,6 +608,21 @@ def _normalize_crop_code(value: object) -> int:
 
 def _build_request_payload(query: Mapping[str, object]) -> tuple[dict[str, object], dict[str, object]]:
     draft = dict(query)
+    region_raw = str(draft.get("region_id") or "").strip()
+    variety = str(draft.get("variety") or "").strip()
+    resolved_region_id = _resolve_region_id_for_payload(region_raw)
+    variety_record, matched_by_region = _resolve_variety_metadata(
+        variety,
+        region_raw,
+        resolved_region_id,
+    )
+    if variety_record:
+        if not str(draft.get("culti_type") or "").strip():
+            variety_culti_type = variety_record.get("culti_type")
+            if variety_culti_type not in (None, ""):
+                draft["culti_type"] = variety_culti_type
+    elif variety and region_raw and matched_by_region:
+        raise RuntimeError(f"品种 {variety} 未在 {region_raw} 审定。")
     missing = [
         field
         for field in ("variety", "culti_type", "planting_method")
@@ -471,11 +636,17 @@ def _build_request_payload(query: Mapping[str, object]) -> tuple[dict[str, objec
     culti_type = _normalize_culti_type_code(draft.get("culti_type"))
     if culti_type is None:
         raise RuntimeError("无法解析稻作类型代码。")
-    sub_type = _fetch_variety_sub_type(str(draft.get("variety") or "").strip())
+    sub_type = None
+    if variety_record:
+        sub_type = _parse_int_like(variety_record.get("sub_type"))
+        if sub_type is None:
+            raw_sub_type = str(variety_record.get("sub_type") or "").strip()
+            if raw_sub_type:
+                sub_type = _resolve_code("sub_type", raw_sub_type)
+    if sub_type is None:
+        sub_type = _fetch_variety_sub_type(variety)
     if sub_type is None:
         raise RuntimeError(f"未找到品种亚种类型: {draft.get('variety')}")
-    region_raw = str(draft.get("region_id") or "").strip()
-    resolved_region_id = _resolve_region_id_for_payload(region_raw)
     farm_id: Optional[int] = None
     if region_raw and resolved_region_id is None:
         raise RuntimeError(f"暂不支持该区域的播期推荐：{region_raw}")
@@ -512,15 +683,26 @@ def _build_request_payload(query: Mapping[str, object]) -> tuple[dict[str, objec
 def lookup_sowing_suitability(prompt: str) -> ToolInvocation:
     text = str(prompt or "")
     draft = _build_query_from_prompt(text)
-    missing = [
-        field
-        for field in ("variety", "culti_type", "planting_method")
-        if not str(draft.get(field) or "").strip()
-    ]
-    if missing:
-        return _build_followup(text, draft=draft, missing=missing)
     raw_variety = str(draft.get("variety") or "").strip()
-    if raw_variety and _fetch_variety_sub_type(raw_variety) is None:
+    raw_region = str(draft.get("region_id") or "").strip()
+    resolved_region_id = _resolve_region_id_for_payload(raw_region)
+    variety_record, matched_by_region = _resolve_variety_metadata(
+        raw_variety,
+        raw_region,
+        resolved_region_id,
+    )
+    if raw_variety and variety_record:
+        if not str(draft.get("culti_type") or "").strip():
+            variety_culti_type = variety_record.get("culti_type")
+            if variety_culti_type not in (None, ""):
+                draft["culti_type"] = variety_culti_type
+    elif raw_variety and raw_region and matched_by_region:
+        return ToolInvocation(
+            name="sowing_suitability_lookup",
+            message=f"品种 {raw_variety} 未在 {raw_region} 审定。",
+            data={"draft": draft},
+        )
+    if raw_variety and _fetch_variety_sub_type(raw_variety) is None and not variety_record:
         query_text = _extract_query_text(text)
         exact_variety = find_exact_variety_in_text(raw_variety) or find_exact_variety_in_text(
             query_text
@@ -535,6 +717,13 @@ def lookup_sowing_suitability(prompt: str) -> ToolInvocation:
                 return _build_variety_candidate_followup(
                     text, draft=draft, candidates=candidates
                 )
+    missing = [
+        field
+        for field in ("variety", "culti_type", "planting_method")
+        if not str(draft.get(field) or "").strip()
+    ]
+    if missing:
+        return _build_followup(text, draft=draft, missing=missing)
     try:
         request_payload, resolved = _build_request_payload(draft)
     except ValueError as exc:

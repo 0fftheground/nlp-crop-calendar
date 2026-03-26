@@ -20,6 +20,15 @@ cases:
       action: workflow
       name: crop_calendar_workflow
 
+  - id: route_crop_calendar_transplant_scheme
+    gate: blocking
+    description: 用户要建立某品种在指定地区的移栽方案，这是生成完整种植/栽培方案，不应被 weather_lookup 的“移栽适宜度”劫持。
+    input:
+      prompt: 我想建立一个在湖南常德种植的湘早籼24号的移栽方案
+    expected:
+      action: workflow
+      name: crop_calendar_workflow
+
   - id: route_growth_stage_lookup
     gate: blocking
     description: 用户是在查询已有计划的生育期结果，不再走 workflow，而应路由到 growth_stage_lookup。

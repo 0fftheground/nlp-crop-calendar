@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -257,6 +258,170 @@ class PlannerRouterTests(unittest.TestCase):
         mocked_plan.assert_called_once()
         self.assertIsNone(self.router._pending_store.get("s-pending-new-question"))
 
+    def test_pending_save_confirmation_new_question_does_not_resume(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        self.router._pending_store.set(
+            "s-save-confirm-new-question",
+            {
+                "mode": "workflow",
+                "workflow_name": "crop_calendar_workflow",
+                "draft": {"region_id": "常德"},
+                "missing_fields": ["save_confirmation"],
+                "followup_count": 0,
+                "pending_message": "是否保存该方案？请回复“是/否”。",
+                "pending_kind": "confirmation",
+            },
+        )
+        plan = ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input={
+                "region": "常德",
+                "start_date": "2026-03-23",
+                "end_date": "2026-03-29",
+                "year": 2026,
+            },
+            response="ok",
+        )
+        tool_payload = ToolInvocation(name="weather_lookup", message="ok", data={})
+        with patch.object(self.router, "_resume_pending") as mocked_resume:
+            with patch.object(
+                self.router._intent_router, "plan", return_value=plan
+            ) as mocked_plan:
+                with patch(
+                    "src.agent.router.execute_tool", return_value=tool_payload
+                ) as mocked_execute:
+                    result = self.router.handle(
+                        UserRequest(
+                            prompt="下周适合打药嘛",
+                            session_id="s-save-confirm-new-question",
+                        )
+                    )
+
+        self.assertEqual(result.mode, "tool")
+        mocked_resume.assert_not_called()
+        mocked_plan.assert_called_once()
+        mocked_execute.assert_called_once()
+        self.assertIsNone(self.router._pending_store.get("s-save-confirm-new-question"))
+
+    def test_pending_save_confirmation_yes_still_resumes(self) -> None:
+        from src.schemas.models import HandleResponse, UserRequest, WorkflowResponse
+
+        self.router._pending_store.set(
+            "s-save-confirm-yes",
+            {
+                "mode": "workflow",
+                "workflow_name": "crop_calendar_workflow",
+                "draft": {"region_id": "常德"},
+                "missing_fields": ["save_confirmation"],
+                "followup_count": 0,
+                "pending_message": "是否保存该方案？请回复“是/否”。",
+                "pending_kind": "confirmation",
+            },
+        )
+        pending_response = HandleResponse(
+            mode="workflow",
+            plan=WorkflowResponse(message="已保存。"),
+        )
+        with patch.object(
+            self.router, "_resume_pending", return_value=pending_response
+        ) as mocked_resume:
+            with patch.object(self.router._intent_router, "plan") as mocked_plan:
+                result = self.router.handle(
+                    UserRequest(prompt="是", session_id="s-save-confirm-yes")
+                )
+
+        self.assertEqual(result.mode, "workflow")
+        mocked_resume.assert_called_once()
+        mocked_plan.assert_not_called()
+
+    def test_ambiguous_thread_ownership_returns_clarification(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.agent.session_context import ContextualPlanCandidate
+        from src.schemas.models import UserRequest
+
+        candidate = ContextualPlanCandidate(
+            plan=ActionPlan(
+                action="tool",
+                name="weather_lookup",
+                input={
+                    "region": "常德",
+                    "start_date": "2026-03-23",
+                    "end_date": "2026-03-29",
+                    "year": 2026,
+                },
+            ),
+            confidence=0.8,
+            kind="tool",
+            name="weather_lookup",
+        )
+        standalone_plan = ActionPlan(
+            action="tool",
+            name="sowing_suitability_lookup",
+            input={"query": "这个呢"},
+        )
+        with patch.object(
+            self.router, "_get_contextual_candidate", return_value=candidate
+        ):
+            with patch.object(
+                self.router._intent_router, "plan", return_value=standalone_plan
+            ):
+                with patch("src.agent.router.execute_tool") as mocked_execute:
+                    result = self.router.handle(
+                        UserRequest(prompt="这个呢", session_id="s-clarify")
+                    )
+
+        self.assertEqual(result.mode, "none")
+        self.assertIsNotNone(result.plan)
+        self.assertIn("我不确定你是想继续当前的天气/农事适宜度查询", result.plan.message)
+        self.assertIn("继续当前任务", result.plan.message)
+        mocked_execute.assert_not_called()
+
+    def test_clarification_pending_can_choose_new_task(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        self.router._pending_store.set(
+            "s-clarification-resume",
+            {
+                "mode": "clarification",
+                "pending_kind": "clarification",
+                "options": ["继续当前任务", "开启新任务"],
+                "pending_message": "请回复“继续当前任务”或“开启新任务”。",
+                "contextual_plan": ActionPlan(
+                    action="tool",
+                    name="weather_lookup",
+                    input={
+                        "region": "常德",
+                        "start_date": "2026-03-23",
+                        "end_date": "2026-03-29",
+                        "year": 2026,
+                    },
+                ).model_dump(mode="json"),
+                "standalone_plan": ActionPlan(
+                    action="tool",
+                    name="sowing_suitability_lookup",
+                    input={"query": "这个呢"},
+                ).model_dump(mode="json"),
+            },
+        )
+        tool_payload = ToolInvocation(
+            name="sowing_suitability_lookup",
+            message="ok",
+            data={},
+        )
+        with patch("src.agent.router.execute_tool", return_value=tool_payload) as mocked_execute:
+            result = self.router.handle(
+                UserRequest(prompt="开启新任务", session_id="s-clarification-resume")
+            )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "sowing_suitability_lookup")
+        self.assertEqual(mocked_execute.call_args[0][0], "sowing_suitability_lookup")
+        self.assertIsNone(self.router._pending_store.get("s-clarification-resume"))
+
     def test_fallback_from_planner_updates_session_context_from_response(self) -> None:
         from src.schemas.models import HandleResponse, ToolInvocation, UserRequest
 
@@ -351,6 +516,88 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "sowing_suitability_lookup")
         self.assertEqual(mocked_execute.call_args[0][0], "sowing_suitability_lookup")
+
+    def test_llm_only_mode_rewrites_travel_weather_query_to_none(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import UserRequest
+
+        self.router._intent_mode = "llm_only"
+        plan = ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input={"region": "湖南常德"},
+            reason="llm:weather",
+        )
+        with patch.object(self.router._planner, "plan", return_value=plan):
+            with patch("src.agent.router.execute_tool") as mocked_execute:
+                result = self.router.handle(
+                    UserRequest(prompt="湖南常德下周适合旅游吗", session_id="s-llm-travel")
+                )
+
+        self.assertEqual(result.mode, "none")
+        self.assertIsNotNone(result.plan)
+        self.assertEqual(result.plan.message, "未识别到与农事相关的需求。")
+        mocked_execute.assert_not_called()
+
+    def test_weather_plan_execution_infers_requested_operations_from_prompt(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        plan = ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input={
+                "region": "湖南常德",
+                "start_date": "2026-03-30",
+                "end_date": "2026-04-05",
+                "year": 2026,
+            },
+        )
+        tool_payload = ToolInvocation(name="weather_lookup", message="ok", data={})
+        with patch.object(self.router._intent_router, "plan", return_value=plan):
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = self.router.handle(
+                    UserRequest(prompt="湖南常德下周哪天最适合施肥", session_id="s-weather-op-infer")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        payload = mocked_execute.call_args[0][1]
+        parsed = json.loads(payload)
+        self.assertEqual(parsed.get("requested_operations"), ["施肥"])
+
+    def test_crop_calendar_scheme_is_not_hijacked_by_weather_keywords(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import UserRequest, WorkflowResponse
+
+        self.router._intent_mode = "llm_only"
+        plan = ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input={"region": "湖南常德", "requested_operations": ["移栽"]},
+            reason="llm:weather",
+        )
+        plan_payload = WorkflowResponse(message="done")
+        with patch.object(self.router._planner, "plan", return_value=plan):
+            with patch.object(
+                self.router,
+                "_run_named_workflow",
+                return_value=plan_payload,
+            ) as mocked_run:
+                with patch("src.agent.router.execute_tool") as mocked_execute:
+                    result = self.router.handle(
+                        UserRequest(
+                            prompt="我想建立一个在湖南常德种植的湘早籼24号的移栽方案",
+                            session_id="s-crop-calendar-transplant-scheme",
+                        )
+                    )
+
+        self.assertEqual(result.mode, "workflow")
+        self.assertIsNotNone(result.plan)
+        self.assertEqual(result.plan.message, "done")
+        mocked_run.assert_called_once()
+        mocked_execute.assert_not_called()
 
     def test_plan_list_context_can_resume_delete_tool(self) -> None:
         from src.schemas.models import ToolInvocation, UserRequest

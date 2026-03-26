@@ -101,6 +101,8 @@ class SowingSuitabilityServiceTests(unittest.TestCase):
                                 return list(sql_data["dict_rows"].get("culti_type", []))
                             if "sub_type" in text:
                                 return list(sql_data["dict_rows"].get("sub_type", []))
+                        if 'AS approve_region' in text and 'WHERE "name" = ' in text:
+                            return list(sql_data.get("variety_rows", []))
                         if 'AS sub_type' in text and 'WHERE "name" = ' in text:
                             return list(sql_data.get("sub_type_rows", []))
                         if "ILIKE" in text:
@@ -148,6 +150,121 @@ class SowingSuitabilityServiceTests(unittest.TestCase):
                 if scenario["expected"].get("resolved"):
                     for key, value in scenario["expected"]["resolved"].items():
                         self.assertEqual(result.data.get("resolved", {}).get(key), value)
+
+    def test_lookup_sowing_suitability_infers_culti_type_from_variety_region_record(self) -> None:
+        class StubConfig:
+            agri_db_url = "postgresql://example"
+            business_api_key = None
+            business_api_base_url = "http://example.test"
+            sowing_suitability_api_url = None
+            default_farm_id = "12"
+            db_region_lookup_candidates = []
+            region_db_table = None
+
+        class StubResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self):
+                return {"code": 200, "message": "success", "data": {"suitDate": []}}
+
+        class StubHttp:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def post(self, url, *, json_payload, headers=None, timeout=10.0):
+                self.calls.append(json_payload)
+                return StubResponse()
+
+        class StubSql:
+            def fetch_all(self, url, sql, params=()):
+                text = " ".join(str(item) for item in (sql, params))
+                if "SELECT code, code_name FROM agri_code_dict" in text:
+                    if "sowingmtd" in text:
+                        return [{"code": 0, "code_name": "直播"}]
+                    if "culti_type" in text:
+                        return [{"code": 4, "code_name": "一季晚稻"}]
+                if 'AS approve_region' in text and 'WHERE "name" = ' in text:
+                    return [
+                        {
+                            "name": "美香占2号",
+                            "sub_type": 9,
+                            "culti_type": "一季晚稻",
+                            "approve_region": "湖南省",
+                            "approve_year": 2024,
+                        }
+                    ]
+                if "ILIKE" in text:
+                    return [{"region_id": 430100, "region_name": "长沙市"}]
+                return []
+
+            def quote_identifier(self, name: str) -> str:
+                return f'"{name}"'
+
+        http = StubHttp()
+        configure_sowing_suitability_ports(
+            config_port=type("P", (), {"get": staticmethod(lambda: StubConfig())})(),
+            http_port=http,
+            sql_port=StubSql(),
+        )
+
+        result = lookup_sowing_suitability("美香占2号在长沙什么时候适合播种，直播")
+
+        self.assertEqual(result.name, "sowing_suitability_lookup")
+        self.assertEqual(result.message, "success")
+        self.assertEqual(len(http.calls), 1)
+        self.assertEqual(
+            http.calls[0],
+            {
+                "region_id": 430100,
+                "culti_type": 4,
+                "sowing_method": 0,
+                "sub_type": 9,
+                "crop": 0,
+            },
+        )
+        self.assertEqual(result.data.get("resolved", {}).get("culti_type"), "一季晚稻")
+
+    def test_lookup_sowing_suitability_returns_unapproved_region_message_for_variety(self) -> None:
+        class StubConfig:
+            agri_db_url = "postgresql://example"
+            business_api_key = None
+            business_api_base_url = "http://example.test"
+            sowing_suitability_api_url = None
+            default_farm_id = "12"
+            db_region_lookup_candidates = []
+            region_db_table = None
+
+        class StubSql:
+            def fetch_all(self, url, sql, params=()):
+                text = " ".join(str(item) for item in (sql, params))
+                if "SELECT code, code_name FROM agri_code_dict" in text:
+                    if "sowingmtd" in text:
+                        return [{"code": 0, "code_name": "直播"}]
+                if 'AS approve_region' in text and 'WHERE "name" = ' in text:
+                    return [
+                        {
+                            "name": "美香占2号",
+                            "sub_type": 9,
+                            "culti_type": "一季晚稻",
+                            "approve_region": "湖南省",
+                            "approve_year": 2024,
+                        }
+                    ]
+                return []
+
+            def quote_identifier(self, name: str) -> str:
+                return f'"{name}"'
+
+        configure_sowing_suitability_ports(
+            config_port=type("P", (), {"get": staticmethod(lambda: StubConfig())})(),
+            sql_port=StubSql(),
+        )
+
+        result = lookup_sowing_suitability("美香占2号在芜湖什么时候适合播种，直播")
+
+        self.assertEqual(result.name, "sowing_suitability_lookup")
+        self.assertEqual(result.message, "品种 美香占2号 未在 芜湖 审定。")
 
     def test_lookup_sowing_suitability_prefers_llm_extraction(self) -> None:
         class StubConfig:

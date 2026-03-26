@@ -8,6 +8,7 @@ from ..schemas.models import ToolInvocation
 
 _FOLLOWUP_INDEX_RE = re.compile(r"^第?\s*(\d+)\s*(?:个|条|项)?$")
 _FOLLOWUP_QUOTED_RE = re.compile(r"[\"“”']([^\"“”']+)[\"“”']")
+_CONFIRMATION_FIELD_SUFFIX = "_confirmation"
 
 
 def get_followup_draft(payload: Optional[Mapping[str, object]]) -> object:
@@ -48,6 +49,20 @@ def get_followup_count(payload: Optional[Mapping[str, object]]) -> int:
         return int(payload.get("followup_count") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def get_followup_kind(payload: Optional[Mapping[str, object]]) -> str:
+    if not isinstance(payload, Mapping):
+        return "field_fill"
+    raw = str(payload.get("pending_kind") or "").strip().lower()
+    if raw in {"field_fill", "option_select", "confirmation", "clarification"}:
+        return raw
+    if payload.get("strict_options_only"):
+        return "option_select"
+    missing = get_followup_missing_fields(payload)
+    if missing and all(_is_confirmation_field(field) for field in missing):
+        return "confirmation"
+    return "field_fill"
 
 
 def parse_followup_index(text: str) -> Optional[int]:
@@ -214,6 +229,7 @@ def build_tool_followup_data(
     options: Optional[Iterable[object]] = None,
     choice_hint: bool = False,
     strict_options_only: bool = False,
+    pending_kind: Optional[str] = None,
     source: Optional[str] = None,
     extra: Optional[Mapping[str, object]] = None,
 ) -> dict[str, Any]:
@@ -243,6 +259,13 @@ def build_tool_followup_data(
         payload["strict_options_only"] = True
     elif "strict_options_only" in payload:
         payload["strict_options_only"] = bool(payload["strict_options_only"])
+    resolved_kind = _normalize_pending_kind(
+        pending_kind,
+        strict_options_only=bool(payload.get("strict_options_only")),
+        missing_fields=payload["missing_fields"],
+    )
+    if resolved_kind:
+        payload["pending_kind"] = resolved_kind
     return payload
 
 
@@ -257,6 +280,7 @@ def build_tool_followup_invocation(
     options: Optional[Iterable[object]] = None,
     choice_hint: bool = False,
     strict_options_only: bool = False,
+    pending_kind: Optional[str] = None,
     source: Optional[str] = None,
     extra: Optional[Mapping[str, object]] = None,
 ) -> ToolInvocation:
@@ -271,6 +295,7 @@ def build_tool_followup_invocation(
             options=options,
             choice_hint=choice_hint,
             strict_options_only=strict_options_only,
+            pending_kind=pending_kind,
             source=source,
             extra=extra,
         ),
@@ -284,6 +309,7 @@ def build_workflow_followup_update(
     followup_count: Optional[int] = None,
     pending_message: Optional[str] = None,
     options: Optional[Iterable[object]] = None,
+    pending_kind: Optional[str] = None,
     extra: Optional[Mapping[str, object]] = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = dict(extra or {})
@@ -302,6 +328,13 @@ def build_workflow_followup_update(
         built_options = build_followup_options(pending_message, draft_mapping)
         if built_options:
             payload["options"] = built_options
+    resolved_kind = _normalize_pending_kind(
+        pending_kind,
+        strict_options_only=bool(payload.get("strict_options_only")),
+        missing_fields=list(payload.get("missing_fields") or []),
+    )
+    if resolved_kind:
+        payload["pending_kind"] = resolved_kind
     return payload
 
 
@@ -337,3 +370,21 @@ def _dedupe_options(options: Iterable[str]) -> list[str]:
         if text and text not in unique:
             unique.append(text)
     return unique
+
+
+def _is_confirmation_field(field: object) -> bool:
+    text = str(field or "").strip()
+    return bool(text) and text.endswith(_CONFIRMATION_FIELD_SUFFIX)
+
+
+def _normalize_pending_kind(
+    pending_kind: Optional[str], *, strict_options_only: bool, missing_fields: list[str]
+) -> str:
+    text = str(pending_kind or "").strip().lower()
+    if text in {"field_fill", "option_select", "confirmation", "clarification"}:
+        return text
+    if strict_options_only:
+        return "option_select"
+    if missing_fields and all(_is_confirmation_field(field) for field in missing_fields):
+        return "confirmation"
+    return "field_fill"

@@ -21,6 +21,11 @@ from ..observability.logging_utils import (
     set_trace_id,
     summarize_text,
 )
+from ..observability.interaction_context import (
+    build_initial_interaction_context,
+    reset_interaction_context,
+    set_interaction_context,
+)
 from ..observability.otel import (
     init_otel,
     instrument_fastapi,
@@ -101,8 +106,21 @@ async def handle_request(request: UserRequest):
     router = get_router()
     store = get_interaction_store()
     started_at = time.time()
-    trace_id = uuid4().hex
+    request_id = uuid4().hex
+    trace_id = request_id
+    session_id = request.session_id or request.user_id or "default"
+    latest_lineage = store.get_latest_session_lineage(session_id)
     token = set_trace_id(trace_id)
+    interaction_token = set_interaction_context(
+        build_initial_interaction_context(
+            request_id=request_id,
+            session_id=session_id,
+            previous_interaction_id=(
+                latest_lineage.get("interaction_id") if latest_lineage else None
+            ),
+            previous_thread_id=(latest_lineage.get("thread_id") if latest_lineage else None),
+        )
+    )
     latency_ms = 0
     try:
         span_attrs = {
@@ -110,12 +128,20 @@ async def handle_request(request: UserRequest):
             "request.user_id": request.user_id,
             "request.region": request.region,
             "request.prompt_len": len(request.prompt or ""),
+            "request.request_id": request_id,
         }
         with start_span("request.handle", attributes=span_attrs) as span:
             try:
                 log_event(
                     "request_received",
                     input_schema=request.model_dump(mode="json"),
+                    request_id=request_id,
+                    parent_interaction_id=(
+                        latest_lineage.get("interaction_id") if latest_lineage else None
+                    ),
+                    previous_thread_id=(
+                        latest_lineage.get("thread_id") if latest_lineage else None
+                    ),
                 )
                 response = router.handle(request)
                 latency_ms = int((time.time() - started_at) * 1000)
@@ -133,6 +159,7 @@ async def handle_request(request: UserRequest):
         _append_error_log(str(exc), tb)
         print(f"handle_request failed: {exc}\n{tb}")
         reset_trace_id(token)
+        reset_interaction_context(interaction_token)
         raise HTTPException(status_code=500, detail={"error": str(exc), "traceback": tb})
     try:
         store.record(request, response, latency_ms)
@@ -143,7 +170,6 @@ async def handle_request(request: UserRequest):
         message = response.tool.message
     elif response.plan:
         message = response.plan.message
-    session_id = request.session_id or request.user_id
     log_event(
         "response_ready",
         mode=response.mode,
@@ -151,7 +177,8 @@ async def handle_request(request: UserRequest):
         latency_ms=latency_ms,
         session_id=session_id,
         user_id=request.user_id,
+        request_id=request_id,
     )
     reset_trace_id(token)
+    reset_interaction_context(interaction_token)
     return response
-

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from datetime import date, datetime
-from typing import Mapping, Optional
+from typing import Callable, Mapping, Optional
 
 from ..application.services.sowing_suitability_service import (
     build_contextual_sowing_query,
+)
+from .field_updates import (
+    extract_planting_field_overrides,
+    extract_region_followup_hint,
 )
 from ..application.services.weather_service import (
     extract_weather_operations,
@@ -17,21 +21,19 @@ from ..domain.date_parser import (
     extract_explicit_dates,
     extract_relative_date_range,
 )
-from ..domain.planting import extract_planting_details
 from ..infra.variety_store import find_exact_variety_in_text
 from ..schemas.models import ToolInvocation, WorkflowResponse
 from .followup import get_followup_missing_fields, parse_followup_index
-from .intent_boundaries import looks_like_sowing_query
+from .intent_boundaries import (
+    looks_like_crop_calendar_query,
+    looks_like_non_agri_life_query,
+    looks_like_sowing_query,
+)
 from .planner import ActionPlan
 
 _TOOL_CONTEXT_KEY = "tool_contexts"
 _WORKFLOW_CONTEXT_KEY = "workflow_contexts"
 _LAST_CONTEXT_KEY = "last_context"
-_REGION_PATTERNS = (
-    r"^在([\u4e00-\u9fff]{2,20})(?:呢|吗|怎么样|如何|可以吗)?$",
-    r"^到([\u4e00-\u9fff]{2,20})(?:呢|吗|怎么样|如何|可以吗)?$",
-    r"^([\u4e00-\u9fff]{2,20})(?:呢|吗|怎么样|如何|可以吗)$",
-)
 _YEAR_RE = re.compile(r"(20\d{2})年")
 _VARIETY_FOLLOWUP_TOKENS = (
     "审定",
@@ -129,6 +131,21 @@ _PLAN_SELF_REFERENCE_TOKENS = (
     "这个",
     "该",
 )
+_EXPLICIT_THREAD_SWITCH_TOKENS = (
+    "我想",
+    "帮我",
+    "请问",
+    "查询",
+    "查看",
+    "查一下",
+    "帮我查",
+    "生成",
+    "建立",
+    "创建",
+    "新增",
+    "删除",
+    "列出",
+)
 _CHINESE_INDEX_MAP = {
     "一": 1,
     "二": 2,
@@ -151,6 +168,20 @@ class ContextualPlanCandidate:
     kind: str
     name: str
     evidence: tuple[str, ...] = ()
+    adapter_task_type: str = ""
+    updatable_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SessionContextAdapter:
+    kind: str
+    name: str
+    task_type: str
+    updatable_fields: tuple[str, ...] = ()
+    extract_context: Optional[Callable[[object], Optional[dict[str, object]]]] = None
+    build_candidate: Optional[
+        Callable[[str, Mapping[str, object]], Optional[ContextualPlanCandidate]]
+    ] = None
 
 
 def build_contextual_plan(
@@ -168,144 +199,63 @@ def build_contextual_candidate(
     text = str(prompt or "").strip()
     if not text:
         return None
-    for kind, name, context in _iter_context_candidates(session_payload):
-        if kind == "tool" and name == "weather_lookup":
-            payload = _build_contextual_weather_query(text, context)
-            if payload:
-                return ContextualPlanCandidate(
-                    plan=ActionPlan(
-                        action="tool",
-                        name=name,
-                        input=payload,
-                        reason=f"session_context:{name}",
-                    ),
-                    confidence=_score_weather_contextual_candidate(text, payload),
-                    kind=kind,
-                    name=name,
-                    evidence=_collect_weather_candidate_evidence(text, payload),
-                )
-        if kind == "tool" and name == "variety_lookup":
-            query = _build_contextual_variety_query(text, context)
-            if query:
-                return ContextualPlanCandidate(
-                    plan=ActionPlan(
-                        action="tool",
-                        name=name,
-                        input={"query": query},
-                        reason=f"session_context:{name}",
-                    ),
-                    confidence=_score_variety_contextual_candidate(text),
-                    kind=kind,
-                    name=name,
-                    evidence=_collect_variety_candidate_evidence(text),
-                )
-        if kind == "tool" and name == "sowing_suitability_lookup":
-            if _looks_like_weather_query(text):
-                continue
-            payload = build_contextual_sowing_query(text, context)
-            if payload:
-                return ContextualPlanCandidate(
-                    plan=ActionPlan(
-                        action="tool",
-                        name=name,
-                        input=payload,
-                        reason=f"session_context:{name}",
-                    ),
-                    confidence=_score_sowing_contextual_candidate(text, payload),
-                    kind=kind,
-                    name=name,
-                    evidence=_collect_sowing_candidate_evidence(text, payload),
-                )
-        if kind == "tool" and name == "plant_plan_list_active":
-            payload = _build_contextual_plan_delete_input(text, context)
-            if payload:
-                return ContextualPlanCandidate(
-                    plan=ActionPlan(
-                        action="tool",
-                        name="plant_plan_delete",
-                        input=payload,
-                        reason="session_context:plant_plan_list_active->plant_plan_delete",
-                    ),
-                    confidence=_score_plan_action_contextual_candidate(text),
-                    kind=kind,
-                    name=name,
-                    evidence=_collect_plan_delete_candidate_evidence(text, payload),
-                )
-            query = _build_contextual_growth_prompt_from_plan_context(text, context)
-            if query:
-                return ContextualPlanCandidate(
-                    plan=ActionPlan(
-                        action="tool",
-                        name="growth_stage_lookup",
-                        input={"query": query},
-                        reason="session_context:plant_plan_list_active->growth_stage_lookup",
-                    ),
-                    confidence=_score_plan_action_contextual_candidate(text),
-                    kind=kind,
-                    name=name,
-                    evidence=_collect_growth_stage_candidate_evidence(text, query),
-                )
-        if (kind == "tool" and name == "growth_stage_lookup") or (
-            kind == "workflow" and name == "growth_stage_query_workflow"
-        ):
-            query = _build_contextual_growth_prompt(text, context)
-            if query:
-                return ContextualPlanCandidate(
-                    plan=ActionPlan(
-                        action="tool",
-                        name="growth_stage_lookup",
-                        input={"query": query},
-                        reason="session_context:growth_stage_lookup",
-                    ),
-                    confidence=_score_workflow_contextual_candidate(text),
-                    kind=kind,
-                    name=name,
-                    evidence=_collect_workflow_candidate_evidence(text),
-                )
-        if kind == "workflow" and name == "crop_calendar_workflow":
-            payload = _build_contextual_plan_delete_input(text, context)
-            if payload:
-                return ContextualPlanCandidate(
-                    plan=ActionPlan(
-                        action="tool",
-                        name="plant_plan_delete",
-                        input=payload,
-                        reason="session_context:crop_calendar_workflow->plant_plan_delete",
-                    ),
-                    confidence=_score_plan_action_contextual_candidate(text),
-                    kind=kind,
-                    name=name,
-                    evidence=_collect_plan_delete_candidate_evidence(text, payload),
-                )
-            growth_query = _build_contextual_growth_prompt_from_plan_context(text, context)
-            if growth_query:
-                return ContextualPlanCandidate(
-                    plan=ActionPlan(
-                        action="tool",
-                        name="growth_stage_lookup",
-                        input={"query": growth_query},
-                        reason="session_context:crop_calendar_workflow->growth_stage_lookup",
-                    ),
-                    confidence=_score_plan_action_contextual_candidate(text),
-                    kind=kind,
-                    name=name,
-                    evidence=_collect_growth_stage_candidate_evidence(text, growth_query),
-                )
-            query = _build_contextual_crop_calendar_prompt(text, context)
-            if query:
-                return ContextualPlanCandidate(
-                    plan=ActionPlan(
-                        action="workflow",
-                        name=name,
-                        input={"prompt": query},
-                        reason=f"session_context:{name}",
-                    ),
-                    confidence=_score_workflow_contextual_candidate(text),
-                    kind=kind,
-                    name=name,
-                    evidence=_collect_workflow_candidate_evidence(text),
-                )
+    for adapter, context in _iter_context_candidates(session_payload):
+        if adapter.build_candidate is None:
+            continue
+        candidate = adapter.build_candidate(text, context)
+        if candidate is not None:
+            return replace(
+                candidate,
+                adapter_task_type=adapter.task_type,
+                updatable_fields=adapter.updatable_fields,
+            )
     return None
+
+
+def is_explicit_thread_switch_prompt(prompt: str) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+    if looks_like_non_agri_life_query(text):
+        return True
+    if looks_like_crop_calendar_query(text) or looks_like_sowing_query(text):
+        return True
+    if len(text) >= 10 and any(token in text for token in _EXPLICIT_THREAD_SWITCH_TOKENS):
+        return True
+    if len(text) >= 12 and (
+        _looks_like_weather_query(text)
+        or _looks_like_growth_stage_query(text)
+        or _looks_like_plan_delete_query(text)
+    ):
+        return True
+    return False
+
+
+def build_thread_ownership_clarification(
+    prompt: str,
+    contextual_candidate: Optional[ContextualPlanCandidate],
+    standalone_plan: Optional[ActionPlan],
+) -> Optional[str]:
+    text = str(prompt or "").strip()
+    if not text or contextual_candidate is None or standalone_plan is None:
+        return None
+    if is_explicit_thread_switch_prompt(text):
+        return None
+    if (
+        standalone_plan.action == contextual_candidate.plan.action
+        and standalone_plan.name == contextual_candidate.plan.name
+    ):
+        return None
+    if len(text) > 16 or parse_followup_index(text) is not None:
+        return None
+    standalone_label = _describe_thread_target(standalone_plan)
+    contextual_label = _describe_thread_target(contextual_candidate.plan)
+    if not standalone_label or not contextual_label:
+        return None
+    return (
+        f"我不确定你是想继续当前的{contextual_label}，还是想改成新的{standalone_label}。"
+        "请回复“继续当前任务”或“开启新任务”。"
+    )
 
 
 def should_short_circuit_contextual_candidate(
@@ -334,9 +284,187 @@ def resolve_session_plan(
     return standalone_plan
 
 
+def list_session_context_adapters() -> tuple[SessionContextAdapter, ...]:
+    return _SESSION_CONTEXT_ADAPTERS
+
+
+def get_session_context_adapter(
+    kind: str, name: str
+) -> Optional[SessionContextAdapter]:
+    if kind == "tool":
+        return _TOOL_CONTEXT_ADAPTERS.get(name)
+    if kind == "workflow":
+        return _WORKFLOW_CONTEXT_ADAPTERS.get(name)
+    return None
+
+
+def _build_weather_contextual_candidate(
+    prompt: str, context: Mapping[str, object]
+) -> Optional[ContextualPlanCandidate]:
+    payload = _build_contextual_weather_query(prompt, context)
+    if not payload:
+        return None
+    return ContextualPlanCandidate(
+        plan=ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input=payload,
+            reason="session_context:weather_lookup",
+        ),
+        confidence=_score_weather_contextual_candidate(prompt, payload),
+        kind="tool",
+        name="weather_lookup",
+        evidence=_collect_weather_candidate_evidence(prompt, payload),
+    )
+
+
+def _build_variety_contextual_candidate(
+    prompt: str, context: Mapping[str, object]
+) -> Optional[ContextualPlanCandidate]:
+    query = _build_contextual_variety_query(prompt, context)
+    if not query:
+        return None
+    return ContextualPlanCandidate(
+        plan=ActionPlan(
+            action="tool",
+            name="variety_lookup",
+            input={"query": query},
+            reason="session_context:variety_lookup",
+        ),
+        confidence=_score_variety_contextual_candidate(prompt),
+        kind="tool",
+        name="variety_lookup",
+        evidence=_collect_variety_candidate_evidence(prompt),
+    )
+
+
+def _build_sowing_contextual_candidate(
+    prompt: str, context: Mapping[str, object]
+) -> Optional[ContextualPlanCandidate]:
+    if _looks_like_weather_query(prompt):
+        return None
+    payload = build_contextual_sowing_query(prompt, context)
+    if not payload:
+        return None
+    return ContextualPlanCandidate(
+        plan=ActionPlan(
+            action="tool",
+            name="sowing_suitability_lookup",
+            input=payload,
+            reason="session_context:sowing_suitability_lookup",
+        ),
+        confidence=_score_sowing_contextual_candidate(prompt, payload),
+        kind="tool",
+        name="sowing_suitability_lookup",
+        evidence=_collect_sowing_candidate_evidence(prompt, payload),
+    )
+
+
+def _build_plan_list_contextual_candidate(
+    prompt: str, context: Mapping[str, object]
+) -> Optional[ContextualPlanCandidate]:
+    payload = _build_contextual_plan_delete_input(prompt, context)
+    if payload:
+        return ContextualPlanCandidate(
+            plan=ActionPlan(
+                action="tool",
+                name="plant_plan_delete",
+                input=payload,
+                reason="session_context:plant_plan_list_active->plant_plan_delete",
+            ),
+            confidence=_score_plan_action_contextual_candidate(prompt),
+            kind="tool",
+            name="plant_plan_list_active",
+            evidence=_collect_plan_delete_candidate_evidence(prompt, payload),
+        )
+    query = _build_contextual_growth_prompt_from_plan_context(prompt, context)
+    if not query:
+        return None
+    return ContextualPlanCandidate(
+        plan=ActionPlan(
+            action="tool",
+            name="growth_stage_lookup",
+            input={"query": query},
+            reason="session_context:plant_plan_list_active->growth_stage_lookup",
+        ),
+        confidence=_score_plan_action_contextual_candidate(prompt),
+        kind="tool",
+        name="plant_plan_list_active",
+        evidence=_collect_growth_stage_candidate_evidence(prompt, query),
+    )
+
+
+def _build_growth_stage_contextual_candidate(
+    prompt: str, context: Mapping[str, object]
+) -> Optional[ContextualPlanCandidate]:
+    query = _build_contextual_growth_prompt(prompt, context)
+    if not query:
+        return None
+    return ContextualPlanCandidate(
+        plan=ActionPlan(
+            action="tool",
+            name="growth_stage_lookup",
+            input={"query": query},
+            reason="session_context:growth_stage_lookup",
+        ),
+        confidence=_score_workflow_contextual_candidate(prompt),
+        kind="tool",
+        name="growth_stage_lookup",
+        evidence=_collect_workflow_candidate_evidence(prompt),
+    )
+
+
+def _build_crop_calendar_contextual_candidate(
+    prompt: str, context: Mapping[str, object]
+) -> Optional[ContextualPlanCandidate]:
+    payload = _build_contextual_plan_delete_input(prompt, context)
+    if payload:
+        return ContextualPlanCandidate(
+            plan=ActionPlan(
+                action="tool",
+                name="plant_plan_delete",
+                input=payload,
+                reason="session_context:crop_calendar_workflow->plant_plan_delete",
+            ),
+            confidence=_score_plan_action_contextual_candidate(prompt),
+            kind="workflow",
+            name="crop_calendar_workflow",
+            evidence=_collect_plan_delete_candidate_evidence(prompt, payload),
+        )
+    growth_query = _build_contextual_growth_prompt_from_plan_context(prompt, context)
+    if growth_query:
+        return ContextualPlanCandidate(
+            plan=ActionPlan(
+                action="tool",
+                name="growth_stage_lookup",
+                input={"query": growth_query},
+                reason="session_context:crop_calendar_workflow->growth_stage_lookup",
+            ),
+            confidence=_score_plan_action_contextual_candidate(prompt),
+            kind="workflow",
+            name="crop_calendar_workflow",
+            evidence=_collect_growth_stage_candidate_evidence(prompt, growth_query),
+        )
+    query = _build_contextual_crop_calendar_prompt(prompt, context)
+    if not query:
+        return None
+    return ContextualPlanCandidate(
+        plan=ActionPlan(
+            action="workflow",
+            name="crop_calendar_workflow",
+            input={"prompt": query},
+            reason="session_context:crop_calendar_workflow",
+        ),
+        confidence=_score_workflow_contextual_candidate(prompt),
+        kind="workflow",
+        name="crop_calendar_workflow",
+        evidence=_collect_workflow_candidate_evidence(prompt),
+    )
+
+
 def _looks_like_weather_query(prompt: str) -> bool:
     text = str(prompt or "").strip()
-    if not text or looks_like_sowing_query(text):
+    if not text or looks_like_sowing_query(text) or looks_like_crop_calendar_query(text):
         return False
     if any(token in text for token in _WEATHER_QUERY_TOKENS):
         return True
@@ -356,7 +484,7 @@ def _score_weather_contextual_candidate(
         score += 0.1
     if payload.get("requested_operations"):
         score += 0.1
-    if payload.get("start_date") and payload.get("end_date"):
+    if _prompt_has_temporal_signal(prompt):
         score += 0.1
     return min(score, 0.98)
 
@@ -467,113 +595,108 @@ def _collect_workflow_candidate_evidence(prompt: str) -> tuple[str, ...]:
     return tuple(evidence)
 
 
-def extract_session_context_from_tool(
-    tool: Optional[ToolInvocation],
-) -> Optional[tuple[str, dict[str, object]]]:
-    if tool is None:
+def _extract_weather_context(tool: object) -> Optional[dict[str, object]]:
+    if not isinstance(tool, ToolInvocation):
         return None
     data = tool.data or {}
-    if get_followup_missing_fields(data):
-        return None
-    if tool.name == "weather_lookup":
-        context: dict[str, object] = {}
-        region = str(data.get("region") or "").strip()
-        if region and not region.startswith("farm:"):
-            context["region"] = region
-        for key in ("start_date", "end_date", "granularity"):
-            value = data.get(key)
-            if value not in (None, ""):
-                context[key] = value
-        include_advice = data.get("include_advice")
-        if isinstance(include_advice, bool):
-            context["include_advice"] = include_advice
-        requested_operations = data.get("requested_operations")
-        if isinstance(requested_operations, list):
-            operations = [
-                str(item).strip()
-                for item in requested_operations
-                if str(item).strip()
-            ]
-            if operations:
-                context["requested_operations"] = operations
-        if context.get("start_date") and context.get("end_date"):
-            return tool.name, context
-        return None
-    if tool.name == "variety_lookup":
-        variety = str(data.get("variety") or "").strip()
-        selected = data.get("selected")
-        if not variety and isinstance(selected, Mapping):
-            variety = str(selected.get("品种名称") or "").strip()
-        if not variety:
-            return None
-        context = {"variety": variety}
-        crop = str(data.get("crop") or "").strip()
-        if crop:
-            context["crop"] = crop
-        region_choice = str(data.get("region_choice") or "").strip()
-        if region_choice and region_choice != "__all__":
-            context["region_choice"] = region_choice
-        if isinstance(selected, Mapping):
-            context["selected"] = dict(selected)
-        return tool.name, context
-    if tool.name == "sowing_suitability_lookup":
-        resolved = data.get("resolved")
-        if isinstance(resolved, Mapping):
-            context = dict(resolved)
-            farm_id = context.get("farm_id")
-            if farm_id not in (None, ""):
-                context["farm_id"] = str(farm_id).strip()
-            return tool.name, context
-    if tool.name == "plant_plan_list_active":
-        raw_plans = data.get("plans")
-        if not isinstance(raw_plans, list):
-            return None
-        plans: list[dict[str, object]] = []
-        for item in raw_plans:
-            if not isinstance(item, Mapping):
-                continue
-            plan_id = item.get("plan_id")
-            if plan_id in (None, ""):
-                continue
-            plan_payload: dict[str, object] = {"plan_id": str(plan_id).strip()}
-            plan_name = str(item.get("plan_name") or "").strip()
-            if plan_name:
-                plan_payload["plan_name"] = plan_name
-            planting = item.get("planting")
-            if isinstance(planting, Mapping) and planting:
-                plan_payload["planting"] = dict(planting)
-            plans.append(plan_payload)
-        if plans:
-            return tool.name, {"plans": plans}
-        return None
-    if tool.name == "plant_plan_delete":
-        plan_id = data.get("plant_season_id")
-        if plan_id not in (None, ""):
-            return tool.name, {"plant_season_id": str(plan_id).strip()}
-    if tool.name == "growth_stage_lookup":
-        context: dict[str, object] = {}
-        plan_id = data.get("plan_id")
-        if plan_id not in (None, ""):
-            context["plan_id"] = str(plan_id).strip()
-        plan_filters = data.get("plan_filters")
-        if isinstance(plan_filters, Mapping) and plan_filters:
-            context["plan_filters"] = dict(plan_filters)
-        planting = _reduce_planting_context(data.get("planting"))
-        if planting:
-            context["planting"] = planting
-        return (tool.name, context) if context else None
+    context: dict[str, object] = {}
+    region = str(data.get("region") or "").strip()
+    if region and not region.startswith("farm:"):
+        context["region"] = region
+    for key in ("start_date", "end_date", "granularity"):
+        value = data.get(key)
+        if value not in (None, ""):
+            context[key] = value
+    include_advice = data.get("include_advice")
+    if isinstance(include_advice, bool):
+        context["include_advice"] = include_advice
+    requested_operations = data.get("requested_operations")
+    if isinstance(requested_operations, list):
+        operations = [str(item).strip() for item in requested_operations if str(item).strip()]
+        if operations:
+            context["requested_operations"] = operations
+    if context.get("start_date") and context.get("end_date"):
+        return context
     return None
 
 
-def extract_session_context_from_workflow(
-    workflow_name: str, plan: Optional[WorkflowResponse]
-) -> Optional[tuple[str, dict[str, object]]]:
-    if plan is None:
+def _extract_variety_context(tool: object) -> Optional[dict[str, object]]:
+    if not isinstance(tool, ToolInvocation):
         return None
-    data = plan.data or {}
-    if workflow_name == "growth_stage_query_workflow":
-        context: dict[str, object] = {}
+    data = tool.data or {}
+    variety = str(data.get("variety") or "").strip()
+    selected = data.get("selected")
+    if not variety and isinstance(selected, Mapping):
+        variety = str(selected.get("品种名称") or "").strip()
+    if not variety:
+        return None
+    context: dict[str, object] = {"variety": variety}
+    crop = str(data.get("crop") or "").strip()
+    if crop:
+        context["crop"] = crop
+    region_choice = str(data.get("region_choice") or "").strip()
+    if region_choice and region_choice != "__all__":
+        context["region_choice"] = region_choice
+    if isinstance(selected, Mapping):
+        context["selected"] = dict(selected)
+    return context
+
+
+def _extract_sowing_context(tool: object) -> Optional[dict[str, object]]:
+    if not isinstance(tool, ToolInvocation):
+        return None
+    data = tool.data or {}
+    resolved = data.get("resolved")
+    if not isinstance(resolved, Mapping):
+        return None
+    context = dict(resolved)
+    farm_id = context.get("farm_id")
+    if farm_id not in (None, ""):
+        context["farm_id"] = str(farm_id).strip()
+    return context
+
+
+def _extract_plan_list_context(tool: object) -> Optional[dict[str, object]]:
+    if not isinstance(tool, ToolInvocation):
+        return None
+    raw_plans = (tool.data or {}).get("plans")
+    if not isinstance(raw_plans, list):
+        return None
+    plans: list[dict[str, object]] = []
+    for item in raw_plans:
+        if not isinstance(item, Mapping):
+            continue
+        plan_id = item.get("plan_id")
+        if plan_id in (None, ""):
+            continue
+        plan_payload: dict[str, object] = {"plan_id": str(plan_id).strip()}
+        plan_name = str(item.get("plan_name") or "").strip()
+        if plan_name:
+            plan_payload["plan_name"] = plan_name
+        planting = item.get("planting")
+        if isinstance(planting, Mapping) and planting:
+            plan_payload["planting"] = dict(planting)
+        plans.append(plan_payload)
+    return {"plans": plans} if plans else None
+
+
+def _extract_plan_delete_context(tool: object) -> Optional[dict[str, object]]:
+    if not isinstance(tool, ToolInvocation):
+        return None
+    plan_id = (tool.data or {}).get("plant_season_id")
+    if plan_id in (None, ""):
+        return None
+    return {"plant_season_id": str(plan_id).strip()}
+
+
+def _extract_growth_stage_context(value: object) -> Optional[dict[str, object]]:
+    data: Mapping[str, object]
+    if isinstance(value, ToolInvocation):
+        data = value.data or {}
+    elif isinstance(value, WorkflowResponse):
+        data = value.data or {}
         workflow = data.get("workflow")
+        context: dict[str, object] = {}
         if isinstance(workflow, Mapping):
             plan_id = workflow.get("plan_id")
             if plan_id not in (None, ""):
@@ -584,22 +707,69 @@ def extract_session_context_from_workflow(
         planting = _reduce_planting_context(data.get("planting"))
         if planting:
             context["planting"] = planting
-        return (workflow_name, context) if context else None
-    if workflow_name == "crop_calendar_workflow":
-        # Save confirmation is an action on an already-generated plan.
-        # It should not replace the previously cached planting context.
-        if "save_response" in data:
-            return None
-        planting = _reduce_planting_context(data.get("planting"))
-        if not planting:
-            return None
-        context = {"planting": planting}
-        for key in ("plant_season_id", "resolved_region_id"):
-            value = data.get(key)
-            if value not in (None, ""):
-                context[key] = value
-        return workflow_name, context
+        return context or None
+    else:
+        return None
+    context = {}
+    plan_id = data.get("plan_id")
+    if plan_id not in (None, ""):
+        context["plan_id"] = str(plan_id).strip()
+    plan_filters = data.get("plan_filters")
+    if isinstance(plan_filters, Mapping) and plan_filters:
+        context["plan_filters"] = dict(plan_filters)
+    planting = _reduce_planting_context(data.get("planting"))
+    if planting:
+        context["planting"] = planting
+    return context or None
+
+
+def _extract_crop_calendar_context(value: object) -> Optional[dict[str, object]]:
+    if not isinstance(value, WorkflowResponse):
+        return None
+    data = value.data or {}
+    if "save_response" in data:
+        return None
+    planting = _reduce_planting_context(data.get("planting"))
+    if not planting:
+        return None
+    context: dict[str, object] = {"planting": planting}
+    for key in ("plant_season_id", "resolved_region_id"):
+        field_value = data.get(key)
+        if field_value not in (None, ""):
+            context[key] = field_value
+    return context
+
+
+def extract_session_context_from_tool(
+    tool: Optional[ToolInvocation],
+) -> Optional[tuple[str, dict[str, object]]]:
+    if tool is None:
+        return None
+    data = tool.data or {}
+    if get_followup_missing_fields(data):
+        return None
+    adapter = get_session_context_adapter("tool", tool.name)
+    if adapter is None or adapter.extract_context is None:
+        return None
+    context = adapter.extract_context(tool)
+    if not context:
+        return None
+    return tool.name, context
     return None
+
+
+def extract_session_context_from_workflow(
+    workflow_name: str, plan: Optional[WorkflowResponse]
+) -> Optional[tuple[str, dict[str, object]]]:
+    if plan is None:
+        return None
+    adapter = get_session_context_adapter("workflow", workflow_name)
+    if adapter is None or adapter.extract_context is None:
+        return None
+    context = adapter.extract_context(plan)
+    if not context:
+        return None
+    return workflow_name, context
 
 
 def _iter_context_candidates(session_payload: Mapping[str, object]):
@@ -607,9 +777,12 @@ def _iter_context_candidates(session_payload: Mapping[str, object]):
     if isinstance(last, Mapping):
         kind = str(last.get("kind") or "").strip()
         name = str(last.get("name") or "").strip()
+        adapter = get_session_context_adapter(kind, name)
+        if adapter is None:
+            return
         context = _get_context(session_payload, kind, name)
         if context:
-            yield kind, name, context
+            yield adapter, context
 
 
 def _get_context(
@@ -623,12 +796,89 @@ def _get_context(
     return dict(context) if isinstance(context, Mapping) else None
 
 
+_SESSION_CONTEXT_ADAPTERS: tuple[SessionContextAdapter, ...] = (
+    SessionContextAdapter(
+        kind="tool",
+        name="weather_lookup",
+        task_type="weather",
+        updatable_fields=("region", "start_date", "end_date", "requested_operations"),
+        extract_context=_extract_weather_context,
+        build_candidate=_build_weather_contextual_candidate,
+    ),
+    SessionContextAdapter(
+        kind="tool",
+        name="variety_lookup",
+        task_type="variety",
+        updatable_fields=("variety", "crop", "region_choice", "selected"),
+        extract_context=_extract_variety_context,
+        build_candidate=_build_variety_contextual_candidate,
+    ),
+    SessionContextAdapter(
+        kind="tool",
+        name="sowing_suitability_lookup",
+        task_type="sowing",
+        updatable_fields=("variety", "culti_type", "planting_method", "region_id", "farm_id"),
+        extract_context=_extract_sowing_context,
+        build_candidate=_build_sowing_contextual_candidate,
+    ),
+    SessionContextAdapter(
+        kind="tool",
+        name="plant_plan_list_active",
+        task_type="plan_list",
+        updatable_fields=("plant_season_id", "plan_name"),
+        extract_context=_extract_plan_list_context,
+        build_candidate=_build_plan_list_contextual_candidate,
+    ),
+    SessionContextAdapter(
+        kind="tool",
+        name="plant_plan_delete",
+        task_type="plan_delete",
+        updatable_fields=("plant_season_id",),
+        extract_context=_extract_plan_delete_context,
+    ),
+    SessionContextAdapter(
+        kind="tool",
+        name="growth_stage_lookup",
+        task_type="growth_stage",
+        updatable_fields=("plan_id", "plan_filters", "planting"),
+        extract_context=_extract_growth_stage_context,
+        build_candidate=_build_growth_stage_contextual_candidate,
+    ),
+    SessionContextAdapter(
+        kind="workflow",
+        name="crop_calendar_workflow",
+        task_type="crop_calendar",
+        updatable_fields=(
+            "region_id",
+            "crop",
+            "variety",
+            "culti_type",
+            "planting_method",
+            "sowing_date",
+            "transplant_date",
+            "plant_season_id",
+        ),
+        extract_context=_extract_crop_calendar_context,
+        build_candidate=_build_crop_calendar_contextual_candidate,
+    ),
+)
+
+_TOOL_CONTEXT_ADAPTERS = {
+    adapter.name: adapter for adapter in _SESSION_CONTEXT_ADAPTERS if adapter.kind == "tool"
+}
+_WORKFLOW_CONTEXT_ADAPTERS = {
+    adapter.name: adapter
+    for adapter in _SESSION_CONTEXT_ADAPTERS
+    if adapter.kind == "workflow"
+}
+
+
 def _build_contextual_weather_query(
     prompt: str, context: Optional[Mapping[str, object]]
 ) -> Optional[dict[str, object]]:
     if not isinstance(context, Mapping):
         return None
-    if looks_like_sowing_query(prompt):
+    if looks_like_sowing_query(prompt) or looks_like_crop_calendar_query(prompt):
         return None
     base = {
         key: value
@@ -689,6 +939,19 @@ def _build_contextual_weather_query(
     if not (merged.get("start_date") and merged.get("end_date")):
         return None
     return merged
+
+
+def _prompt_has_temporal_signal(prompt: str) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+    if extract_explicit_dates(text):
+        return True
+    if extract_relative_date_range(text, today=date.today()) is not None:
+        return True
+    if extract_date_range(text, today=date.today()) is not None:
+        return True
+    return False
 
 
 def _is_brief_weather_followup(prompt: str) -> bool:
@@ -808,23 +1071,32 @@ def _extract_planting_overrides(prompt: str) -> dict[str, object]:
     text = str(prompt or "").strip()
     if not text:
         return {}
-    overrides: dict[str, object] = {}
-    region = _extract_region_hint(text)
-    if region:
-        overrides["region_id"] = region
-    try:
-        draft = extract_planting_details(text, variety_resolver=lambda _value: [])
-    except Exception:
-        draft = None
-    if draft is not None:
-        for key in ("culti_type", "planting_method", "sowing_date", "transplant_date"):
-            value = getattr(draft, key, None)
-            if value not in (None, ""):
-                overrides[key] = value.isoformat() if hasattr(value, "isoformat") else value
-    variety = _find_exact_variety(text) if _should_try_variety_match(text) else None
-    if variety:
-        overrides["variety"] = variety
-    return overrides
+    include_variety = _should_try_variety_match(text)
+    return extract_planting_field_overrides(
+        text,
+        include_variety=include_variety,
+        include_dates=True,
+        include_crop=False,
+        variety_matcher=_find_exact_variety if include_variety else None,
+    )
+
+
+def _describe_thread_target(plan: ActionPlan) -> str:
+    if plan.action == "workflow" and plan.name == "crop_calendar_workflow":
+        return "农事方案生成"
+    if plan.action == "tool" and plan.name == "weather_lookup":
+        return "天气/农事适宜度查询"
+    if plan.action == "tool" and plan.name == "sowing_suitability_lookup":
+        return "播期推荐"
+    if plan.action == "tool" and plan.name == "variety_lookup":
+        return "品种信息查询"
+    if plan.action == "tool" and plan.name == "growth_stage_lookup":
+        return "生育期查询"
+    if plan.action == "tool" and plan.name == "plant_plan_list_active":
+        return "种植计划列表查询"
+    if plan.action == "tool" and plan.name == "plant_plan_delete":
+        return "种植计划删除"
+    return str(plan.name or plan.action or "").strip()
 
 
 def _reduce_planting_context(value: object) -> dict[str, object]:
@@ -976,15 +1248,9 @@ def _extract_region_hint(text: str) -> Optional[str]:
         return None
     if extract_relative_date_range(prompt, today=date.today()):
         return None
-    for pattern in _REGION_PATTERNS:
-        match = re.search(pattern, prompt)
-        if not match:
-            continue
-        region = str(match.group(1) or "").strip()
-        region = re.sub(r"(呢|吗|呀|啊)$", "", region).strip()
-        if region and not any(token in region for token in _INVALID_REGION_TOKENS):
-            return region
-    return None
+    return extract_region_followup_hint(
+        prompt, invalid_tokens=_INVALID_REGION_TOKENS
+    )
 
 
 def _extract_dates(text: str) -> list[str]:

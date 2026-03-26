@@ -1,5 +1,7 @@
+import json
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -8,6 +10,7 @@ import httpx
 import uuid
 
 from src.infra.config import get_config
+from src.observability.logging_utils import summarize_text
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 try:
@@ -20,6 +23,10 @@ _AUTH_PASSWORD_ENV = "CHAINLIT_AUTH_PASSWORD"
 _SESSION_ID_KEY = "session_id"
 _CLIENT_ID_KEY = "client_id"
 _USER_ID_KEY = "user_id"
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_LOG_DIR = _PROJECT_ROOT / ".cache" / "logs"
+_API_ERROR_LOG_PATH = _LOG_DIR / "api_errors.log"
+_OBS_ERROR_LOG_PATH = _LOG_DIR / "observability.log"
 
 
 def _build_capability_guide() -> str:
@@ -203,6 +210,27 @@ def _format_recent_farm_work_summary(payload: object, *, farm_id: object) -> str
     return "\n".join(lines)
 
 
+def _append_recent_farm_work_error_log(message: str) -> None:
+    timestamp = datetime.now(timezone(timedelta(hours=8))).isoformat()
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with _API_ERROR_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {message}\n")
+    except Exception:
+        pass
+
+
+def _append_recent_farm_work_observability_log(**fields: object) -> None:
+    timestamp = datetime.now(timezone(timedelta(hours=8))).isoformat()
+    payload = {"event": "recent_farm_work_summary_error", "trace_id": "unknown", **fields}
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with _OBS_ERROR_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} - {json.dumps(payload, ensure_ascii=False, default=str)}\n")
+    except Exception:
+        pass
+
+
 async def _fetch_recent_farm_work_summary() -> str:
     cfg = get_config()
     farm_id = str(getattr(cfg, "default_farm_id", None) or "").strip()
@@ -224,7 +252,27 @@ async def _fetch_recent_farm_work_summary() -> str:
             )
             response.raise_for_status()
             payload = response.json()
-    except Exception:
+    except Exception as exc:
+        status_code = None
+        response_text = ""
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+            status_code = exc.response.status_code
+            response_text = summarize_text(exc.response.text, limit=300)
+        _append_recent_farm_work_observability_log(
+            farm_id=farm_id,
+            url=url,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            status_code=status_code,
+            response_text=response_text,
+        )
+        _append_recent_farm_work_error_log(
+            (
+                f"recent_farm_work_summary_error farm_id={farm_id} url={url} "
+                f"error_type={type(exc).__name__} status_code={status_code} "
+                f"error={exc} response_text={response_text}"
+            )
+        )
         return _format_recent_farm_work_summary(None, farm_id=farm_id)
     return _format_recent_farm_work_summary(payload, farm_id=farm_id)
 

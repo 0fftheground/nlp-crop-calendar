@@ -5,6 +5,7 @@ from typing import Optional
 
 from pydantic import ValidationError
 
+from ..application.services.weather_service import parse_weather_prompt_operations
 from ..observability.logging_utils import log_event
 from ..observability.otel import (
     build_span_attributes,
@@ -523,6 +524,13 @@ class PlanExecutor:
             if text:
                 payload["prompt"] = text
                 payload["query"] = text
+        requested_operations = payload.get("requested_operations")
+        if not isinstance(requested_operations, list) or not any(
+            str(item).strip() for item in requested_operations
+        ):
+            supported_ops, _, _ = parse_weather_prompt_operations(payload["query"])
+            if supported_ops:
+                payload["requested_operations"] = supported_ops
         return json.dumps(payload, ensure_ascii=False, default=str)
 
     @staticmethod

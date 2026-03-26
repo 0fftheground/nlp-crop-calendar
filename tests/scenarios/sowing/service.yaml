@@ -103,8 +103,84 @@ sowing_service_cases:
         - 请补充
       missing_fields:
         - variety
-        - culti_type
         - planting_method
+
+  - id: infers_culti_type_from_variety_region_record
+    request_payload:
+      variety: 美香占2号
+      planting_method: 直播
+      region_id: 长沙
+    config:
+      agri_db_url: postgresql://example
+      business_api_key:
+      business_api_base_url: http://example.test
+      sowing_suitability_api_url:
+      default_farm_id: "8"
+      db_region_lookup_candidates: []
+      region_db_table:
+    sql:
+      dict_rows:
+        sowingmtd:
+          - code: 0
+            code_name: 直播
+        culti_type:
+          - code: 4
+            code_name: 一季晚稻
+      variety_rows:
+        - name: 美香占2号
+          sub_type: 9
+          culti_type: 一季晚稻
+          approve_region: 湖南省
+          approve_year: 2024
+      region_rows:
+        - region_id: 430100
+          region_name: 长沙市
+    http_response:
+      code: 200
+      message: success
+      data:
+        suitDate:
+          - "2026-03-30"
+    expected:
+      message: success
+      payload:
+        region_id: 430100
+        culti_type: 4
+        sowing_method: 0
+        sub_type: 9
+        crop: 0
+      result_suit_dates:
+        - "2026-03-30"
+      resolved:
+        culti_type: 一季晚稻
+
+  - id: returns_unapproved_region_message_for_variety
+    request_payload:
+      variety: 美香占2号
+      planting_method: 直播
+      region_id: 芜湖
+    config:
+      agri_db_url: postgresql://example
+      business_api_key:
+      business_api_base_url: http://example.test
+      sowing_suitability_api_url:
+      default_farm_id: "12"
+      db_region_lookup_candidates: []
+      region_db_table:
+    sql:
+      dict_rows:
+        sowingmtd:
+          - code: 0
+            code_name: 直播
+      variety_rows:
+        - name: 美香占2号
+          sub_type: 9
+          culti_type: 一季晚稻
+          approve_region: 湖南省
+          approve_year: 2024
+    expected:
+      name: sowing_suitability_lookup
+      message: 品种 美香占2号 未在 芜湖 审定。
 
   - id: followup_merges_planting_method
     raw_request_json:

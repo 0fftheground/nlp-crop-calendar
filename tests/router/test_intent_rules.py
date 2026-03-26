@@ -73,6 +73,19 @@ class IntentRuleTests(unittest.TestCase):
         self.assertEqual(plan.input.get("region"), "广州")
         self.assertEqual(plan.input.get("year"), 2024)
 
+    def test_router_rule_non_agri_travel_query_returns_none(self) -> None:
+        from src.agent.router import RequestRouter
+
+        with patch("src.agent.planner.get_chat_model", return_value=_DummyLLM()):
+            with patch(
+                "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
+            ):
+                router = RequestRouter()
+        plan = router._intent_router._rule_route("湖南常德下周适合旅游吗")
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.action, "none")
+        self.assertEqual(plan.reason, "boundary:non_agri_life_query")
+
     def test_router_rule_sowing_suitability_payload(self) -> None:
         from src.agent.router import RequestRouter
 
@@ -146,6 +159,47 @@ class IntentRuleTests(unittest.TestCase):
         self.assertEqual(plan.action, "workflow")
         self.assertEqual(plan.name, "crop_calendar_workflow")
         self.assertEqual(plan.input, {"prompt": "帮我生成一个种植计划"})
+
+    def test_router_rule_crop_calendar_for_transplant_scheme(self) -> None:
+        from src.agent.router import RequestRouter
+
+        with patch("src.agent.planner.get_chat_model", return_value=_DummyLLM()):
+            with patch(
+                "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
+            ):
+                router = RequestRouter()
+        plan = router._intent_router._rule_route(
+            "我想建立一个在湖南常德种植的湘早籼24号的移栽方案"
+        )
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.action, "workflow")
+        self.assertEqual(plan.name, "crop_calendar_workflow")
+
+    def test_router_rule_growth_stage_uses_tool(self) -> None:
+        from src.agent.router import RequestRouter
+
+        with patch("src.agent.planner.get_chat_model", return_value=_DummyLLM()):
+            with patch(
+                "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
+            ):
+                router = RequestRouter()
+        plan = router._intent_router._rule_route("查询这个计划的生育期")
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.action, "tool")
+        self.assertEqual(plan.name, "growth_stage_lookup")
+
+    def test_router_rule_variety_maturity_query_is_not_hijacked_by_growth_stage(self) -> None:
+        from src.agent.router import RequestRouter
+
+        with patch("src.agent.planner.get_chat_model", return_value=_DummyLLM()):
+            with patch(
+                "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
+            ):
+                router = RequestRouter()
+        plan = router._intent_router._rule_route("美香占2号这个品种成熟期多久")
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.action, "tool")
+        self.assertEqual(plan.name, "variety_lookup")
 
 
 if __name__ == "__main__":

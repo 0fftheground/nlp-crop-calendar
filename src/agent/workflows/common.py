@@ -90,12 +90,16 @@ def build_fallback_planting(draft: PlantingDetailsDraft) -> PlantingDetails:
     today = date.today()
     method = draft.planting_method or "direct_seeding"
     sowing_date = draft.sowing_date or today
+    crop = draft.crop or "水稻"
+    culti_type = draft.culti_type
+    if not culti_type and crop == "水稻":
+        culti_type = "中稻"
     return PlantingDetails(
         farm_id=draft.farm_id,
         region_id=draft.region_id,
-        crop=draft.crop or "水稻",
+        crop=crop,
         variety=draft.variety,
-        culti_type=draft.culti_type,
+        culti_type=culti_type,
         planting_method=method,
         sowing_date=sowing_date,
         transplant_date=draft.transplant_date,

@@ -16,6 +16,7 @@ _MISSING_PYDANTIC_SETTINGS = importlib.util.find_spec("pydantic_settings") is No
 if not _MISSING_PYDANTIC_SETTINGS:
     from tests.scenario_loader import load_yaml_scenarios
     from tests.support import build_test_router
+    from src.agent.session_context import build_contextual_candidate
 
 
 @unittest.skipUnless(
@@ -898,6 +899,46 @@ class WeatherSessionContextTests(unittest.TestCase):
         payload = json.loads(mocked_execute.call_args[0][1])
         self.assertEqual(
             payload.get("query"), "我在常德种植早稻湘早籼24，移栽什么时候播种合适"
+        )
+
+    def test_crop_calendar_plan_prompt_does_not_build_weather_contextual_candidate(
+        self,
+    ) -> None:
+        payload = {
+            "tool_contexts": {
+                "weather_lookup": {
+                    "region": "湖南常德",
+                    "start_date": "2026-03-25",
+                    "end_date": "2026-03-31",
+                    "granularity": "daily",
+                    "requested_operations": ["移栽"],
+                }
+            },
+            "last_context": {"kind": "tool", "name": "weather_lookup"},
+        }
+
+        candidate = build_contextual_candidate(
+            "我想建立一个在湖南常德种植的湘早籼24号的移栽方案",
+            payload,
+        )
+
+        self.assertIsNone(candidate)
+
+    def test_session_context_adapter_registry_covers_current_tools_and_workflow(self) -> None:
+        from src.agent.session_context import get_session_context_adapter
+
+        self.assertIsNotNone(get_session_context_adapter("tool", "weather_lookup"))
+        self.assertIsNotNone(get_session_context_adapter("tool", "variety_lookup"))
+        self.assertIsNotNone(
+            get_session_context_adapter("tool", "sowing_suitability_lookup")
+        )
+        self.assertIsNotNone(
+            get_session_context_adapter("tool", "plant_plan_list_active")
+        )
+        self.assertIsNotNone(get_session_context_adapter("tool", "plant_plan_delete"))
+        self.assertIsNotNone(get_session_context_adapter("tool", "growth_stage_lookup"))
+        self.assertIsNotNone(
+            get_session_context_adapter("workflow", "crop_calendar_workflow")
         )
 
     def test_recent_sowing_suitability_question_routes_to_sowing_tool(self) -> None:

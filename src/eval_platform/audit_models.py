@@ -39,6 +39,7 @@ class AuditReviewRecord(BaseModel):
     input: Dict[str, Any] = Field(default_factory=dict)
     expected: Dict[str, Any] = Field(default_factory=dict)
     observed_output: Dict[str, Any] = Field(default_factory=dict)
+    normalized_observed_output: Dict[str, Any] = Field(default_factory=dict)
     source: Dict[str, Any] = Field(default_factory=dict)
     rule_grade: Dict[str, Any] = Field(default_factory=dict)
     ai_judge: Optional[AuditJudgeDecision] = None

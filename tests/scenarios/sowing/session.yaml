@@ -26,3 +26,59 @@ sowing_session_context:
         culti_type: 早稻
         planting_method: direct_seeding
         region_id: 芜湖
+
+  - id: followup_culti_type_reuses_latest_context
+    session_id: s2
+    initial_context:
+      tool_contexts:
+        sowing_suitability_lookup:
+          variety: 美香占2号
+          culti_type: 一季晚稻
+          planting_method: direct_seeding
+          region_id: 长沙
+          crop: 水稻
+      last_context:
+        kind: tool
+        name: sowing_suitability_lookup
+    followup_prompt: 早稻呢
+    tool_result:
+      name: sowing_suitability_lookup
+      message: success
+      data:
+        resolved:
+          culti_type: 早稻
+    expected:
+      tool_name: sowing_suitability_lookup
+      payload:
+        variety: 美香占2号
+        culti_type: 早稻
+        planting_method: direct_seeding
+        region_id: 长沙
+
+  - id: followup_planting_method_reuses_latest_context
+    session_id: s3
+    initial_context:
+      tool_contexts:
+        sowing_suitability_lookup:
+          variety: 美香占2号
+          culti_type: 一季晚稻
+          planting_method: transplanting
+          region_id: 长沙
+          crop: 水稻
+      last_context:
+        kind: tool
+        name: sowing_suitability_lookup
+    followup_prompt: 直播呢
+    tool_result:
+      name: sowing_suitability_lookup
+      message: success
+      data:
+        resolved:
+          planting_method: 直播
+    expected:
+      tool_name: sowing_suitability_lookup
+      payload:
+        variety: 美香占2号
+        culti_type: 一季晚稻
+        planting_method: direct_seeding
+        region_id: 长沙

@@ -1,27 +1,14 @@
-# Agronomy Assistant
+# Welcome to Chainlit! 🚀🤖
 
-This UI connects to the FastAPI backend and routes your questions to tools or workflows.
+Hi there, Developer! 👋 We're excited to have you on board. Chainlit is a powerful tool designed to help you prototype, debug and share applications built on top of LLMs.
 
-You can ask about:
-- Crop variety traits
-- Weather and time ranges for a specific region
-- Growth stage prediction
-- Full planting plans
+## Useful Links 🔗
 
-Note: growth-stage prediction and crop calendar workflows currently use historical weather only; future sowing dates will trigger a prompt to provide a valid historical date.
+- **Documentation:** Get started with our comprehensive [Chainlit Documentation](https://docs.chainlit.io) 📚
+- **Discord Community:** Join our friendly [Chainlit Discord](https://discord.gg/k73SQ3FyUh) to ask questions, share your projects, and connect with other developers! 💬
 
-If information is incomplete, the assistant will ask follow-up questions. To switch to a new question, just ask a new request. To clear memory, simply say so.
+We can't wait to see what you create with Chainlit! Happy coding! 💻😊
 
-Tip: to change the backend address, set `BACKEND_URL`.
+## Welcome screen
 
-## Chat history & authentication
-Chat history is enabled via Chainlit data persistence (`chainlit.toml`). Authentication is enabled using the password callback in `chainlit_app.py`. The username is used as the stable identity (`user_id`) for backend memory, and the Chainlit thread id is reused as `session_id` so a resumed chat can continue pending follow-ups.
-
-Authentication modes:
-- If you set credentials in `.env`, only those users can log in:
-  - `CHAINLIT_AUTH_USERS` as `user:pass,user2:pass2`
-  - or `CHAINLIT_AUTH_USERNAME` / `CHAINLIT_AUTH_PASSWORD` for a single user
-- If no credentials are configured, any non-empty username/password will be accepted (open mode).
-Authentication requires a JWT secret. Set `CHAINLIT_AUTH_SECRET` (or run `chainlit create-secret` to generate one) before starting Chainlit.
-
-Once configured, your chat threads will persist across page reloads for the same login.
+To modify the welcome screen, edit the `chainlit.md` file at the root of your project. If you do not want a welcome screen, just leave this file empty.

@@ -122,7 +122,7 @@ curl -sS "$OPENAI_API_BASE/chat/completions" \
 ```
 
 More deployment details:
-- `DEPLOY.md`
+- `doc/DEPLOY.md`
 
 ## Development Notes
 - Planner logic: `src/agent/planner.py`, `src/agent/router.py`
@@ -196,7 +196,7 @@ Scenario-driven tests follow a `YAML + Python executor` pattern:
 
 See also:
 
-- `tests/README.md`
+- `doc/tests.md`
 
 ## LLM Eval
 
@@ -316,9 +316,18 @@ Notes:
 - Eval summaries now include `avg_latency_ms`, `p95_latency_ms`, and `estimated_*_tokens`.
 - `expert_regression_gate` also checks relative latency and token regression against the baseline model.
 - Token metrics are lightweight estimates from the active model tokenizer; there is no pricing-table-based cost calculation yet.
-- Detailed governance rules, the end-to-end operating flow, and an operator guide for `run / compare / audit / promote` live in `EVAL_GOVERNANCE.md`.
+- Detailed governance rules, the end-to-end operating flow, and an operator guide for `run / compare / audit / promote` live in `doc/EVAL_GOVERNANCE.md`.
 
 Production-audit closed loop:
+
+- `audit run-latest`
+  - one-shot command
+  - already includes: `sample -> judge -> review-queue`
+- manual steps below
+  - use only when you want to rerun one stage or inspect each step separately
+- post-review steps
+  - happen after human review
+  - include CSV export/import and promotion
 
 ```bash
 python -m src.eval_platform audit sample --limit 50 --days 30 --out-dir .cache/eval/production_audit/batches/manual
@@ -334,6 +343,8 @@ One-shot latest production-audit cycle:
 ```bash
 python -m src.eval_platform audit run-latest --limit 50 --days 30 --out-dir .cache/eval/production_audit/runs/latest
 ```
+
+`run-latest` stops at `queues/`; it does not export CSV, promote review records, or import anything back into `expert`.
 
 Production-audit sampling now uses a persisted cursor in `.state/eval/production_audit/sampling_state.json`.
 That means repeated `sample` / `run-latest` calls continue from the last sampled `(created_at, id)` watermark instead of always re-reading the latest rows.
@@ -383,6 +394,6 @@ PowerShell wrappers are also available:
 Those files are marked `judge_only`: they carry a deidentified multi-turn `context_window` from the same session for AI judge review, but are not counted as deterministic single-turn replay cases.
 
 ## More Docs
-- Deployment details: `DEPLOY.md`
-- Technical details: `TECHNICAL_DETAILS.md`
-- Test organization and scope boundary: `tests/README.md`
+- Deployment details: `doc/DEPLOY.md`
+- Technical details: `doc/TECHNICAL_DETAILS.md`
+- Test organization and scope boundary: `doc/tests.md`

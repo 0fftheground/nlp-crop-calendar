@@ -19,6 +19,7 @@ if not _MISSING_PYDANTIC_SETTINGS:
     )
     from src.application.services.weather_service import (
         extract_weather_operations,
+        _extract_region_from_text,
         _resolve_region_id,
         configure_weather_ports,
         lookup_weather,
@@ -337,7 +338,9 @@ class WeatherServiceTests(unittest.TestCase):
 
         scenarios = load_yaml_scenarios("weather/service.yaml")
         relative_dates = scenarios["relative_dates"]
-        with patch("src.application.services.weather_service.date", FakeDate):
+        with patch("src.application.services.weather_service.date", FakeDate), patch(
+            "src.domain.date_parser.date", FakeDate
+        ):
             for case in relative_dates["cases"]:
                 with self.subTest(prompt=case["prompt"]):
                     payload = json.dumps({"query": case["prompt"]}, ensure_ascii=False)
@@ -365,6 +368,77 @@ class WeatherServiceTests(unittest.TestCase):
         self.assertEqual(query.region, "芜湖")
         self.assertEqual(query.start_date.isoformat(), "2026-03-16")
         self.assertEqual(query.end_date.isoformat(), "2026-03-16")
+
+    def test_normalize_weather_prompt_extracts_region_after_time_prefix_for_suitability_query(
+        self,
+    ) -> None:
+        from datetime import date as _date
+
+        class FakeDate(_date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 3, 16)
+
+        with patch("src.application.services.weather_service.date", FakeDate):
+            _, query = normalize_weather_prompt(
+                json.dumps({"query": "下周湖南常德哪天最适合施肥"}, ensure_ascii=False)
+            )
+
+        self.assertIsNotNone(query)
+        self.assertEqual(query.region, "湖南常德")
+        self.assertEqual(query.start_date.isoformat(), "2026-03-23")
+        self.assertEqual(query.end_date.isoformat(), "2026-03-29")
+
+    def test_normalize_weather_prompt_extracts_region_after_explicit_date_prefix(
+        self,
+    ) -> None:
+        from datetime import date as _date
+
+        class FakeDate(_date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 3, 16)
+
+        with patch("src.application.services.weather_service.date", FakeDate):
+            _, query = normalize_weather_prompt(
+                json.dumps({"query": "4月1日湖南常德适合施肥吗"}, ensure_ascii=False)
+            )
+
+        self.assertIsNotNone(query)
+        self.assertEqual(query.region, "湖南常德")
+        self.assertEqual(query.start_date.isoformat(), "2026-04-01")
+        self.assertEqual(query.end_date.isoformat(), "2026-04-01")
+
+    def test_extract_region_from_comparison_query_with_shi_prefix(self) -> None:
+        self.assertEqual(
+            _extract_region_from_text("湖南常德是今天还是下周一施肥好"),
+            "湖南常德",
+        )
+
+    def test_normalize_weather_prompt_supports_today_vs_next_monday_comparison(
+        self,
+    ) -> None:
+        from datetime import date as _date
+
+        class FakeDate(_date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 3, 25)
+
+        with patch("src.application.services.weather_service.date", FakeDate), patch(
+            "src.domain.date_parser.date", FakeDate
+        ):
+            _, query = normalize_weather_prompt(
+                json.dumps(
+                    {"query": "湖南常德是今天还是下周一施肥好"},
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertIsNotNone(query)
+        self.assertEqual(query.region, "湖南常德")
+        self.assertEqual(query.start_date.isoformat(), "2026-03-25")
+        self.assertEqual(query.end_date.isoformat(), "2026-03-30")
 
     def test_lookup_weather_operation_scenarios(self) -> None:
         scenarios = load_yaml_scenarios("weather/service.yaml")

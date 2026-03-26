@@ -358,6 +358,338 @@ class AuditPipelineTests(unittest.TestCase):
         prompts = [item["prompt"] for item in context_case["source"]["context_window"]]
         self.assertEqual(prompts, ["今天适合施肥吗", "芜湖呢"])
 
+    def test_build_batches_uses_hydrated_session_history_for_missing_turns(self) -> None:
+        from src.eval_platform.audit_pipeline import build_production_audit_batches
+
+        rows = [
+            {
+                "id": 80,
+                "created_at": 80,
+                "session_id": "s-hydrated",
+                "mode": "workflow",
+                "prompt": "是",
+                "request_json": {
+                    "raw": {
+                        "response": {
+                            "mode": "workflow",
+                            "plan": {
+                                "message": "已保存种植计划。",
+                                "data": {"workflow_name": "crop_calendar_workflow"},
+                            },
+                        }
+                    }
+                },
+                "response_json": {},
+            }
+        ]
+        hydrated = {
+            80: [
+                {
+                    "id": 77,
+                    "created_at": 77,
+                    "session_id": "s-hydrated",
+                    "mode": "workflow",
+                    "prompt": "帮我创建水稻种植计划",
+                    "request_json": {
+                        "raw": {
+                            "response": {
+                                "mode": "workflow",
+                                "plan": {
+                                    "message": "还缺播种时间。",
+                                    "data": {"workflow_name": "crop_calendar_workflow"},
+                                },
+                            }
+                        }
+                    },
+                    "response_json": {},
+                },
+                {
+                    "id": 78,
+                    "created_at": 78,
+                    "session_id": "s-hydrated",
+                    "mode": "workflow",
+                    "prompt": "2026-03-20",
+                    "request_json": {
+                        "raw": {
+                            "response": {
+                                "mode": "workflow",
+                                "plan": {
+                                    "message": "还缺地区。",
+                                    "data": {"workflow_name": "crop_calendar_workflow"},
+                                },
+                            }
+                        }
+                    },
+                    "response_json": {},
+                },
+                {
+                    "id": 79,
+                    "created_at": 79,
+                    "session_id": "s-hydrated",
+                    "mode": "workflow",
+                    "prompt": "常德",
+                    "request_json": {
+                        "raw": {
+                            "response": {
+                                "mode": "workflow",
+                                "plan": {
+                                    "message": "请确认是否保存。",
+                                    "data": {"workflow_name": "crop_calendar_workflow"},
+                                },
+                            }
+                        }
+                    },
+                    "response_json": {},
+                },
+            ]
+        }
+
+        batches = build_production_audit_batches(
+            rows,
+            store_name="postgres",
+            hydrated_session_rows_by_row_id=hydrated,
+        )
+
+        case = batches["planner"]["cases"][0]
+        prompts = [item["prompt"] for item in case["source"]["context_window"]]
+        self.assertEqual(prompts, ["帮我创建水稻种植计划", "2026-03-20", "常德"])
+
+    def test_build_batches_extends_context_back_to_previous_tool_or_workflow_start(
+        self,
+    ) -> None:
+        from src.eval_platform.audit_pipeline import build_production_audit_batches
+
+        rows = [
+            {
+                "id": 206,
+                "created_at": 206,
+                "session_id": "s-start-anchor",
+                "mode": "tool",
+                "prompt": "月底呢",
+                "request_json": {
+                    "raw": {
+                        "response": {
+                            "mode": "tool",
+                            "tool": {"name": "weather_lookup", "message": "ok", "data": {}},
+                        }
+                    }
+                },
+                "response_json": {},
+            }
+        ]
+        hydrated = {
+            206: [
+                {
+                    "id": 200,
+                    "created_at": 200,
+                    "session_id": "s-start-anchor",
+                    "mode": "tool",
+                    "prompt": "今天适合施肥吗",
+                    "request_json": {
+                        "raw": {
+                            "response": {
+                                "mode": "tool",
+                                "tool": {"name": "weather_lookup", "message": "ok", "data": {}},
+                            }
+                        }
+                    },
+                    "response_json": {},
+                },
+                {
+                    "id": 201,
+                    "created_at": 201,
+                    "session_id": "s-start-anchor",
+                    "mode": "tool",
+                    "prompt": "芜湖呢",
+                    "request_json": {
+                        "raw": {
+                            "response": {
+                                "mode": "tool",
+                                "tool": {"name": "weather_lookup", "message": "ok", "data": {}},
+                            }
+                        }
+                    },
+                    "response_json": {},
+                },
+                {
+                    "id": 202,
+                    "created_at": 202,
+                    "session_id": "s-start-anchor",
+                    "mode": "tool",
+                    "prompt": "明天呢",
+                    "request_json": {
+                        "raw": {
+                            "response": {
+                                "mode": "tool",
+                                "tool": {"name": "weather_lookup", "message": "ok", "data": {}},
+                            }
+                        }
+                    },
+                    "response_json": {},
+                },
+                {
+                    "id": 203,
+                    "created_at": 203,
+                    "session_id": "s-start-anchor",
+                    "mode": "tool",
+                    "prompt": "下周呢",
+                    "request_json": {
+                        "raw": {
+                            "response": {
+                                "mode": "tool",
+                                "tool": {"name": "weather_lookup", "message": "ok", "data": {}},
+                            }
+                        }
+                    },
+                    "response_json": {},
+                },
+                {
+                    "id": 204,
+                    "created_at": 204,
+                    "session_id": "s-start-anchor",
+                    "mode": "tool",
+                    "prompt": "周末呢",
+                    "request_json": {
+                        "raw": {
+                            "response": {
+                                "mode": "tool",
+                                "tool": {"name": "weather_lookup", "message": "ok", "data": {}},
+                            }
+                        }
+                    },
+                    "response_json": {},
+                },
+                {
+                    "id": 205,
+                    "created_at": 205,
+                    "session_id": "s-start-anchor",
+                    "mode": "tool",
+                    "prompt": "后天呢",
+                    "request_json": {
+                        "raw": {
+                            "response": {
+                                "mode": "tool",
+                                "tool": {"name": "weather_lookup", "message": "ok", "data": {}},
+                            }
+                        }
+                    },
+                    "response_json": {},
+                },
+            ]
+        }
+
+        batches = build_production_audit_batches(
+            rows,
+            store_name="postgres",
+            hydrated_session_rows_by_row_id=hydrated,
+        )
+
+        case = batches["planner.context_dependent"]["cases"][0]
+        prompts = [item["prompt"] for item in case["source"]["context_window"]]
+        self.assertEqual(
+            prompts,
+            ["今天适合施肥吗", "芜湖呢", "明天呢", "下周呢", "周末呢", "后天呢"],
+        )
+
+    def test_build_batches_prefers_thread_id_over_session_for_new_question(self) -> None:
+        from src.eval_platform.audit_pipeline import build_production_audit_batches
+
+        rows = [
+            {
+                "id": 42,
+                "created_at": 42,
+                "session_id": "s-thread",
+                "mode": "tool",
+                "prompt": "帮我查询一下湖南审定的粳稻",
+                "request_json": {
+                    "thread_id": "thread-b",
+                    "continuity_type": "standalone",
+                    "raw": {
+                        "response": {
+                            "mode": "tool",
+                            "tool": {
+                                "name": "variety_lookup",
+                                "message": "请回复序号或品种名称。",
+                                "data": {
+                                    "query": "湖南审定的粳稻",
+                                    "region_choice": "湖南",
+                                    "raw_matches": [
+                                        {"variety_name": "科粳稻1号", "approval_region": "湖南"},
+                                        {"variety_name": "科粳稻2号", "approval_region": "湖南"},
+                                    ],
+                                    "raw_selected": {
+                                        "variety_name": "科粳稻1号",
+                                        "approval_region": "湖南",
+                                    },
+                                },
+                            },
+                        }
+                    },
+                },
+                "response_json": {},
+            }
+        ]
+        hydrated = {
+            42: [
+                {
+                    "id": 39,
+                    "created_at": 39,
+                    "session_id": "s-thread",
+                    "mode": "workflow",
+                    "prompt": "帮我创建一个种植计划",
+                    "request_json": {
+                        "thread_id": "thread-a",
+                        "continuity_type": "standalone",
+                        "raw": {
+                            "response": {
+                                "mode": "workflow",
+                                "plan": {
+                                    "message": "还缺少地区。",
+                                    "data": {"workflow_name": "crop_calendar_workflow"},
+                                },
+                            }
+                        },
+                    },
+                    "response_json": {},
+                },
+                {
+                    "id": 41,
+                    "created_at": 41,
+                    "session_id": "s-thread",
+                    "mode": "workflow",
+                    "prompt": "是",
+                    "request_json": {
+                        "thread_id": "thread-a",
+                        "parent_interaction_id": 39,
+                        "continuity_type": "pending_resume",
+                        "raw": {
+                            "response": {
+                                "mode": "workflow",
+                                "plan": {
+                                    "message": "已保存种植计划。",
+                                    "data": {"workflow_name": "crop_calendar_workflow"},
+                                },
+                            }
+                        },
+                    },
+                    "response_json": {},
+                },
+            ]
+        }
+
+        batches = build_production_audit_batches(
+            rows,
+            store_name="postgres",
+            hydrated_session_rows_by_row_id=hydrated,
+        )
+
+        self.assertEqual(len(batches["planner.context_dependent"]["cases"]), 0)
+        self.assertEqual(len(batches["planner"]["cases"]), 1)
+        case = batches["planner"]["cases"][0]
+        self.assertEqual(case["source"]["sampling_scope"], "standalone")
+        self.assertEqual(case["source"]["thread_id"], "thread-b")
+        self.assertNotIn("context_window", case["source"])
+
     def test_build_sampling_watermark_tracks_latest_row(self) -> None:
         from src.eval_platform.audit_pipeline import build_sampling_watermark
 
@@ -432,6 +764,101 @@ class AuditPipelineTests(unittest.TestCase):
         queue = build_human_review_queue(review_payload, max_confidence_auto_pass=0.9)
         self.assertEqual(len(queue["records"]), 1)
         self.assertEqual(queue["records"][0]["id"], "b")
+
+    def test_normalize_observed_output_aligns_planner_fields(self) -> None:
+        from src.eval_platform.audit_pipeline import _normalize_observed_output
+
+        normalized = _normalize_observed_output(
+            "planner",
+            {
+                "mode": "workflow",
+                "workflow_name": "crop_calendar_workflow",
+                "message": "已保存种植计划。",
+            },
+        )
+
+        self.assertEqual(normalized["action"], "workflow")
+        self.assertEqual(normalized["name"], "crop_calendar_workflow")
+
+    def test_audit_judge_prompt_mentions_normalized_schema_output(self) -> None:
+        from src.prompts.audit_judge import PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT
+
+        self.assertIn("normalized_observed_output", PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT)
+        self.assertIn("schema_check_output", PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT)
+        self.assertIn("dialogue_act", PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT)
+        self.assertIn("task_type", PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT)
+
+    def test_build_batches_carries_dialogue_act_and_task_type(self) -> None:
+        from src.eval_platform.audit_pipeline import build_production_audit_batches
+
+        rows = [
+            {
+                "id": 88,
+                "created_at": 88,
+                "session_id": "s-dialogue",
+                "mode": "tool",
+                "prompt": "湖南常德下周适合施肥吗",
+                "request_json": {
+                    "thread_id": "thread-dialogue",
+                    "continuity_type": "standalone",
+                    "continuity_source": "none",
+                    "dialogue_act": "start_new_task",
+                    "task_type": "weather_lookup",
+                    "raw": {
+                        "response": {
+                            "mode": "tool",
+                            "tool": {
+                                "name": "weather_lookup",
+                                "message": "ok",
+                                "data": {
+                                    "region": "湖南常德",
+                                    "start_date": "2026-03-30",
+                                    "end_date": "2026-04-05",
+                                    "requested_operations": ["施肥"],
+                                },
+                            },
+                        }
+                    },
+                },
+                "response_json": {},
+            }
+        ]
+
+        batches = build_production_audit_batches(rows, store_name="postgres")
+        case = batches["planner"]["cases"][0]
+        self.assertEqual(case["source"]["dialogue_act"], "start_new_task")
+        self.assertEqual(case["source"]["task_type"], "weather_lookup")
+
+    def test_build_human_review_queue_keeps_normalized_observed_output(self) -> None:
+        from src.eval_platform.audit_pipeline import build_human_review_queue
+
+        review_payload = {
+            "records": [
+                {
+                    "id": "planner_case",
+                    "task": "planner",
+                    "source": {},
+                    "input": {"prompt": "是"},
+                    "expected": {"action": "workflow", "name": "crop_calendar_workflow"},
+                    "observed_output": {
+                        "mode": "workflow",
+                        "workflow_name": "crop_calendar_workflow",
+                    },
+                    "normalized_observed_output": {
+                        "action": "workflow",
+                        "name": "crop_calendar_workflow",
+                    },
+                    "ai_judge": {"verdict": "needs_human_review", "confidence": 0.8},
+                    "human_review": {"status": "pending"},
+                }
+            ]
+        }
+
+        queue = build_human_review_queue(review_payload, max_confidence_auto_pass=0.9)
+        self.assertEqual(
+            queue["records"][0]["normalized_observed_output"]["action"],
+            "workflow",
+        )
 
     def test_build_human_review_queue_skips_non_pending_records(self) -> None:
         from src.eval_platform.audit_pipeline import build_human_review_queue

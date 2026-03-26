@@ -1,5 +1,19 @@
 ## System Overview
 
+## Contents
+
+- [System Overview](#system-overview)
+- [Core Modules](#core-modules)
+- [Agent Module Map](#agent-module-map)
+- [LangGraph Details](#langgraph-details)
+- [Routing Logic](#routing-logic)
+- [Dialogue Orchestration](#dialogue-orchestration)
+- [Config Governance](#config-governance)
+- [Crop Calendar Workflow (Current)](#crop-calendar-workflow-current)
+- [Tool Notes](#tool-notes)
+- [Deployment Notes](#deployment-notes)
+- [Tests](#tests)
+
 ```
 Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
 ```
@@ -67,7 +81,7 @@ Chainlit UI --> FastAPI backend --> Planner (LLM) + Executor (tools + LangGraph)
   - Decides whether a user turn should resume pending work or start a new topic.
 - `src/agent/session_context.py`
   - Builds contextual candidates from the active session state.
-  - Supports session-aware follow-up merge for weather, variety, sowing suitability, planting-plan, crop-calendar, and growth-stage flows.
+  - Uses a registry-based adapter layer for weather, variety, sowing suitability, planting-plan, crop-calendar, and growth-stage flows.
   - Produces confidence/evidence metadata used by the router and trace annotations.
 - `src/agent/followup.py`
   - Shared protocol layer for follow-up payloads.
@@ -121,7 +135,36 @@ Growth-stage workflow specifics:
 - Session resolution is annotated into the current trace/span under:
   - `session.contextual_candidate`
   - `session.standalone_plan`
-  - `session.resolution`
+- `session.resolution`
+
+## Dialogue Orchestration
+- The system should be understood as a conversation orchestrator, not only an intent router.
+- Runtime resolution order is:
+  1. `session`
+  2. `thread`
+  3. `dialogue_act`
+  4. `field_update`
+- `session_context` is now implemented as a registry of adapters instead of a central `if/elif` ladder.
+- Each adapter declares:
+  - `task_type`
+  - `updatable_fields`
+  - `extract_context(...)`
+  - `build_candidate(...)`
+- Explicit metadata now recorded in interaction context and persisted to the interaction store:
+  - `thread_id`
+  - `parent_interaction_id`
+  - `continuity_type`
+  - `continuity_source`
+  - `dialogue_act`
+  - `task_type`
+- `dialogue_act` is a lightweight first-pass label such as:
+  - `start_new_task`
+  - `update_fields`
+  - `select_option`
+  - `confirm`
+  - `cancel`
+  - `continue_task`
+- The detailed design and target model are documented in [doc/dialogue_orchestration.md](/f:/workspace/nlp-crop-calendar/doc/dialogue_orchestration.md).
 
 ## Config Governance
 - Environment-level config (DB URL/API keys/providers) stays in `.env`/`AppConfig`.

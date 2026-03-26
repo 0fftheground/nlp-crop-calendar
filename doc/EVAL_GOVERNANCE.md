@@ -2,6 +2,46 @@
 
 This repository uses two evaluation lines and three operational profiles.
 
+## Contents
+
+- [Evaluation Lines](#evaluation-lines)
+- [Boundary With `tests/`](#boundary-with-tests)
+- [Case Gates](#case-gates)
+- [Profiles](#profiles)
+- [Operating Model](#operating-model)
+- [End-to-End Pipeline](#end-to-end-pipeline)
+  - [Pipeline Overview](#pipeline-overview)
+  - [What Lives Where](#what-lives-where)
+  - [Cache Artifact Layout](#cache-artifact-layout)
+  - [Who Uses Which Path](#who-uses-which-path)
+- [Operator Guide](#operator-guide)
+  - [Command Selection Guide](#command-selection-guide)
+  - [When To Run What](#when-to-run-what)
+  - [Common End-to-End Scenarios](#common-end-to-end-scenarios)
+  - [Inputs And Outputs By Command](#inputs-and-outputs-by-command)
+  - [Ownership Suggestions](#ownership-suggestions)
+- [Execution Flow](#execution-flow)
+  - [A. Offline Expert Evaluation](#a-offline-expert-evaluation)
+  - [B. Baseline vs Candidate Comparison](#b-baseline-vs-candidate-comparison)
+  - [C. Production Audit Sampling](#c-production-audit-sampling)
+  - [D. AI Judge Review](#d-ai-judge-review)
+  - [E. Human Review Queue](#e-human-review-queue)
+  - [F. CSV / Excel Review Layer](#f-csv--excel-review-layer)
+  - [G. Audit Promotion Export](#g-audit-promotion-export)
+  - [H. Promotion Import Back Into Expert](#h-promotion-import-back-into-expert)
+- [Scheduled Audit Feasibility](#scheduled-audit-feasibility)
+  - [Recommended Automation Boundary](#recommended-automation-boundary)
+  - [Recommended Scheduled Flow](#recommended-scheduled-flow)
+  - [Good Trigger Frequencies](#good-trigger-frequencies)
+  - [Important Note](#important-note)
+  - [Provided Windows Scripts](#provided-windows-scripts)
+- [Daily Operating Recipes](#daily-operating-recipes)
+  - [Change the default model safely](#change-the-default-model-safely)
+  - [Review online quality every cycle](#review-online-quality-every-cycle)
+  - [Add a new release-gate case manually](#add-a-new-release-gate-case-manually)
+- [Commands](#commands)
+- [Production Audit Closed Loop](#production-audit-closed-loop)
+
 ## Evaluation Lines
 
 - `expert`
@@ -828,6 +868,57 @@ The default policy in [governance.yaml](/f:/workspace/nlp-crop-calendar/src/eval
 
 ## Production Audit Closed Loop
 
+Use this section in three layers:
+
+1. `run-latest`
+   - one-shot command
+   - already includes:
+     - `sample`
+     - `judge`
+     - `review-queue`
+2. manual audit steps
+   - use only when you want to run each stage separately or rerun one stage
+3. post-review steps
+   - happen after humans have reviewed the queue/review files
+   - include:
+     - `export-csv`
+     - `import-csv`
+     - `audit promote`
+     - `promote`
+
+### Layer 1: One-shot Command
+
+Run the latest production-audit batch end to end:
+
+```bash
+python -m src.eval_platform audit run-latest --limit 50 --days 30 --out-dir .cache/eval/production_audit/runs/latest
+```
+
+This single command does:
+
+- sample real interactions into batch files
+- run AI judge and create `reviews/`
+- build human review queues in `queues/`
+
+It does not do:
+
+- CSV export/import for human review
+- promotion export
+- import back into `expert`
+
+This command emits two kinds of batch files:
+
+- `planner.yaml` / `extractor.yaml` / `variety_match.yaml`
+  - standalone, deterministic replay is enabled
+- `planner.context_dependent.yaml` / `extractor.context_dependent.yaml` / `variety_match.context_dependent.yaml`
+  - short follow-up samples that depend on session context
+  - AI judge only; deterministic replay is intentionally skipped
+  - each record carries a deidentified bounded `context_window` from the same session instead of just the immediately previous turn
+
+### Layer 2: Manual Audit Steps
+
+Use these only when you want to run the stages one by one.
+
 Sample deidentified interactions from the configured interaction store:
 
 ```bash
@@ -839,21 +930,6 @@ Sampling is now incremental by default:
 - the sampler persists a watermark file at `.state/eval/production_audit/sampling_state.json`
 - each run continues from the last sampled `(created_at, id)` pair
 - use `--reset-cursor` if you want to rebuild from the current date window
-
-Run the latest production-audit batch end to end:
-
-```bash
-python -m src.eval_platform audit run-latest --limit 50 --days 30 --out-dir .cache/eval/production_audit/runs/latest
-```
-
-This command now emits two kinds of batch files:
-
-- `planner.yaml` / `extractor.yaml` / `variety_match.yaml`
-  - standalone, deterministic replay is enabled
-- `planner.context_dependent.yaml` / `extractor.context_dependent.yaml` / `variety_match.context_dependent.yaml`
-  - short follow-up samples that depend on session context
-  - AI judge only; deterministic replay is intentionally skipped
-  - each record carries a deidentified bounded `context_window` from the same session instead of just the immediately previous turn
 
 Run AI judge on sampled audit batches:
 
@@ -867,7 +943,18 @@ Generate a human review queue from judge output:
 python -m src.eval_platform audit review-queue --review .cache/eval/production_audit/reviews/planner.review.yaml --review .cache/eval/production_audit/reviews/extractor.review.yaml --review .cache/eval/production_audit/reviews/variety_match.review.yaml --out-dir .cache/eval/production_audit/queues
 ```
 
-After humans edit review files and mark `human_review.status: promote_to_expert`, export promotion candidates:
+### Layer 3: Post-Review Steps
+
+After `run-latest` or the manual steps above have produced `reviews/` and `queues/`, humans review the records.
+
+Optional CSV / Excel export for human review:
+
+```bash
+python -m src.eval_platform audit export-csv --queue .cache/eval/production_audit/queues/planner.review.queue.yaml --out-dir .cache/eval/production_audit/csv
+python -m src.eval_platform audit import-csv --csv .cache/eval/production_audit/csv/planner.review.queue.csv
+```
+
+After humans mark `human_review.status: promote_to_expert`, export promotion candidates:
 
 ```bash
 python -m src.eval_platform audit promote --review .cache/eval/production_audit/reviews/planner.review.yaml --review .cache/eval/production_audit/reviews/extractor.review.yaml --review .cache/eval/production_audit/reviews/variety_match.review.yaml --out-dir .cache/eval/production_audit/promotions

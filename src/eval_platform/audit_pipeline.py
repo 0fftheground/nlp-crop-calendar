@@ -52,6 +52,7 @@ _STANDALONE_QUERY_TOKENS = (
     "如何",
 )
 _CONTEXT_WINDOW_LIMIT = 5
+_SESSION_HISTORY_LOOKBACK_LIMIT = 50
 _REVIEW_CSV_FIELDS = [
     "source_review_file",
     "case_id",
@@ -61,6 +62,7 @@ _REVIEW_CSV_FIELDS = [
     "context_summary",
     "expected_json",
     "observed_output_json",
+    "normalized_observed_output_json",
     "ai_verdict",
     "ai_risk",
     "ai_confidence",
@@ -136,6 +138,27 @@ def _context_summary(source: Dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
+def _normalize_observed_output(task: str, observed_output: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(observed_output or {})
+    if task == "planner":
+        mode = str(normalized.get("mode") or "").strip()
+        if mode:
+            normalized["action"] = mode
+        name = str(
+            normalized.get("name")
+            or normalized.get("tool_name")
+            or normalized.get("workflow_name")
+            or ""
+        ).strip()
+        if name:
+            normalized["name"] = name
+    elif task == "extractor":
+        resolved_fields = dict(normalized.get("resolved_fields") or {})
+        if resolved_fields:
+            normalized = resolved_fields
+    return normalized
+
+
 def export_review_records_to_csv(
     payload: Dict[str, Any],
     *,
@@ -159,6 +182,9 @@ def export_review_records_to_csv(
                     "context_summary": _context_summary(dict(record.get("source") or {})),
                     "expected_json": _json_text(record.get("expected") or {}),
                     "observed_output_json": _json_text(record.get("observed_output") or {}),
+                    "normalized_observed_output_json": _json_text(
+                        record.get("normalized_observed_output") or {}
+                    ),
                     "ai_verdict": str(ai_judge.get("verdict") or ""),
                     "ai_risk": str(ai_judge.get("risk") or ""),
                     "ai_confidence": str(ai_judge.get("confidence") or ""),
@@ -295,7 +321,8 @@ def _load_postgres_interactions(
         raise RuntimeError("缺少 CACHE_DB_URL，无法读取 interactions。")
     if after_created_at is not None:
         sql = (
-            "SELECT id, created_at, session_id, mode, prompt, request_json, response_json "
+            "SELECT id, created_at, session_id, request_id, thread_id, parent_interaction_id, "
+            "continuity_type, continuity_source, mode, prompt, request_json, response_json "
             "FROM interactions WHERE (created_at > %s OR (created_at = %s AND id > %s)) "
             "ORDER BY created_at ASC, id ASC LIMIT %s"
         )
@@ -308,7 +335,8 @@ def _load_postgres_interactions(
         (datetime.now(timezone.utc) - timedelta(days=max(0, days))).timestamp()
     )
     sql = (
-        "SELECT id, created_at, session_id, mode, prompt, request_json, response_json "
+        "SELECT id, created_at, session_id, request_id, thread_id, parent_interaction_id, "
+        "continuity_type, continuity_source, mode, prompt, request_json, response_json "
         "FROM interactions WHERE created_at >= %s "
         "ORDER BY created_at ASC, id ASC LIMIT %s"
     )
@@ -332,7 +360,8 @@ def _load_sqlite_interactions(
         cur = conn.cursor()
         if after_created_at is not None:
             cur.execute(
-                "SELECT id, created_at, session_id, mode, prompt, request_json, response_json "
+                "SELECT id, created_at, session_id, request_id, thread_id, parent_interaction_id, "
+                "continuity_type, continuity_source, mode, prompt, request_json, response_json "
                 "FROM interactions WHERE (created_at > ? OR (created_at = ? AND id > ?)) "
                 "ORDER BY created_at ASC, id ASC LIMIT ?",
                 (after_created_at, after_created_at, after_id or 0, limit),
@@ -342,7 +371,8 @@ def _load_sqlite_interactions(
                 (datetime.now(timezone.utc) - timedelta(days=max(0, days))).timestamp()
             )
             cur.execute(
-                "SELECT id, created_at, session_id, mode, prompt, request_json, response_json "
+                "SELECT id, created_at, session_id, request_id, thread_id, parent_interaction_id, "
+                "continuity_type, continuity_source, mode, prompt, request_json, response_json "
                 "FROM interactions WHERE created_at >= ? "
                 "ORDER BY created_at ASC LIMIT ?",
                 (cutoff, limit),
@@ -353,12 +383,86 @@ def _load_sqlite_interactions(
                     "id": row[0],
                     "created_at": row[1],
                     "session_id": row[2],
-                    "mode": row[3],
-                    "prompt": row[4],
-                    "request_json": row[5],
-                    "response_json": row[6],
+                    "request_id": row[3],
+                    "thread_id": row[4],
+                    "parent_interaction_id": row[5],
+                    "continuity_type": row[6],
+                    "continuity_source": row[7],
+                    "mode": row[8],
+                    "prompt": row[9],
+                    "request_json": row[10],
+                    "response_json": row[11],
                 }
             )
+    return rows
+
+
+def _load_postgres_session_history(
+    session_id: str,
+    *,
+    before_created_at: int,
+    before_id: int,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    cfg = get_config()
+    if not cfg.cache_db_url:
+        raise RuntimeError("缺少 CACHE_DB_URL，无法读取 interactions。")
+    sql = (
+        "SELECT id, created_at, session_id, request_id, thread_id, parent_interaction_id, "
+        "continuity_type, continuity_source, mode, prompt, request_json, response_json "
+        "FROM interactions WHERE session_id = %s "
+        "AND (created_at < %s OR (created_at = %s AND id < %s)) "
+        "ORDER BY created_at DESC, id DESC LIMIT %s"
+    )
+    rows = fetch_all(
+        cfg.cache_db_url,
+        sql,
+        (session_id, before_created_at, before_created_at, before_id, limit),
+    )
+    return list(reversed(rows))
+
+
+def _load_sqlite_session_history(
+    session_id: str,
+    *,
+    before_created_at: int,
+    before_id: int,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    cfg = get_config()
+    if cfg.interaction_store_path:
+        path = Path(cfg.interaction_store_path)
+    else:
+        path = Path(__file__).resolve().parents[2] / ".cache" / "interactions.sqlite3"
+    rows: List[Dict[str, Any]] = []
+    with sqlite3.connect(path) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, created_at, session_id, request_id, thread_id, parent_interaction_id, "
+            "continuity_type, continuity_source, mode, prompt, request_json, response_json "
+            "FROM interactions WHERE session_id = ? "
+            "AND (created_at < ? OR (created_at = ? AND id < ?)) "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (session_id, before_created_at, before_created_at, before_id, limit),
+        )
+        for row in cur.fetchall():
+            rows.append(
+                {
+                    "id": row[0],
+                    "created_at": row[1],
+                    "session_id": row[2],
+                    "request_id": row[3],
+                    "thread_id": row[4],
+                    "parent_interaction_id": row[5],
+                    "continuity_type": row[6],
+                    "continuity_source": row[7],
+                    "mode": row[8],
+                    "prompt": row[9],
+                    "request_json": row[10],
+                    "response_json": row[11],
+                }
+            )
+    rows.reverse()
     return rows
 
 
@@ -384,6 +488,34 @@ def load_interactions(
             days,
             after_created_at=after_created_at,
             after_id=after_id,
+        )
+    raise RuntimeError(f"Unsupported interaction store for sampling: {store}")
+
+
+def load_session_history(
+    session_id: str,
+    *,
+    before_created_at: int,
+    before_id: int,
+    limit: int = _SESSION_HISTORY_LOOKBACK_LIMIT,
+) -> List[Dict[str, Any]]:
+    if not session_id:
+        return []
+    cfg = get_config()
+    store = (cfg.interaction_store or "").lower()
+    if store == "postgres":
+        return _load_postgres_session_history(
+            session_id,
+            before_created_at=before_created_at,
+            before_id=before_id,
+            limit=limit,
+        )
+    if store == "sqlite":
+        return _load_sqlite_session_history(
+            session_id,
+            before_created_at=before_created_at,
+            before_id=before_id,
+            limit=limit,
         )
     raise RuntimeError(f"Unsupported interaction store for sampling: {store}")
 
@@ -465,15 +597,11 @@ def _extract_workflow_name(plan: Dict[str, Any]) -> Optional[str]:
         candidate = str(workflow.get("workflow_name") or "").strip()
         if candidate:
             return candidate
-        if workflow.get("plan_id") not in (None, "") or workflow.get("plan_filters"):
-            return "growth_stage_query_workflow"
     if any(
         key in data
         for key in ("planting", "plant_season_id", "resolved_region_id", "save_response")
     ):
         return "crop_calendar_workflow"
-    if plan.get("growth_stage") not in (None, ""):
-        return "growth_stage_query_workflow"
     return None
 
 
@@ -599,6 +727,14 @@ def _summarize_interaction_context(
     row: Dict[str, Any], raw: Dict[str, Any]
 ) -> Dict[str, Any]:
     response = dict(raw.get("response") or {})
+    lineage = _extract_lineage_metadata(
+        {
+            "row": row,
+            "request_json": {},
+            "response_json": {},
+            "raw": raw,
+        }
+    )
     summary: Dict[str, Any] = {
         "interaction_id": row.get("id"),
         "created_at": row.get("created_at"),
@@ -618,12 +754,164 @@ def _summarize_interaction_context(
         workflow_state = dict(dict(plan.get("data") or {}).get("workflow_state") or {})
         if workflow_state:
             summary["workflow_state"] = deidentify_value(workflow_state)
+    if lineage.get("thread_id"):
+        summary["thread_id"] = lineage.get("thread_id")
+    if lineage.get("parent_interaction_id") is not None:
+        summary["parent_interaction_id"] = lineage.get("parent_interaction_id")
+    if lineage.get("continuity_type"):
+        summary["continuity_type"] = lineage.get("continuity_type")
+    if lineage.get("continuity_source"):
+        summary["continuity_source"] = lineage.get("continuity_source")
+    if lineage.get("dialogue_act"):
+        summary["dialogue_act"] = lineage.get("dialogue_act")
+    if lineage.get("task_type"):
+        summary["task_type"] = lineage.get("task_type")
     return deidentify_value(summary)
 
 
-def _is_context_dependent_followup(
-    prompt: str, previous_entry: Optional[Dict[str, Any]]
+def _prepare_interaction_items(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    prepared_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        request_json = _normalize_json(row.get("request_json"))
+        response_json = _normalize_json(row.get("response_json"))
+        raw = _load_raw_payload(request_json, response_json)
+        if not raw:
+            continue
+        prepared_rows.append(
+            {
+                "row": row,
+                "request_json": request_json,
+                "response_json": response_json,
+                "raw": raw,
+            }
+        )
+    prepared_rows.sort(
+        key=lambda item: (int(item["row"].get("created_at") or 0), int(item["row"].get("id") or 0))
+    )
+    return prepared_rows
+
+
+def _extract_lineage_metadata(item: Dict[str, Any]) -> Dict[str, Any]:
+    row = dict(item.get("row") or {})
+    request_json = dict(item.get("request_json") or {})
+    response_json = dict(item.get("response_json") or {})
+    raw = dict(item.get("raw") or {})
+    candidates = [
+        request_json,
+        response_json,
+        raw,
+        dict(raw.get("request") or {}),
+        dict(raw.get("response") or {}),
+        row,
+    ]
+
+    def _first_str(*keys: str) -> Optional[str]:
+        for source in candidates:
+            for key in keys:
+                value = str(source.get(key) or "").strip()
+                if value:
+                    return value
+        return None
+
+    def _first_int(*keys: str) -> Optional[int]:
+        for source in candidates:
+            for key in keys:
+                value = source.get(key)
+                if value in (None, ""):
+                    continue
+                try:
+                    return int(value)
+                except Exception:
+                    continue
+        return None
+
+    return {
+        "request_id": _first_str("request_id"),
+        "thread_id": _first_str("thread_id"),
+        "continuity_type": _first_str("continuity_type"),
+        "continuity_source": _first_str("continuity_source"),
+        "dialogue_act": _first_str("dialogue_act"),
+        "task_type": _first_str("task_type"),
+        "parent_interaction_id": _first_int("parent_interaction_id"),
+    }
+
+
+def _entry_lineage(entry: Dict[str, Any]) -> Dict[str, Any]:
+    return _extract_lineage_metadata(entry)
+
+
+def _entry_mode(entry: Dict[str, Any]) -> str:
+    response = dict(dict(entry.get("raw") or {}).get("response") or {})
+    return str(response.get("mode") or dict(entry.get("row") or {}).get("mode") or "").strip()
+
+
+def _entry_prompt(entry: Dict[str, Any]) -> str:
+    return str(dict(entry.get("row") or {}).get("prompt") or "").strip()
+
+
+def _is_workflow_or_tool_start(
+    entries: List[Dict[str, Any]], index: int
 ) -> bool:
+    entry = entries[index]
+    if _entry_mode(entry) not in {"tool", "workflow"}:
+        return False
+    lineage = _entry_lineage(entry)
+    continuity_type = str(lineage.get("continuity_type") or "").strip()
+    if continuity_type == "standalone":
+        return True
+    if continuity_type and continuity_type not in {"standalone", "none"}:
+        return False
+    previous_entry = entries[index - 1] if index > 0 else None
+    return not _is_context_dependent_followup(_entry_prompt(entry), previous_entry)
+
+
+def _select_context_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not entries:
+        return []
+    start_index = max(0, len(entries) - _CONTEXT_WINDOW_LIMIT)
+    while start_index > 0:
+        candidate_index = start_index - 1
+        start_index = candidate_index
+        if _is_workflow_or_tool_start(entries, candidate_index):
+            break
+    return list(entries[start_index:])
+
+
+def hydrate_prior_session_rows(
+    rows: Iterable[Dict[str, Any]],
+    *,
+    lookback_limit: int = _SESSION_HISTORY_LOOKBACK_LIMIT,
+) -> Dict[int, List[Dict[str, Any]]]:
+    hydrated: Dict[int, List[Dict[str, Any]]] = {}
+    for row in rows:
+        try:
+            row_id = int(row.get("id") or 0)
+            created_at = int(row.get("created_at") or 0)
+        except Exception:
+            continue
+        session_id = str(row.get("session_id") or "").strip()
+        if not row_id or not created_at or not session_id:
+            continue
+        hydrated[row_id] = load_session_history(
+            session_id,
+            before_created_at=created_at,
+            before_id=row_id,
+            limit=lookback_limit,
+        )
+    return hydrated
+
+
+def _is_context_dependent_followup(
+    prompt: str,
+    previous_entry: Optional[Dict[str, Any]],
+    *,
+    continuity_type: Optional[str] = None,
+) -> bool:
+    continuity = str(continuity_type or "").strip()
+    if continuity == "standalone":
+        return False
+    if continuity and continuity not in {"standalone", "none"}:
+        return True
     text = str(prompt or "").strip()
     if not text or previous_entry is None:
         return False
@@ -645,10 +933,29 @@ def _is_context_dependent_followup(
     return False
 
 
+def _filter_context_entries_for_current(
+    current_item: Dict[str, Any], entries: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    if not entries:
+        return []
+    current_lineage = _entry_lineage(current_item)
+    current_thread_id = str(current_lineage.get("thread_id") or "").strip()
+    if current_thread_id:
+        same_thread = [
+            entry
+            for entry in entries
+            if str(_entry_lineage(entry).get("thread_id") or "").strip() == current_thread_id
+        ]
+        if same_thread:
+            return same_thread
+    return list(entries)
+
+
 def build_production_audit_batches(
     rows: Iterable[Dict[str, Any]],
     *,
     store_name: str,
+    hydrated_session_rows_by_row_id: Optional[Dict[int, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     generated_at = utc_now_iso()
     batches = {
@@ -689,37 +996,38 @@ def build_production_audit_batches(
             replay_mode="judge_only",
         ).model_dump(mode="json"),
     }
+    rows = list(rows)
     seen_ids = {key: set() for key in batches}
-    prepared_rows: List[Dict[str, Any]] = []
-    for row in rows:
-        request_json = _normalize_json(row.get("request_json"))
-        response_json = _normalize_json(row.get("response_json"))
-        raw = _load_raw_payload(request_json, response_json)
-        if not raw:
-            continue
-        prepared_rows.append(
-            {
-                "row": row,
-                "request_json": request_json,
-                "response_json": response_json,
-                "raw": raw,
-            }
-        )
-    prepared_rows.sort(
-        key=lambda item: (int(item["row"].get("created_at") or 0), int(item["row"].get("id") or 0))
-    )
-    prior_window_by_session: Dict[str, List[Dict[str, Any]]] = {}
+    prepared_rows = _prepare_interaction_items(rows)
+    prior_history_by_session: Dict[str, List[Dict[str, Any]]] = {}
     prior_window_by_row_id: Dict[int, List[Dict[str, Any]]] = {}
     for item in prepared_rows:
         row = item["row"]
         row_id = int(row.get("id") or 0)
         session_id = str(row.get("session_id") or "").strip()
-        if session_id and session_id in prior_window_by_session:
-            prior_window_by_row_id[row_id] = list(prior_window_by_session[session_id])
+        if session_id and session_id in prior_history_by_session:
+            prior_window_by_row_id[row_id] = _select_context_entries(
+                _filter_context_entries_for_current(
+                    item,
+                    list(prior_history_by_session[session_id]),
+                )
+            )
         if session_id:
-            history = list(prior_window_by_session.get(session_id) or [])
+            history = list(prior_history_by_session.get(session_id) or [])
             history.append(item)
-            prior_window_by_session[session_id] = history[-_CONTEXT_WINDOW_LIMIT:]
+            prior_history_by_session[session_id] = history
+    if hydrated_session_rows_by_row_id:
+        for item in prepared_rows:
+            row = item["row"]
+            row_id = int(row.get("id") or 0)
+            hydrated_rows = list(hydrated_session_rows_by_row_id.get(row_id) or [])
+            if not hydrated_rows:
+                continue
+            hydrated_items = _prepare_interaction_items(hydrated_rows)
+            if hydrated_items:
+                prior_window_by_row_id[row_id] = _select_context_entries(
+                    _filter_context_entries_for_current(item, hydrated_items)
+                )
 
     for item in prepared_rows:
         row = item["row"]
@@ -734,8 +1042,11 @@ def build_production_audit_batches(
                 continue
             context_entries = prior_window_by_row_id.get(int(row.get("id") or 0), [])
             previous_entry = context_entries[-1] if context_entries else None
+            lineage = _entry_lineage(item)
             is_context_dependent = _is_context_dependent_followup(
-                str(row.get("prompt") or ""), previous_entry
+                str(row.get("prompt") or ""),
+                previous_entry,
+                continuity_type=str(lineage.get("continuity_type") or "").strip() or None,
             )
             bucket_key = f"{task}.context_dependent" if is_context_dependent else task
             if case["id"] in seen_ids[bucket_key]:
@@ -745,6 +1056,18 @@ def build_production_audit_batches(
             source["sampling_scope"] = (
                 "context_dependent" if is_context_dependent else "standalone"
             )
+            if lineage.get("thread_id"):
+                source["thread_id"] = lineage.get("thread_id")
+            if lineage.get("parent_interaction_id") is not None:
+                source["parent_interaction_id"] = lineage.get("parent_interaction_id")
+            if lineage.get("continuity_type"):
+                source["continuity_type"] = lineage.get("continuity_type")
+            if lineage.get("continuity_source"):
+                source["continuity_source"] = lineage.get("continuity_source")
+            if lineage.get("dialogue_act"):
+                source["dialogue_act"] = lineage.get("dialogue_act")
+            if lineage.get("task_type"):
+                source["task_type"] = lineage.get("task_type")
             is_workflow_case = (
                 str(dict(case.get("expected") or {}).get("action") or "").strip()
                 == "workflow"
@@ -775,11 +1098,14 @@ def save_production_audit_batches(
 def _run_ai_judge(case: Dict[str, Any]) -> AuditJudgeDecision:
     llm = get_audit_judge_model()
     judge = llm.with_structured_output(AuditJudgeDecision)
+    normalized_observed_output = dict(case.get("normalized_observed_output") or {})
     payload = {
         "task": case.get("task"),
         "input": case.get("input"),
         "expected": case.get("expected"),
         "observed_output": case.get("observed_output"),
+        "normalized_observed_output": normalized_observed_output,
+        "schema_check_output": normalized_observed_output or case.get("observed_output"),
         "rule_grade": case.get("rule_grade"),
         "source": case.get("source"),
     }
@@ -826,6 +1152,10 @@ def build_review_records_from_batch(batch_path: Path) -> Dict[str, Any]:
             input=dict(case.get("input") or {}),
             expected=expected,
             observed_output=dict(case.get("observed_output") or {}),
+            normalized_observed_output=_normalize_observed_output(
+                task,
+                dict(case.get("observed_output") or {}),
+            ),
             source=dict(case.get("source") or {}),
             rule_grade=rule_grade,
         )
@@ -835,6 +1165,7 @@ def build_review_records_from_batch(batch_path: Path) -> Dict[str, Any]:
                 "input": record.input,
                 "expected": record.expected,
                 "observed_output": record.observed_output,
+                "normalized_observed_output": record.normalized_observed_output,
                 "rule_grade": rule_grade,
                 "source": record.source,
             }
@@ -871,6 +1202,9 @@ def build_human_review_queue(
                     "input": dict(record.get("input") or {}),
                     "expected": dict(record.get("expected") or {}),
                     "observed_output": dict(record.get("observed_output") or {}),
+                    "normalized_observed_output": dict(
+                        record.get("normalized_observed_output") or {}
+                    ),
                     "ai_judge": ai_judge,
                     "human_review": human_review.model_dump(mode="json", exclude_none=True),
                 }

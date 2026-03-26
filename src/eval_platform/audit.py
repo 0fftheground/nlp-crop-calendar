@@ -14,6 +14,7 @@ from .audit_pipeline import (
     build_promotion_candidates,
     build_review_records_from_batch,
     export_review_records_to_csv,
+    hydrate_prior_session_rows,
     import_review_csv_rows,
     load_interactions,
     review_csv_fields,
@@ -159,8 +160,14 @@ def _cmd_sample(args) -> int:
         after_id=state.get("last_id"),
     )
     _status(f"[sample] loaded_rows={len(rows)}")
+    _status("[sample] hydrating session history")
+    hydrated = hydrate_prior_session_rows(rows)
     _status("[sample] building audit batches")
-    batches = build_production_audit_batches(rows, store_name=cfg.interaction_store)
+    batches = build_production_audit_batches(
+        rows,
+        store_name=cfg.interaction_store,
+        hydrated_session_rows_by_row_id=hydrated,
+    )
     saved_paths = save_production_audit_batches(batches, Path(args.out_dir))
     for path in saved_paths:
         _status(f"[sample] wrote {path}")
@@ -188,8 +195,14 @@ def _cmd_run_latest(args) -> int:
         after_id=state.get("last_id"),
     )
     _status(f"[run-latest 1/4] loaded_rows={len(rows)}")
+    _status("[run-latest 1/4] hydrating session history")
+    hydrated = hydrate_prior_session_rows(rows)
     _status("[run-latest 1/4] building and writing audit batches")
-    batches = build_production_audit_batches(rows, store_name=cfg.interaction_store)
+    batches = build_production_audit_batches(
+        rows,
+        store_name=cfg.interaction_store,
+        hydrated_session_rows_by_row_id=hydrated,
+    )
     batch_paths = save_production_audit_batches(batches, batch_dir)
     _status(f"[run-latest 1/4] batch_files={len(batch_paths)}")
     watermark = build_sampling_watermark(rows)

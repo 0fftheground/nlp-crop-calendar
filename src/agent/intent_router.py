@@ -8,7 +8,12 @@ from threading import Lock
 from typing import Optional
 
 from ..observability.logging_utils import log_event
-from .intent_boundaries import looks_like_sowing_query, normalize_prompt
+from .intent_boundaries import (
+    looks_like_crop_calendar_query,
+    looks_like_non_agri_life_query,
+    looks_like_sowing_query,
+    normalize_prompt,
+)
 from .planner import ActionPlan
 
 
@@ -119,6 +124,18 @@ class IntentRouter:
         text = normalize_prompt(prompt)
         if not text:
             return None
+        if looks_like_non_agri_life_query(text):
+            return ActionPlan(
+                action="none",
+                reason="boundary:non_agri_life_query",
+            )
+        if looks_like_crop_calendar_query(text):
+            return ActionPlan(
+                action="workflow",
+                name="crop_calendar_workflow",
+                input=self._default_plan_input("workflow", "crop_calendar_workflow", text),
+                reason="boundary:crop_calendar_query",
+            )
         if looks_like_sowing_query(text):
             return ActionPlan(
                 action="tool",
@@ -250,6 +267,24 @@ class IntentRouter:
     ) -> Optional[ActionPlan]:
         if plan is None:
             return None
+        if looks_like_non_agri_life_query(prompt):
+            if plan.action != "none":
+                return ActionPlan(
+                    action="none",
+                    reason="boundary:non_agri_life_query",
+                )
+            return plan
+        if looks_like_crop_calendar_query(prompt):
+            if plan.action != "workflow" or plan.name != "crop_calendar_workflow":
+                return ActionPlan(
+                    action="workflow",
+                    name="crop_calendar_workflow",
+                    input=self._default_plan_input(
+                        "workflow", "crop_calendar_workflow", normalize_prompt(prompt)
+                    ),
+                    reason="boundary:crop_calendar_query",
+                )
+            return plan
         if looks_like_sowing_query(prompt):
             if plan.action != "tool" or plan.name != "sowing_suitability_lookup":
                 return ActionPlan(

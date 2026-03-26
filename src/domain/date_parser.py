@@ -19,6 +19,67 @@ _RECENT_DAYS_RE = re.compile(r"(?:最近|近)(\d{1,2})天")
 _FUTURE_DAYS_RE = re.compile(r"(?:未来)(\d{1,2})天")
 _RELATIVE_DAYS_FORWARD_RE = re.compile(r"(\d{1,2})天后")
 _RELATIVE_DAYS_BACKWARD_RE = re.compile(r"(\d{1,2})天前")
+_WEEKDAY_POINT_RE = re.compile(r"(下下|下|这|本|上)?(?:周|星期)([一二三四五六日天])")
+
+_WEEKDAY_MAP = {
+    "一": 0,
+    "二": 1,
+    "三": 2,
+    "四": 3,
+    "五": 4,
+    "六": 5,
+    "日": 6,
+    "天": 6,
+}
+
+
+def _extract_relative_point_dates(
+    text: str, *, today: Optional[date] = None
+) -> List[date]:
+    prompt = str(text or "").strip()
+    if not prompt:
+        return []
+    anchor = today or date.today()
+    values: List[date] = []
+    if any(token in prompt for token in ("今天", "今日")):
+        values.append(anchor)
+    for token, offset in (
+        ("昨天", -1),
+        ("昨日", -1),
+        ("前天", -2),
+        ("大前天", -3),
+        ("明天", 1),
+        ("后天", 2),
+        ("大后天", 3),
+    ):
+        if token in prompt:
+            values.append(anchor.fromordinal(anchor.toordinal() + offset))
+    week_start = anchor.fromordinal(anchor.toordinal() - anchor.weekday())
+    for match in _WEEKDAY_POINT_RE.finditer(prompt):
+        prefix = match.group(1) or ""
+        weekday_token = match.group(2)
+        weekday = _WEEKDAY_MAP.get(weekday_token)
+        if weekday is None:
+            continue
+        offset_weeks = 0
+        if prefix == "下":
+            offset_weeks = 1
+        elif prefix == "下下":
+            offset_weeks = 2
+        elif prefix == "上":
+            offset_weeks = -1
+        target = week_start.fromordinal(
+            week_start.toordinal() + offset_weeks * 7 + weekday
+        )
+        values.append(target)
+    deduped: List[date] = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
 
 def _extract_month_phase_range(
@@ -231,11 +292,17 @@ def extract_date_range(text: str, *, today: Optional[date] = None) -> Optional[T
     explicit_dates = extract_explicit_dates(text, today=today)
     if len(explicit_dates) >= 2:
         return explicit_dates[0], explicit_dates[1]
+    relative_point_dates = _extract_relative_point_dates(text, today=today)
+    if len(relative_point_dates) >= 2:
+        ordered = sorted(relative_point_dates)
+        return ordered[0], ordered[-1]
     partial_cn_range = _extract_partial_cn_date_range(text, today=today)
     if partial_cn_range is not None:
         return partial_cn_range
     if len(explicit_dates) == 1:
         return explicit_dates[0], explicit_dates[0]
+    if len(relative_point_dates) == 1:
+        return relative_point_dates[0], relative_point_dates[0]
     month_phase_range = _extract_month_phase_range(text, today=today)
     if month_phase_range is not None:
         return month_phase_range
