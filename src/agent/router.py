@@ -13,7 +13,6 @@ from .session_context import (
     build_contextual_candidate,
     extract_session_context_from_tool,
     extract_session_context_from_workflow,
-    is_explicit_thread_switch_prompt,
     resolve_session_plan,
     should_short_circuit_contextual_candidate,
 )
@@ -35,8 +34,6 @@ from .workflows.registry import get_workflow_spec, list_workflow_specs
 
 
 DEFAULT_NONE_MESSAGE = "未识别到与农事相关的需求。"
-_YES_WORDS = {"是", "好", "好的", "确认", "需要", "要", "ok", "yes", "y"}
-_NO_WORDS = {"否", "不", "不用", "不需要", "取消", "算了", "no", "n"}
 
 
 class RequestRouter:
@@ -192,7 +189,23 @@ class RequestRouter:
                         "session.contextual_candidate", contextual_summary
                     )
                 )
-            if contextual_candidate and not is_explicit_thread_switch_prompt(prompt) and should_short_circuit_contextual_candidate(contextual_candidate):
+            standalone_plan = self._intent_router.plan(
+                prompt,
+                pending=pending,
+                intent_mode=self._intent_mode,
+            )
+            if standalone_plan:
+                standalone_summary = {
+                    "action": standalone_plan.action,
+                    "name": standalone_plan.name,
+                    "reason": standalone_plan.reason,
+                }
+                annotate_current_span(
+                    build_span_attributes("session.standalone_plan", standalone_summary)
+                )
+            if self._can_short_circuit_contextual_candidate(
+                contextual_candidate, standalone_plan
+            ):
                 self._mark_interaction_lineage(
                     continuity_type="session_context_resume",
                     continuity_source="session_context",
@@ -215,20 +228,6 @@ class RequestRouter:
                 )
                 return self._execute_with_validation(
                     contextual_candidate.plan, prompt, pending, session_id
-                )
-            standalone_plan = self._intent_router.plan(
-                prompt,
-                pending=pending,
-                intent_mode=self._intent_mode,
-            )
-            if standalone_plan:
-                standalone_summary = {
-                    "action": standalone_plan.action,
-                    "name": standalone_plan.name,
-                    "reason": standalone_plan.reason,
-                }
-                annotate_current_span(
-                    build_span_attributes("session.standalone_plan", standalone_summary)
                 )
             clarification = build_thread_ownership_clarification(
                 prompt,
@@ -374,9 +373,12 @@ class RequestRouter:
             return "continue_task"
         missing_fields = get_followup_missing_fields(pending)
         if get_followup_kind(pending) == "confirmation":
-            if text in _YES_WORDS:
+            confirmation = self._pending_manager.resolve_pending_confirmation_choice(
+                text
+            )
+            if confirmation == "yes":
                 return "confirm"
-            if text in _NO_WORDS:
+            if confirmation == "no":
                 return "cancel"
             return "confirm"
         options = get_followup_options(pending)
@@ -385,6 +387,22 @@ class RequestRouter:
         if missing_fields:
             return "update_fields"
         return "continue_task"
+
+    def _can_short_circuit_contextual_candidate(
+        self,
+        contextual_candidate,
+        standalone_plan: Optional[ActionPlan],
+    ) -> bool:
+        if contextual_candidate is None:
+            return False
+        if not should_short_circuit_contextual_candidate(contextual_candidate):
+            return False
+        if standalone_plan is None or standalone_plan.action == "none":
+            return True
+        return (
+            standalone_plan.action == contextual_candidate.plan.action
+            and standalone_plan.name == contextual_candidate.plan.name
+        )
 
     def _execute_with_validation(
         self,

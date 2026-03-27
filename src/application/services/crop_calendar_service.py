@@ -932,6 +932,11 @@ def set_crop_calendar_active(
     if cfg.crop_calendar_api_key:
         headers["Authorization"] = f"Bearer {cfg.crop_calendar_api_key}"
         headers["X-API-KEY"] = cfg.crop_calendar_api_key
+    log_event(
+        "crop_calendar_save_api_request",
+        url=cfg.crop_calendar_save_api_url,
+        payload=payload,
+    )
     try:
         response = _post_json(
             cfg.crop_calendar_save_api_url,
@@ -940,14 +945,55 @@ def set_crop_calendar_active(
             timeout=10.0,
         )
         response.raise_for_status()
+    except Exception as exc:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            log_event(
+                "crop_calendar_save_api_http_error",
+                url=cfg.crop_calendar_save_api_url,
+                payload=payload,
+                status_code=getattr(resp, "status_code", None),
+                response_text=summarize_text(getattr(resp, "text", str(exc)), limit=1200),
+            )
+        else:
+            log_event(
+                "crop_calendar_save_api_request_error",
+                url=cfg.crop_calendar_save_api_url,
+                payload=payload,
+                error=str(exc),
+            )
+        raise RuntimeError(f"保存接口请求失败: {exc}") from exc
+    try:
         raw = response.json()
     except Exception as exc:
-        raise RuntimeError(f"保存接口请求失败: {exc}") from exc
+        log_event(
+            "crop_calendar_save_api_parse_error",
+            url=cfg.crop_calendar_save_api_url,
+            payload=payload,
+            status_code=response.status_code,
+            response_text=summarize_text(response.text or "", limit=1200),
+        )
+        raise RuntimeError("保存接口返回格式未识别。") from exc
+    log_event(
+        "crop_calendar_save_api_response",
+        url=cfg.crop_calendar_save_api_url,
+        status_code=response.status_code,
+        response_summary=summarize_text(
+            json.dumps(raw, ensure_ascii=False, default=str), limit=1200
+        ),
+    )
     if not isinstance(raw, dict):
         raise RuntimeError("保存接口返回格式未识别。")
     code = str(raw.get("code", "")).strip()
     if code and code != "0":
         msg = raw.get("msg") or "保存失败。"
+        log_event(
+            "crop_calendar_save_api_business_error",
+            url=cfg.crop_calendar_save_api_url,
+            payload=payload,
+            code=code,
+            msg=str(msg),
+        )
         raise RuntimeError(str(msg))
     return raw
 
@@ -984,6 +1030,11 @@ def delete_crop_calendar_plan(
     if cfg.crop_calendar_api_key:
         headers["Authorization"] = f"Bearer {cfg.crop_calendar_api_key}"
         headers["X-API-KEY"] = cfg.crop_calendar_api_key
+    log_event(
+        "crop_calendar_delete_api_request",
+        url=delete_url,
+        payload=payload,
+    )
     try:
         response = _post_json(
             delete_url,
@@ -992,14 +1043,55 @@ def delete_crop_calendar_plan(
             timeout=10.0,
         )
         response.raise_for_status()
+    except Exception as exc:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            log_event(
+                "crop_calendar_delete_api_http_error",
+                url=delete_url,
+                payload=payload,
+                status_code=getattr(resp, "status_code", None),
+                response_text=summarize_text(getattr(resp, "text", str(exc)), limit=1200),
+            )
+        else:
+            log_event(
+                "crop_calendar_delete_api_request_error",
+                url=delete_url,
+                payload=payload,
+                error=str(exc),
+            )
+        raise RuntimeError(f"删除接口请求失败: {exc}") from exc
+    try:
         raw = response.json()
     except Exception as exc:
-        raise RuntimeError(f"删除接口请求失败: {exc}") from exc
+        log_event(
+            "crop_calendar_delete_api_parse_error",
+            url=delete_url,
+            payload=payload,
+            status_code=response.status_code,
+            response_text=summarize_text(response.text or "", limit=1200),
+        )
+        raise RuntimeError("删除接口返回格式未识别。") from exc
+    log_event(
+        "crop_calendar_delete_api_response",
+        url=delete_url,
+        status_code=response.status_code,
+        response_summary=summarize_text(
+            json.dumps(raw, ensure_ascii=False, default=str), limit=1200
+        ),
+    )
     if not isinstance(raw, dict):
         raise RuntimeError("删除接口返回格式未识别。")
     code = str(raw.get("code", "")).strip()
     if code and code != "0":
         msg = raw.get("msg") or "删除失败。"
+        log_event(
+            "crop_calendar_delete_api_business_error",
+            url=delete_url,
+            payload=payload,
+            code=code,
+            msg=str(msg),
+        )
         raise RuntimeError(str(msg))
     return raw
 

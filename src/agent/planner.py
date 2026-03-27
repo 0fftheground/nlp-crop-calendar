@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import time
 from typing import Any, Dict, Iterable, Optional, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -16,6 +17,9 @@ from ..observability.llm_usage import (
     apply_span_attributes,
     build_llm_input_token_attrs,
     build_llm_output_token_attrs,
+    log_llm_error,
+    log_llm_request,
+    log_llm_response,
 )
 from ..observability.otel import record_exception, start_span
 from ..prompts.planner import build_planner_prompt
@@ -62,6 +66,13 @@ class PlannerRunner:
             pending=payload["pending"],
         )
         try:
+            log_llm_request(
+                "planner",
+                model=self._llm,
+                system_prompt=self._system_prompt,
+                user_prompt=user_payload,
+            )
+            started_at = time.perf_counter()
             span_attrs = build_llm_input_token_attrs(
                 self._llm,
                 system_prompt=self._system_prompt,
@@ -71,6 +82,14 @@ class PlannerRunner:
                 try:
                     raw_result = self._llm.invoke(messages)
                 except Exception as exc:
+                    log_llm_error(
+                        "planner",
+                        model=self._llm,
+                        system_prompt=self._system_prompt,
+                        user_prompt=user_payload,
+                        error=exc,
+                        latency_ms=(time.perf_counter() - started_at) * 1000.0,
+                    )
                     record_exception(span, exc)
                     raise
                 apply_span_attributes(
@@ -80,6 +99,13 @@ class PlannerRunner:
             log_event("planner_error", error=str(exc))
             return None
         raw_text = self._extract_llm_text(raw_result)
+        log_llm_response(
+            "planner",
+            model=self._llm,
+            result=raw_result,
+            latency_ms=(time.perf_counter() - started_at) * 1000.0,
+            response_text=raw_text,
+        )
         log_event(
             "planner_raw",
             raw=raw_text,

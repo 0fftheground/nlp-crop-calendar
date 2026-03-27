@@ -4,6 +4,8 @@ from typing import Dict, Iterable, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 
+from .logging_utils import log_event, summarize_text
+
 
 def _normalize_text(value: object) -> str:
     if value is None:
@@ -127,6 +129,112 @@ def build_llm_output_token_attrs(result: object) -> Dict[str, object]:
         if value is not None:
             attrs[f"llm.usage.{key}"] = value
     return attrs
+
+
+def build_llm_request_log_fields(
+    model: object,
+    *,
+    system_prompt: object,
+    user_prompt: object,
+) -> Dict[str, object]:
+    attrs = build_llm_input_token_attrs(
+        model, system_prompt=system_prompt, user_prompt=user_prompt
+    )
+    fields: Dict[str, object] = {
+        "model": _get_model_name(model),
+        "system_prompt_summary": summarize_text(_normalize_text(system_prompt), limit=800),
+        "user_prompt_summary": summarize_text(_normalize_text(user_prompt), limit=1200),
+    }
+    for key in (
+        "llm.input_tokens.system",
+        "llm.input_tokens.user",
+        "llm.input_tokens.total_text",
+        "llm.input_tokens.total_messages",
+        "llm.model",
+    ):
+        if key in attrs:
+            fields[key] = attrs[key]
+    return fields
+
+
+def build_llm_response_log_fields(
+    model: object,
+    result: object,
+    *,
+    latency_ms: Optional[float] = None,
+    response_text: object = None,
+) -> Dict[str, object]:
+    attrs = build_llm_output_token_attrs(result)
+    fields: Dict[str, object] = {
+        "model": _get_model_name(model),
+    }
+    if latency_ms is not None:
+        fields["latency_ms"] = round(float(latency_ms), 2)
+    if response_text is not None:
+        fields["response_summary"] = summarize_text(
+            _normalize_text(response_text), limit=1200
+        )
+    for key in (
+        "llm.usage.prompt_tokens",
+        "llm.usage.completion_tokens",
+        "llm.usage.total_tokens",
+        "llm.usage.input_tokens",
+        "llm.usage.output_tokens",
+    ):
+        if key in attrs:
+            fields[key] = attrs[key]
+    return fields
+
+
+def log_llm_request(
+    operation: str,
+    *,
+    model: object,
+    system_prompt: object,
+    user_prompt: object,
+) -> None:
+    log_event(
+        "llm_api_request",
+        operation=operation,
+        **build_llm_request_log_fields(
+            model, system_prompt=system_prompt, user_prompt=user_prompt
+        ),
+    )
+
+
+def log_llm_response(
+    operation: str,
+    *,
+    model: object,
+    result: object,
+    latency_ms: Optional[float] = None,
+    response_text: object = None,
+) -> None:
+    log_event(
+        "llm_api_response",
+        operation=operation,
+        **build_llm_response_log_fields(
+            model, result, latency_ms=latency_ms, response_text=response_text
+        ),
+    )
+
+
+def log_llm_error(
+    operation: str,
+    *,
+    model: object,
+    system_prompt: object,
+    user_prompt: object,
+    error: object,
+    latency_ms: Optional[float] = None,
+) -> None:
+    fields = build_llm_request_log_fields(
+        model, system_prompt=system_prompt, user_prompt=user_prompt
+    )
+    if latency_ms is not None:
+        fields["latency_ms"] = round(float(latency_ms), 2)
+    fields["error"] = _normalize_text(error)
+    log_event("llm_api_error", operation=operation, **fields)
 
 
 def apply_span_attributes(span: object, attributes: Dict[str, object]) -> None:

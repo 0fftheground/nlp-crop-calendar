@@ -4,6 +4,7 @@ import csv
 import json
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -12,6 +13,7 @@ import yaml
 
 from ..infra.config import get_config
 from ..infra.llm import get_audit_judge_model
+from ..observability.llm_usage import log_llm_error, log_llm_request, log_llm_response
 from ..infra.postgres import fetch_all
 from ..prompts.audit_judge import PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT
 from .audit_models import (
@@ -1109,11 +1111,37 @@ def _run_ai_judge(case: Dict[str, Any]) -> AuditJudgeDecision:
         "rule_grade": case.get("rule_grade"),
         "source": case.get("source"),
     }
-    result = judge.invoke(
-        [
-            ("system", PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT),
-            ("human", json.dumps(payload, ensure_ascii=False, default=str)),
-        ]
+    user_payload = json.dumps(payload, ensure_ascii=False, default=str)
+    log_llm_request(
+        "audit_judge",
+        model=llm,
+        system_prompt=PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT,
+        user_prompt=user_payload,
+    )
+    started_at = time.perf_counter()
+    try:
+        result = judge.invoke(
+            [
+                ("system", PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT),
+                ("human", user_payload),
+            ]
+        )
+    except Exception as exc:
+        log_llm_error(
+            "audit_judge",
+            model=llm,
+            system_prompt=PRODUCTION_AUDIT_JUDGE_SYSTEM_PROMPT,
+            user_prompt=user_payload,
+            error=exc,
+            latency_ms=(time.perf_counter() - started_at) * 1000.0,
+        )
+        raise
+    log_llm_response(
+        "audit_judge",
+        model=llm,
+        result=result,
+        latency_ms=(time.perf_counter() - started_at) * 1000.0,
+        response_text=result.model_dump() if isinstance(result, AuditJudgeDecision) else result,
     )
     return (
         result

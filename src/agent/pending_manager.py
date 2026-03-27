@@ -72,6 +72,23 @@ _UNKNOWN_REPLY_TOKENS = {
 _FOLLOWUP_REPLY_SPLIT_RE = re.compile(r"[，,、/\s]+")
 _YES_REPLY_TOKENS = {"是", "好", "好的", "确认", "要", "保存", "继续", "yes", "y", "ok"}
 _NO_REPLY_TOKENS = {"否", "不", "取消", "不用了", "不保存", "算了", "no", "n"}
+_YES_REPLY_PREFIXES = (
+    "是的",
+    "好的",
+    "确认一下",
+    "要的",
+    "保存吧",
+    "继续吧",
+)
+_NO_REPLY_PREFIXES = (
+    "不用了",
+    "不需要了",
+    "不需要",
+    "不保存",
+    "取消吧",
+    "算了吧",
+    "不要了",
+)
 _CLARIFICATION_CONTINUE_TOKENS = {
     "继续当前",
     "继续当前的",
@@ -324,10 +341,28 @@ class PendingManager:
 
     @staticmethod
     def _matches_pending_confirmation(prompt: str) -> bool:
+        return PendingManager.resolve_pending_confirmation_choice(prompt) is not None
+
+    @staticmethod
+    def resolve_pending_confirmation_choice(prompt: str) -> Optional[str]:
         text = (prompt or "").strip().lower()
         if not text:
-            return False
-        return text in _YES_REPLY_TOKENS or text in _NO_REPLY_TOKENS
+            return None
+        if text in _YES_REPLY_TOKENS:
+            return "yes"
+        if text in _NO_REPLY_TOKENS:
+            return "no"
+        for prefix in _YES_REPLY_PREFIXES:
+            if text.startswith(prefix):
+                suffix = text[len(prefix) :].strip(" ，,。.!！？?~")
+                if not suffix:
+                    return "yes"
+        for prefix in _NO_REPLY_PREFIXES:
+            if text.startswith(prefix):
+                suffix = text[len(prefix) :].strip(" ，,。.!！？?~")
+                if not suffix:
+                    return "no"
+        return None
 
     def resolve_pending_clarification_choice(
         self, prompt: str, pending: Optional[dict]

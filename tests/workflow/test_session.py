@@ -106,7 +106,7 @@ class WorkflowSessionContextTests(unittest.TestCase):
                                 )
 
                         self.assertEqual(result.mode, "tool")
-                        mocked_plan.assert_not_called()
+                        mocked_plan.assert_called_once()
                         self.assertEqual(
                             mocked_execute.call_args[0][0],
                             scenario["expected"]["name"],
@@ -151,7 +151,7 @@ class WorkflowSessionContextTests(unittest.TestCase):
                                 )
 
                         self.assertEqual(result.mode, "workflow")
-                        mocked_plan.assert_not_called()
+                        mocked_plan.assert_called_once()
                         self.assertEqual(
                             mocked_run.call_args[0][1],
                             scenario["expected"]["name"],
@@ -234,10 +234,60 @@ class WorkflowSessionContextTests(unittest.TestCase):
 
         self.assertEqual(result.mode, "tool")
         self.assertIsNotNone(result.tool)
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         self.assertEqual(mocked_execute.call_args[0][0], "growth_stage_lookup")
         self.assertIn('"query"', mocked_execute.call_args[0][1])
         self.assertIn("id=11", mocked_execute.call_args[0][1])
+
+    def test_plan_list_context_full_sentence_can_still_resume_same_growth_stage_tool(
+        self,
+    ) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "w-plan-growth-full",
+            {
+                "tool_contexts": {
+                    "plant_plan_list_active": {
+                        "plans": [
+                            {"plan_id": "11", "plan_name": "早稻计划"},
+                            {"plan_id": "12", "plan_name": "晚稻计划"},
+                        ]
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "plant_plan_list_active"},
+            },
+        )
+
+        standalone_plan = ActionPlan(
+            action="tool",
+            name="growth_stage_lookup",
+            input={"query": "查询id=11的种植计划的生育期。"},
+        )
+        tool_payload = ToolInvocation(
+            name="growth_stage_lookup",
+            message="ok",
+            data={"plan_id": "11"},
+        )
+        with patch.object(
+            router._intent_router, "plan", return_value=standalone_plan
+        ) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(
+                        prompt="我想看看id为1的生育期",
+                        session_id="w-plan-growth-full",
+                    )
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertIsNotNone(result.tool)
+        mocked_plan.assert_called_once()
+        self.assertEqual(mocked_execute.call_args[0][0], "growth_stage_lookup")
 
     def test_crop_calendar_context_can_resume_delete_tool(self) -> None:
         from src.schemas.models import ToolInvocation, UserRequest
@@ -278,7 +328,7 @@ class WorkflowSessionContextTests(unittest.TestCase):
         self.assertEqual(result.mode, "tool")
         self.assertIsNotNone(result.tool)
         self.assertEqual(result.tool.name, "plant_plan_delete")
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         self.assertEqual(mocked_execute.call_args[0][0], "plant_plan_delete")
         self.assertIn('"plant_season_id": "21"', mocked_execute.call_args[0][1])
 

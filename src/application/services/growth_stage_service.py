@@ -10,6 +10,7 @@ from ...infra.db_catalog import (
     TABLE_KEY_VARIETY,
     resolve_db_table,
 )
+from ...observability.logging_utils import log_event, summarize_text
 from ...schemas import (
     GrowthStageResult,
     PlantingDetails,
@@ -222,6 +223,109 @@ def _unwrap_api_data(payload: object) -> dict[str, object]:
     return {}
 
 
+def _log_growth_stage_api_request(
+    operation: str,
+    *,
+    url: str,
+    params: Optional[dict[str, object]] = None,
+    payload: Optional[dict[str, object]] = None,
+) -> None:
+    log_event(
+        "growth_stage_api_request",
+        operation=operation,
+        url=url,
+        params=params,
+        payload=payload,
+    )
+
+
+def _log_growth_stage_api_http_error(
+    operation: str,
+    *,
+    url: str,
+    exc: Exception,
+    params: Optional[dict[str, object]] = None,
+    payload: Optional[dict[str, object]] = None,
+) -> None:
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        log_event(
+            "growth_stage_api_http_error",
+            operation=operation,
+            url=url,
+            params=params,
+            payload=payload,
+            status_code=getattr(resp, "status_code", None),
+            response_text=summarize_text(getattr(resp, "text", str(exc)), limit=1200),
+        )
+    else:
+        log_event(
+            "growth_stage_api_request_error",
+            operation=operation,
+            url=url,
+            params=params,
+            payload=payload,
+            error=str(exc),
+        )
+
+
+def _parse_growth_stage_api_data(
+    operation: str,
+    *,
+    url: str,
+    response,
+    params: Optional[dict[str, object]] = None,
+    payload: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
+    try:
+        raw = response.json()
+    except Exception as exc:
+        log_event(
+            "growth_stage_api_parse_error",
+            operation=operation,
+            url=url,
+            params=params,
+            payload=payload,
+            status_code=response.status_code,
+            response_text=summarize_text(response.text or "", limit=1200),
+        )
+        raise RuntimeError("业务接口返回格式未识别。") from exc
+    log_event(
+        "growth_stage_api_response",
+        operation=operation,
+        url=url,
+        params=params,
+        payload=payload,
+        status_code=response.status_code,
+        response_summary=summarize_text(
+            json.dumps(raw, ensure_ascii=False, default=str), limit=1200
+        ),
+    )
+    try:
+        return _unwrap_api_data(raw)
+    except RuntimeError as exc:
+        if isinstance(raw, dict):
+            log_event(
+                "growth_stage_api_business_error",
+                operation=operation,
+                url=url,
+                params=params,
+                payload=payload,
+                code=str(raw.get("code", "")).strip() or None,
+                msg=str(raw.get("msg") or raw.get("message") or exc),
+            )
+        else:
+            log_event(
+                "growth_stage_api_parse_error",
+                operation=operation,
+                url=url,
+                params=params,
+                payload=payload,
+                status_code=response.status_code,
+            )
+        raise
+
+
 def _normalize_plan_api_row(raw: object) -> dict[str, object]:
     if not isinstance(raw, dict):
         return {}
@@ -400,14 +504,23 @@ def _search_planting_plans_api(
     if not url:
         raise RuntimeError("缺少种植计划搜索接口地址。")
     payload = _build_plan_api_payload(filters, limit=limit)
-    response = _post_json(
-        url,
-        payload=payload,
-        headers=_build_api_headers(api_key=_get_growth_stage_api_key()),
-        timeout=10.0,
+    _log_growth_stage_api_request("planting_plan_search", url=url, payload=payload)
+    try:
+        response = _post_json(
+            url,
+            payload=payload,
+            headers=_build_api_headers(api_key=_get_growth_stage_api_key()),
+            timeout=10.0,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        _log_growth_stage_api_http_error(
+            "planting_plan_search", url=url, exc=exc, payload=payload
+        )
+        raise
+    data = _parse_growth_stage_api_data(
+        "planting_plan_search", url=url, response=response, payload=payload
     )
-    response.raise_for_status()
-    data = _unwrap_api_data(response.json())
     plans = data.get("plans")
     if not isinstance(plans, list):
         plans = []
@@ -425,14 +538,23 @@ def _list_active_planting_plans_api(
     params: dict[str, object] = {}
     if limit is not None:
         params["limit"] = max(1, int(limit))
-    response = _get_http(
-        url,
-        params=params,
-        headers=_build_api_headers(api_key=_get_growth_stage_api_key()),
-        timeout=10.0,
+    _log_growth_stage_api_request("planting_plan_active", url=url, params=params)
+    try:
+        response = _get_http(
+            url,
+            params=params,
+            headers=_build_api_headers(api_key=_get_growth_stage_api_key()),
+            timeout=10.0,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        _log_growth_stage_api_http_error(
+            "planting_plan_active", url=url, exc=exc, params=params
+        )
+        raise
+    data = _parse_growth_stage_api_data(
+        "planting_plan_active", url=url, response=response, params=params
     )
-    response.raise_for_status()
-    data = _unwrap_api_data(response.json())
     plans = data.get("plans")
     if not isinstance(plans, list):
         plans = []
@@ -447,13 +569,22 @@ def _fetch_planting_plan_row_by_id_api(
     url = _get_planting_plan_detail_api_url(plan_id)
     if not url:
         raise RuntimeError("缺少计划详情接口地址。")
-    response = _get_http(
-        url,
-        headers=_build_api_headers(api_key=_get_growth_stage_api_key()),
-        timeout=10.0,
+    _log_growth_stage_api_request("planting_plan_detail", url=url)
+    try:
+        response = _get_http(
+            url,
+            headers=_build_api_headers(api_key=_get_growth_stage_api_key()),
+            timeout=10.0,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        _log_growth_stage_api_http_error(
+            "planting_plan_detail", url=url, exc=exc
+        )
+        raise
+    data = _parse_growth_stage_api_data(
+        "planting_plan_detail", url=url, response=response
     )
-    response.raise_for_status()
-    data = _unwrap_api_data(response.json())
     plan = _normalize_plan_api_row(data.get("plan"))
     columns = list(plan.keys()) if plan else ["plan_id", "id"]
     return plan, "id", columns
@@ -463,13 +594,20 @@ def _query_growth_stage_from_plan_id_api(plan_id: object) -> GrowthStageResult:
     url = _get_growth_stage_by_plan_api_url(plan_id)
     if not url:
         raise RuntimeError("缺少生育期查询接口地址。")
-    response = _get_http(
-        url,
-        headers=_build_api_headers(api_key=_get_growth_stage_api_key()),
-        timeout=10.0,
+    _log_growth_stage_api_request("growth_stage_by_plan", url=url)
+    try:
+        response = _get_http(
+            url,
+            headers=_build_api_headers(api_key=_get_growth_stage_api_key()),
+            timeout=10.0,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        _log_growth_stage_api_http_error("growth_stage_by_plan", url=url, exc=exc)
+        raise
+    data = _parse_growth_stage_api_data(
+        "growth_stage_by_plan", url=url, response=response
     )
-    response.raise_for_status()
-    data = _unwrap_api_data(response.json())
     stages = data.get("stages")
     if isinstance(stages, dict):
         normalized: Dict[str, str] = {}

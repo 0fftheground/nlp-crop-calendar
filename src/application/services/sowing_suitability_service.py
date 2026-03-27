@@ -31,6 +31,7 @@ from ...infra.variety_store import (
     find_exact_variety_in_text,
     retrieve_variety_candidates,
 )
+from ...observability.logging_utils import log_event, summarize_text
 from ...prompts.planting_extract import build_planting_extract_prompt
 from ...schemas.models import ToolInvocation
 from .crop_calendar_service import (
@@ -752,6 +753,12 @@ def lookup_sowing_suitability(prompt: str) -> ToolInvocation:
             message="缺少播期推荐接口地址。",
             data={},
         )
+    request_body = dict(request_payload)
+    log_event(
+        "sowing_suitability_api_request",
+        url=url,
+        payload=request_body,
+    )
     try:
         response = _post_json(
             url,
@@ -762,13 +769,52 @@ def lookup_sowing_suitability(prompt: str) -> ToolInvocation:
             timeout=10.0,
         )
         response.raise_for_status()
-        payload = response.json()
     except Exception as exc:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            log_event(
+                "sowing_suitability_api_http_error",
+                url=url,
+                payload=request_body,
+                status_code=getattr(resp, "status_code", None),
+                response_text=summarize_text(getattr(resp, "text", str(exc)), limit=1200),
+            )
+        else:
+            log_event(
+                "sowing_suitability_api_request_error",
+                url=url,
+                payload=request_body,
+                error=str(exc),
+            )
         return ToolInvocation(
             name="sowing_suitability_lookup",
             message=f"查询播期推荐失败: {exc}",
             data={"request": request_payload, "resolved": resolved},
         )
+    try:
+        payload = response.json()
+    except Exception:
+        log_event(
+            "sowing_suitability_api_parse_error",
+            url=url,
+            payload=request_body,
+            status_code=response.status_code,
+            response_text=summarize_text(response.text or "", limit=1200),
+        )
+        return ToolInvocation(
+            name="sowing_suitability_lookup",
+            message="播期推荐接口返回格式未识别。",
+            data={"request": request_payload, "resolved": resolved},
+        )
+    log_event(
+        "sowing_suitability_api_response",
+        url=url,
+        payload=request_body,
+        status_code=response.status_code,
+        response_summary=summarize_text(
+            json.dumps(payload, ensure_ascii=False, default=str), limit=1200
+        ),
+    )
     if not isinstance(payload, dict):
         return ToolInvocation(
             name="sowing_suitability_lookup",
@@ -778,6 +824,16 @@ def lookup_sowing_suitability(prompt: str) -> ToolInvocation:
     code = str(payload.get("code", "")).strip()
     message = str(payload.get("message") or payload.get("msg") or "").strip()
     if code and code != "200":
+        log_event(
+            "sowing_suitability_api_business_error",
+            url=url,
+            payload=request_body,
+            code=code,
+            msg=message or None,
+            response_summary=summarize_text(
+                json.dumps(payload, ensure_ascii=False, default=str), limit=1200
+            ),
+        )
         return ToolInvocation(
             name="sowing_suitability_lookup",
             message=message or "播期推荐接口返回失败。",

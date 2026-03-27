@@ -61,6 +61,7 @@ from chainlit_app import (
     _build_capability_guide,
     _fetch_recent_farm_work_summary,
     _format_recent_farm_work_summary,
+    _format_sowing_suitability_details,
     _format_weather_tool_details,
 )
 
@@ -164,8 +165,44 @@ class ChainlitFormattingTests(unittest.TestCase):
                         summary = asyncio.run(_fetch_recent_farm_work_summary())
 
         self.assertIn("暂时无法加载", summary)
-        mocked_obs.assert_called_once()
+        self.assertEqual(mocked_obs.call_count, 2)
+        request_call = mocked_obs.call_args_list[0]
+        error_call = mocked_obs.call_args_list[1]
+        self.assertEqual(
+            request_call.kwargs.get("event"), "recent_farm_work_summary_request"
+        )
+        self.assertEqual(
+            error_call.kwargs.get("event", "recent_farm_work_summary_error"),
+            "recent_farm_work_summary_error",
+        )
         mocked_append.assert_called_once()
+
+    def test_sowing_suitability_formatting_supports_nested_items_result(self) -> None:
+        detail = _format_sowing_suitability_details(
+            "sowing_suitability_lookup",
+            {
+                "resolved": {
+                    "variety": "美香占2号",
+                    "culti_type": "一季晚稻",
+                    "planting_method": "direct_seeding",
+                    "region_id": "长沙",
+                },
+                "result": {
+                    "items": [
+                        {
+                            "culti_type": 6,
+                            "culti_type_name": "一季晚稻",
+                            "suitDate": ["2026-05-21", "2026-05-22", "2026-05-23"],
+                            "unsuitDate": [],
+                            "unsuitReasons": [],
+                        }
+                    ]
+                },
+            },
+            base_message="success",
+        )
+        self.assertIn("品种：美香占2号", detail)
+        self.assertIn("推荐播期：2026-05-21、2026-05-22、2026-05-23", detail)
 
 
 if __name__ == "__main__":

@@ -220,9 +220,11 @@ def _append_recent_farm_work_error_log(message: str) -> None:
         pass
 
 
-def _append_recent_farm_work_observability_log(**fields: object) -> None:
+def _append_recent_farm_work_observability_log(
+    *, event: str = "recent_farm_work_summary_error", **fields: object
+) -> None:
     timestamp = datetime.now(timezone(timedelta(hours=8))).isoformat()
-    payload = {"event": "recent_farm_work_summary_error", "trace_id": "unknown", **fields}
+    payload = {"event": event, "trace_id": "unknown", **fields}
     try:
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
         with _OBS_ERROR_LOG_PATH.open("a", encoding="utf-8") as handle:
@@ -239,6 +241,11 @@ async def _fetch_recent_farm_work_summary() -> str:
     url = _get_recent_week_farm_work_api_url(farm_id)
     if not url:
         return ""
+    _append_recent_farm_work_observability_log(
+        event="recent_farm_work_summary_request",
+        farm_id=farm_id,
+        url=url,
+    )
     try:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(BACKEND_TIMEOUT_SECONDS),
@@ -252,6 +259,15 @@ async def _fetch_recent_farm_work_summary() -> str:
             )
             response.raise_for_status()
             payload = response.json()
+            _append_recent_farm_work_observability_log(
+                event="recent_farm_work_summary_response",
+                farm_id=farm_id,
+                url=url,
+                status_code=response.status_code,
+                response_summary=summarize_text(
+                    json.dumps(payload, ensure_ascii=False, default=str), limit=1200
+                ),
+            )
     except Exception as exc:
         status_code = None
         response_text = ""
@@ -493,6 +509,20 @@ def _format_sowing_suitability_details(
             return values[0]
         return f"{values[0]} 至 {values[-1]}（共{len(values)}天）"
 
+    def _resolve_result_payload(payload: dict) -> dict:
+        if any(
+            key in payload for key in ("suitDate", "unsuitDate", "unsuitReasons")
+        ):
+            return payload
+        items = payload.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and any(
+                    key in item for key in ("suitDate", "unsuitDate", "unsuitReasons")
+                ):
+                    return item
+        return payload
+
     if isinstance(resolved, dict):
         meta = []
         for label, key in (
@@ -508,9 +538,10 @@ def _format_sowing_suitability_details(
                 meta.append(f"{label}：{value}")
         if meta:
             lines.append("，".join(meta))
-    valid_dates = _clean_dates(result.get("suitDate"))
-    invalid_dates = _clean_dates(result.get("unsuitDate"))
-    reasons = _clean_dates(result.get("unsuitReasons"))
+    display_result = _resolve_result_payload(result)
+    valid_dates = _clean_dates(display_result.get("suitDate"))
+    invalid_dates = _clean_dates(display_result.get("unsuitDate"))
+    reasons = _clean_dates(display_result.get("unsuitReasons"))
     if valid_dates:
         lines.append(f"推荐播期：{_format_date_range(valid_dates)}")
     if invalid_dates:

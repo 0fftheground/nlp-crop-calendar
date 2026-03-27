@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
@@ -21,6 +22,9 @@ from ...observability.llm_usage import (
     apply_span_attributes,
     build_llm_input_token_attrs,
     build_llm_output_token_attrs,
+    log_llm_error,
+    log_llm_request,
+    log_llm_response,
 )
 from ...observability.logging_utils import log_event
 from ...observability.otel import record_exception, start_span
@@ -829,6 +833,13 @@ def _llm_choose_variety_record(
     try:
         chooser = llm.with_structured_output(VarietyMatchDecision)
         user_payload = json.dumps(payload, ensure_ascii=False, default=str)
+        log_llm_request(
+            "variety_match",
+            model=llm,
+            system_prompt=system_prompt,
+            user_prompt=user_payload,
+        )
+        started_at = time.perf_counter()
         span_attrs = build_llm_input_token_attrs(
             llm, system_prompt=system_prompt, user_prompt=user_payload
         )
@@ -841,11 +852,26 @@ def _llm_choose_variety_record(
                     ]
                 )
             except Exception as exc:
+                log_llm_error(
+                    "variety_match",
+                    model=llm,
+                    system_prompt=system_prompt,
+                    user_prompt=user_payload,
+                    error=exc,
+                    latency_ms=(time.perf_counter() - started_at) * 1000.0,
+                )
                 record_exception(span, exc)
                 raise
             apply_span_attributes(
                 span, build_llm_output_token_attrs(result)
             )
+        log_llm_response(
+            "variety_match",
+            model=llm,
+            result=result,
+            latency_ms=(time.perf_counter() - started_at) * 1000.0,
+            response_text=result.model_dump() if isinstance(result, BaseModel) else result,
+        )
         decision = (
             result
             if isinstance(result, VarietyMatchDecision)

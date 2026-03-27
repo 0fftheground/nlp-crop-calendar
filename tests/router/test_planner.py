@@ -337,6 +337,37 @@ class PlannerRouterTests(unittest.TestCase):
         mocked_resume.assert_called_once()
         mocked_plan.assert_not_called()
 
+    def test_pending_save_confirmation_phrase_still_resumes(self) -> None:
+        from src.schemas.models import HandleResponse, UserRequest, WorkflowResponse
+
+        self.router._pending_store.set(
+            "s-save-confirm-phrase",
+            {
+                "mode": "workflow",
+                "workflow_name": "crop_calendar_workflow",
+                "draft": {"region_id": "常德"},
+                "missing_fields": ["save_confirmation"],
+                "followup_count": 0,
+                "pending_message": "是否保存该方案？请回复“是/否”。",
+                "pending_kind": "confirmation",
+            },
+        )
+        pending_response = HandleResponse(
+            mode="workflow",
+            plan=WorkflowResponse(message="已保存。"),
+        )
+        with patch.object(
+            self.router, "_resume_pending", return_value=pending_response
+        ) as mocked_resume:
+            with patch.object(self.router._intent_router, "plan") as mocked_plan:
+                result = self.router.handle(
+                    UserRequest(prompt="是的", session_id="s-save-confirm-phrase")
+                )
+
+        self.assertEqual(result.mode, "workflow")
+        mocked_resume.assert_called_once()
+        mocked_plan.assert_not_called()
+
     def test_ambiguous_thread_ownership_returns_clarification(self) -> None:
         from src.agent.planner import ActionPlan
         from src.agent.session_context import ContextualPlanCandidate

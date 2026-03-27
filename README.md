@@ -122,7 +122,7 @@ curl -sS "$OPENAI_API_BASE/chat/completions" \
 ```
 
 More deployment details:
-- `doc/DEPLOY.md`
+- `doc/deploy.md`
 
 ## Development Notes
 - Planner logic: `src/agent/planner.py`, `src/agent/router.py`
@@ -316,7 +316,7 @@ Notes:
 - Eval summaries now include `avg_latency_ms`, `p95_latency_ms`, and `estimated_*_tokens`.
 - `expert_regression_gate` also checks relative latency and token regression against the baseline model.
 - Token metrics are lightweight estimates from the active model tokenizer; there is no pricing-table-based cost calculation yet.
-- Detailed governance rules, the end-to-end operating flow, and an operator guide for `run / compare / audit / promote` live in `doc/EVAL_GOVERNANCE.md`.
+- Detailed governance rules, the end-to-end operating flow, and an operator guide for `run / compare / audit / promote` live in `doc/eval-governance.md`.
 
 Production-audit closed loop:
 
@@ -394,6 +394,6 @@ PowerShell wrappers are also available:
 Those files are marked `judge_only`: they carry a deidentified multi-turn `context_window` from the same session for AI judge review, but are not counted as deterministic single-turn replay cases.
 
 ## More Docs
-- Deployment details: `doc/DEPLOY.md`
-- Technical details: `doc/TECHNICAL_DETAILS.md`
+- Deployment details: `doc/deploy.md`
+- Technical details: `doc/technical-details.md`
 - Test organization and scope boundary: `doc/tests.md`

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import time
 from typing import Any, Dict, Iterable, Literal, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,6 +11,7 @@ from pydantic import BaseModel
 
 from ..infra.llm import get_extractor_model
 from ..observability.logging_utils import log_event, summarize_text
+from ..observability.llm_usage import log_llm_error, log_llm_request, log_llm_response
 from .followup import summarize_pending
 from .workflows.registry import WorkflowSpec
 
@@ -56,11 +58,35 @@ class FastIntentRouter:
             pending=payload["pending"],
         )
         try:
+            log_llm_request(
+                "fast_intent",
+                model=self._llm,
+                system_prompt=self._system_prompt,
+                user_prompt=user_payload,
+            )
+            started_at = time.perf_counter()
             raw_result = self._llm.invoke(messages)
         except Exception as exc:
+            log_llm_error(
+                "fast_intent",
+                model=self._llm,
+                system_prompt=self._system_prompt,
+                user_prompt=user_payload,
+                error=exc,
+                latency_ms=(time.perf_counter() - started_at) * 1000.0
+                if "started_at" in locals()
+                else None,
+            )
             log_event("fast_intent_error", error=str(exc))
             return None
         raw_text = self._extract_llm_text(raw_result)
+        log_llm_response(
+            "fast_intent",
+            model=self._llm,
+            result=raw_result,
+            latency_ms=(time.perf_counter() - started_at) * 1000.0,
+            response_text=raw_text,
+        )
         log_event(
             "fast_intent_raw",
             raw=raw_text,

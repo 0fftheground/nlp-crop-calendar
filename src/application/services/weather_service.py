@@ -15,6 +15,7 @@ from ...agent.followup import build_tool_followup_invocation
 from ...domain.date_parser import extract_date_range, extract_explicit_dates
 from ...domain.region_text import build_region_text_variants, normalize_region_token
 from ...infra.db_catalog import resolve_region_lookup_sources
+from ...observability.logging_utils import log_event, summarize_text
 from ...schemas.models import (
     ToolInvocation,
     WeatherDataPoint,
@@ -804,21 +805,78 @@ def _lookup_farm_weather_by_api(
             payload["region_id"] = text
     else:
         payload["farm_id"] = farm_id
-    response = _post_json(
-        url,
-        payload=payload,
-        headers=_build_api_headers(
-            api_key=getattr(cfg, "business_api_key", None)
-        ),
-        timeout=10.0,
+    request_body = dict(payload)
+    log_event(
+        "weather_api_request",
+        operation="farm_weather",
+        url=url,
+        payload=request_body,
     )
-    response.raise_for_status()
-    payload = response.json()
+    try:
+        response = _post_json(
+            url,
+            payload=payload,
+            headers=_build_api_headers(
+                api_key=getattr(cfg, "business_api_key", None)
+            ),
+            timeout=10.0,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            log_event(
+                "weather_api_http_error",
+                operation="farm_weather",
+                url=url,
+                payload=request_body,
+                status_code=getattr(resp, "status_code", None),
+                response_text=summarize_text(getattr(resp, "text", str(exc)), limit=1200),
+            )
+        else:
+            log_event(
+                "weather_api_request_error",
+                operation="farm_weather",
+                url=url,
+                payload=request_body,
+                error=str(exc),
+            )
+        raise
+    try:
+        payload = response.json()
+    except Exception as exc:
+        log_event(
+            "weather_api_parse_error",
+            operation="farm_weather",
+            url=url,
+            payload=request_body,
+            status_code=response.status_code,
+            response_text=summarize_text(response.text or "", limit=1200),
+        )
+        raise RuntimeError("农场天气接口返回格式未识别。") from exc
+    log_event(
+        "weather_api_response",
+        operation="farm_weather",
+        url=url,
+        payload=request_body,
+        status_code=response.status_code,
+        response_summary=summarize_text(
+            json.dumps(payload, ensure_ascii=False, default=str), limit=1200
+        ),
+    )
     if not isinstance(payload, dict):
         raise RuntimeError("农场天气接口返回格式未识别。")
     code = str(payload.get("code", "")).strip()
     message = str(payload.get("message") or payload.get("msg") or "").strip()
     if code and code != "200":
+        log_event(
+            "weather_api_business_error",
+            operation="farm_weather",
+            url=url,
+            payload=request_body,
+            code=code,
+            msg=message or None,
+        )
         raise RuntimeError(message or "农场天气接口返回失败。")
     data = payload.get("data")
     if not isinstance(data, list):

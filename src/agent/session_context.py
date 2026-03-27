@@ -132,19 +132,17 @@ _PLAN_SELF_REFERENCE_TOKENS = (
     "该",
 )
 _EXPLICIT_THREAD_SWITCH_TOKENS = (
-    "我想",
-    "帮我",
-    "请问",
-    "查询",
-    "查看",
-    "查一下",
-    "帮我查",
-    "生成",
-    "建立",
-    "创建",
-    "新增",
-    "删除",
-    "列出",
+    "换个问题",
+    "换一个问题",
+    "另一个问题",
+    "新问题",
+    "新任务",
+    "重新问",
+    "重新开始",
+    "不相关",
+    "无关",
+    "先不说这个",
+    "换一个",
 )
 _CHINESE_INDEX_MAP = {
     "一": 1,
@@ -218,15 +216,7 @@ def is_explicit_thread_switch_prompt(prompt: str) -> bool:
         return False
     if looks_like_non_agri_life_query(text):
         return True
-    if looks_like_crop_calendar_query(text) or looks_like_sowing_query(text):
-        return True
-    if len(text) >= 10 and any(token in text for token in _EXPLICIT_THREAD_SWITCH_TOKENS):
-        return True
-    if len(text) >= 12 and (
-        _looks_like_weather_query(text)
-        or _looks_like_growth_stage_query(text)
-        or _looks_like_plan_delete_query(text)
-    ):
+    if any(token in text for token in _EXPLICIT_THREAD_SWITCH_TOKENS):
         return True
     return False
 
