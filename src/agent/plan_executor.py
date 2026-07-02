@@ -122,6 +122,7 @@ class PlanExecutor:
                     "mode": INPUT_VALIDATION_MODE,
                     "action": target_action,
                     "name": target_name,
+                    "draft": payload if isinstance(payload, dict) else {},
                     "missing_fields": missing_fields,
                     "invalid_fields": invalid_fields,
                     "input_attempts": input_attempts + 1,

@@ -64,7 +64,11 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
         plan = router._intent_router._rule_route("广州天气 2024年")
         self.assertIsNotNone(plan)
         self.assertEqual(plan.action, "tool")
@@ -80,8 +84,15 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
-        plan = router._intent_router._rule_route("湖南常德下周适合旅游吗")
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
+        with patch.object(
+            router._intent_router, "_is_non_agri_out_of_scope", return_value=True
+        ):
+            plan = router._intent_router._rule_route("湖南常德下周适合旅游吗")
         self.assertIsNotNone(plan)
         self.assertEqual(plan.action, "none")
         self.assertEqual(plan.reason, "boundary:non_agri_life_query")
@@ -93,13 +104,13 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
         plan = router._intent_router._rule_route("帮我查美香占2号一季晚稻直播的播种适宜期")
-        self.assertIsNotNone(plan)
-        self.assertEqual(plan.action, "tool")
-        self.assertEqual(plan.name, "sowing_suitability_lookup")
-        self.assertIsInstance(plan.input, dict)
-        self.assertEqual(plan.input.get("query"), "帮我查美香占2号一季晚稻直播的播种适宜期")
+        self.assertIsNone(plan)
 
     def test_router_rule_sowing_when_asking_when_to_sow(self) -> None:
         from src.agent.router import RequestRouter
@@ -108,13 +119,13 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
         plan = router._intent_router._rule_route("美香占2号在常德种什么时候播种")
-        self.assertIsNotNone(plan)
-        self.assertEqual(plan.action, "tool")
-        self.assertEqual(plan.name, "sowing_suitability_lookup")
-        self.assertIsInstance(plan.input, dict)
-        self.assertEqual(plan.input.get("query"), "美香占2号在常德种什么时候播种")
+        self.assertIsNone(plan)
 
     def test_router_rule_sowing_for_plain_sowing_followup(self) -> None:
         from src.agent.router import RequestRouter
@@ -123,13 +134,13 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
         plan = router._intent_router._rule_route("那播种怎么样")
-        self.assertIsNotNone(plan)
-        self.assertEqual(plan.action, "tool")
-        self.assertEqual(plan.name, "sowing_suitability_lookup")
-        self.assertIsInstance(plan.input, dict)
-        self.assertEqual(plan.input.get("query"), "那播种怎么样")
+        self.assertIsNone(plan)
 
     def test_router_rule_sowing_for_recent_sowing_suitability_question(self) -> None:
         from src.agent.router import RequestRouter
@@ -138,13 +149,13 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
         plan = router._intent_router._rule_route("最近适合播种嘛")
-        self.assertIsNotNone(plan)
-        self.assertEqual(plan.action, "tool")
-        self.assertEqual(plan.name, "sowing_suitability_lookup")
-        self.assertIsInstance(plan.input, dict)
-        self.assertEqual(plan.input.get("query"), "最近适合播种嘛")
+        self.assertIsNone(plan)
 
     def test_router_rule_crop_calendar_generate_plan(self) -> None:
         from src.agent.router import RequestRouter
@@ -153,12 +164,53 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
         plan = router._intent_router._rule_route("帮我生成一个种植计划")
-        self.assertIsNotNone(plan)
+        assert plan is not None
         self.assertEqual(plan.action, "workflow")
         self.assertEqual(plan.name, "crop_calendar_workflow")
-        self.assertEqual(plan.input, {"prompt": "帮我生成一个种植计划"})
+        self.assertEqual(plan.reason, "rule:crop_calendar_workflow")
+
+    def test_router_rule_plan_task_create_for_record_task_request(self) -> None:
+        from src.agent.router import RequestRouter
+
+        with patch("src.agent.planner.get_chat_model", return_value=_DummyLLM()):
+            with patch(
+                "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
+            ):
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
+        plan = router._intent_router._rule_route("我要录入农事")
+        assert plan is not None
+        self.assertEqual(plan.action, "tool")
+        self.assertEqual(plan.name, "plant_task_create")
+        self.assertEqual(plan.reason, "rule:plant_task_create")
+
+    def test_router_rule_plan_task_create_for_explicit_task_record_command(self) -> None:
+        from src.agent.router import RequestRouter
+
+        with patch("src.agent.planner.get_chat_model", return_value=_DummyLLM()):
+            with patch(
+                "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
+            ):
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
+        prompt = "id=181的种植计划，录入一个施基肥，时间是2026年2月19日"
+        plan = router._intent_router._rule_route(prompt)
+        assert plan is not None
+        self.assertEqual(plan.action, "tool")
+        self.assertEqual(plan.name, "plant_task_create")
+        self.assertEqual(plan.reason, "rule:plant_task_create")
 
     def test_router_rule_crop_calendar_for_transplant_scheme(self) -> None:
         from src.agent.router import RequestRouter
@@ -167,13 +219,18 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
         plan = router._intent_router._rule_route(
             "我想建立一个在湖南常德种植的湘早籼24号的移栽方案"
         )
-        self.assertIsNotNone(plan)
+        assert plan is not None
         self.assertEqual(plan.action, "workflow")
         self.assertEqual(plan.name, "crop_calendar_workflow")
+        self.assertEqual(plan.reason, "rule:crop_calendar_workflow")
 
     def test_router_rule_growth_stage_uses_tool(self) -> None:
         from src.agent.router import RequestRouter
@@ -182,11 +239,16 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
         plan = router._intent_router._rule_route("查询这个计划的生育期")
-        self.assertIsNotNone(plan)
+        assert plan is not None
         self.assertEqual(plan.action, "tool")
         self.assertEqual(plan.name, "growth_stage_lookup")
+        self.assertEqual(plan.reason, "rule:growth_stage_lookup")
 
     def test_router_rule_variety_maturity_query_is_not_hijacked_by_growth_stage(self) -> None:
         from src.agent.router import RequestRouter
@@ -195,11 +257,13 @@ class IntentRuleTests(unittest.TestCase):
             with patch(
                 "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
             ):
-                router = RequestRouter()
+                with patch(
+                    "src.agent.intent_router.get_extractor_model",
+                    return_value=_DummyLLM(),
+                ):
+                    router = RequestRouter()
         plan = router._intent_router._rule_route("美香占2号这个品种成熟期多久")
-        self.assertIsNotNone(plan)
-        self.assertEqual(plan.action, "tool")
-        self.assertEqual(plan.name, "variety_lookup")
+        self.assertIsNone(plan)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
@@ -59,6 +61,7 @@ if _MISSING_CHAINLIT:
 from tests.scenario_loader import load_yaml_scenarios
 from chainlit_app import (
     _build_capability_guide,
+    _format_backend_request_error,
     _fetch_recent_farm_work_summary,
     _format_recent_farm_work_summary,
     _format_sowing_suitability_details,
@@ -203,6 +206,10 @@ class ChainlitFormattingTests(unittest.TestCase):
         )
         self.assertIn("品种：美香占2号", detail)
         self.assertIn("推荐播期：2026-05-21、2026-05-22、2026-05-23", detail)
+
+    def test_backend_timeout_error_message_is_explicit(self) -> None:
+        message = _format_backend_request_error(httpx.ReadTimeout("timed out"))
+        self.assertIn("请求超时", message)
 
 
 if __name__ == "__main__":

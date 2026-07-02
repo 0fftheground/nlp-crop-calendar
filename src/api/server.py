@@ -115,6 +115,7 @@ async def handle_request(request: UserRequest):
         build_initial_interaction_context(
             request_id=request_id,
             session_id=session_id,
+            user_id=request.user_id,
             previous_interaction_id=(
                 latest_lineage.get("interaction_id") if latest_lineage else None
             ),

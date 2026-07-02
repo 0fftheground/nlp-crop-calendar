@@ -51,6 +51,7 @@ from ...messages.workflow_messages import (
     build_crop_calendar_missing_question,
     format_crop_calendar_plan_message,
 )
+from ..extract_decision import should_extract_for_route
 from ..followup import (
     build_workflow_followup_update,
     get_followup_draft,
@@ -297,9 +298,15 @@ def _extract_node(state: GraphState) -> GraphState:
             )
             return state
     # 先做信息抽取；失败时回退到无 LLM 的基础抽取逻辑。
+    extract_decision = should_extract_for_route(
+        action="workflow",
+        name="crop_calendar_workflow",
+        prompt=prompt,
+    )
     try:
         fresh_draft = extract_planting_details(
-            prompt, llm_extract=llm_extract_planting
+            prompt,
+            llm_extract=llm_extract_planting if extract_decision.should_extract else None,
         )
     except Exception as exc:
         state = add_trace(state, f"llm_extract_failed={exc}")

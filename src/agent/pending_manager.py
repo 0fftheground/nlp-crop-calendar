@@ -2,61 +2,29 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from typing import Optional
 
+from ..domain.date_parser import extract_explicit_dates
+from .followup_extract import classify_pending_thread, extract_followup_overrides
 from .followup import (
     build_followup_options,
+    extract_draft_options,
     get_followup_count,
     get_followup_draft,
     get_followup_kind,
     get_followup_message,
     get_followup_missing_fields,
     get_followup_options,
-    extract_draft_options,
     parse_followup_index,
     resolve_followup_choice,
+    summarize_pending,
 )
 from ..infra.variety_store import find_exact_variety_in_text, retrieve_variety_candidates
 from ..observability.logging_utils import log_event
 from ..schemas import PlantingDetailsDraft, ToolInvocation
 
 
-_NEW_TOPIC_TOKENS = {
-    "另一个",
-    "另外",
-    "再问",
-    "新问题",
-    "换个",
-    "改问",
-    "顺便",
-    "不相关",
-    "无关",
-    "取消",
-    "不用了",
-    "停止",
-    "结束",
-    "退出",
-    "算了",
-    "先不",
-}
-_QUESTION_HINTS = {
-    "请问",
-    "怎么",
-    "如何",
-    "为什么",
-    "多少",
-    "哪里",
-    "哪个",
-    "是否",
-    "能否",
-    "可以吗",
-    "有无",
-    "有没有",
-    "帮我",
-    "查询",
-    "查一下",
-    "帮忙",
-}
 _PENDING_INTERRUPT_RULE_NAMES = {
     "plant_plan_list_active",
     "plant_plan_delete",
@@ -70,46 +38,70 @@ _UNKNOWN_REPLY_TOKENS = {
     "不太清楚",
 }
 _FOLLOWUP_REPLY_SPLIT_RE = re.compile(r"[，,、/\s]+")
+_ID_LIKE_REPLY_RE = re.compile(
+    r"(?:plant_season_id|plan_id|计划id|计划编号|id)\s*[:=]?\s*(\d+)",
+    re.IGNORECASE,
+)
 _YES_REPLY_TOKENS = {"是", "好", "好的", "确认", "要", "保存", "继续", "yes", "y", "ok"}
 _NO_REPLY_TOKENS = {"否", "不", "取消", "不用了", "不保存", "算了", "no", "n"}
-_YES_REPLY_PREFIXES = (
-    "是的",
-    "好的",
-    "确认一下",
-    "要的",
-    "保存吧",
-    "继续吧",
-)
-_NO_REPLY_PREFIXES = (
-    "不用了",
-    "不需要了",
-    "不需要",
-    "不保存",
-    "取消吧",
-    "算了吧",
-    "不要了",
-)
 _CLARIFICATION_CONTINUE_TOKENS = {
-    "继续当前",
-    "继续当前的",
-    "当前",
-    "前一个",
-    "上一个",
+    "继续当前任务",
     "第一个",
     "1",
 }
 _CLARIFICATION_NEW_TOKENS = {
-    "新的",
     "新任务",
-    "新问题",
-    "新的那个",
-    "后一个",
-    "下一个",
+    "开启新任务",
     "第二个",
     "2",
 }
-
-
+_FIELD_REPLY_TYPES = {
+    "plant_season_id": "id_like",
+    "plan_id": "id_like",
+    "region": "region_like",
+    "region_id": "region_like",
+    "variety": "variety_like",
+    "planting_method": "enum_like",
+    "culti_type": "enum_like",
+    "sowing_date": "date_like",
+    "transplant_date": "date_like",
+    "date": "date_like",
+    "task_type": "enum_like",
+    "name": "task_name_like",
+    "operator": "operator_like",
+    "work_desc": "work_desc_like",
+}
+_PLANTING_METHOD_REPLY_TOKENS = {
+    "直播",
+    "移栽",
+    "插秧",
+    "机插",
+    "抛秧",
+    "direct_seeding",
+    "transplanting",
+}
+_CULTI_TYPE_REPLY_TOKENS = {
+    "早稻",
+    "中稻",
+    "晚稻",
+    "一季稻",
+    "一季晚稻",
+    "双季早稻",
+    "双季晚稻",
+}
+_TASK_TYPE_REPLY_TOKENS = {"施肥", "打药", "其他"}
+_EXPLICIT_NEW_TASK_TOKENS = (
+    "开启新任务",
+    "新任务",
+    "换个问题",
+    "换个任务",
+    "重新开始",
+    "先不说这个",
+    "先不聊这个",
+    "别管这个了",
+    "另外一个问题",
+)
+_QUESTION_MARK_TOKENS = ("吗", "么", "？", "?")
 class PendingManager:
     def __init__(self, pending_store, rule_engine) -> None:
         self._pending_store = pending_store
@@ -161,14 +153,25 @@ class PendingManager:
         pending: Optional[dict],
         memory_id: str,
     ) -> str:
+        draft = get_followup_draft(pending)
+        missing_fields = get_followup_missing_fields(pending)
+        extraction = extract_followup_overrides(
+            prompt,
+            missing_fields,
+            draft=draft if isinstance(draft, dict) else None,
+        )
+        merged_draft = dict(draft) if isinstance(draft, dict) else {}
+        merged_draft.update(extraction.overrides)
         followup_payload = {
             "user_id": memory_id,
             "query": pending.get("query") if isinstance(pending, dict) else None,
             "followup": {
                 "prompt": prompt,
-                "draft": get_followup_draft(pending) or {},
-                "missing_fields": get_followup_missing_fields(pending),
+                "draft": merged_draft,
+                "missing_fields": missing_fields,
                 "followup_count": get_followup_count(pending),
+                "field_overrides": extraction.overrides,
+                "source": extraction.source,
             },
         }
         return json.dumps(followup_payload, ensure_ascii=False, default=str)
@@ -271,11 +274,14 @@ class PendingManager:
             self.delete(session_id)
         return None
 
-    def should_resume_pending(self, prompt: str, pending: Optional[dict]) -> bool:
+    def get_pending_disposition(self, prompt: str, pending: Optional[dict]) -> str:
         if not isinstance(pending, dict):
-            return False
-        if pending.get("mode") not in {"tool", "workflow", "clarification"}:
-            return False
+            return "drop"
+        mode = str(pending.get("mode") or "").strip()
+        if mode == "input_validation":
+            return self._classify_input_validation_pending(prompt, pending)
+        if mode not in {"tool", "workflow", "clarification"}:
+            return "drop"
         rule = self._rule_engine.match(prompt or "")
         if (
             rule
@@ -288,25 +294,47 @@ class PendingManager:
                 rule_id=rule.id,
                 rule_name=rule.name,
             )
-            return False
+            return "drop"
         missing_fields = get_followup_missing_fields(pending)
         if missing_fields and "variety" in missing_fields:
             if find_exact_variety_in_text(prompt):
-                return True
+                return "resume_direct"
             if retrieve_variety_candidates(prompt, limit=3):
-                return True
+                return "resume_direct"
         pending_kind = get_followup_kind(pending)
         if pending_kind == "clarification":
-            return self._matches_pending_clarification(prompt, pending)
+            return (
+                "resume_direct"
+                if self._matches_pending_clarification(prompt, pending)
+                else "drop"
+            )
         if pending_kind == "confirmation":
-            return self._matches_pending_confirmation(prompt)
+            return (
+                "resume_direct"
+                if self._matches_pending_confirmation(prompt)
+                else self._classify_pending_thread(prompt, pending, can_carry=False)
+            )
         if pending.get("strict_options_only"):
-            return self._matches_pending_choice(prompt, pending)
+            return (
+                "resume_direct"
+                if self._matches_pending_choice(prompt, pending)
+                else self._classify_pending_thread(prompt, pending, can_carry=False)
+            )
         if self._matches_pending_choice(prompt, pending):
-            return True
-        if self._looks_like_new_question(prompt):
-            return False
-        return self._looks_like_pending_field_reply(prompt, pending)
+            return "resume_direct"
+        typed_match = self._matches_typed_pending_field_reply(prompt, pending)
+        if typed_match is not None:
+            return (
+                "resume_direct"
+                if typed_match
+                else self._classify_pending_thread(prompt, pending)
+            )
+        if self._matches_structured_pending_reply(prompt, pending):
+            return "resume_direct"
+        return self._classify_pending_thread(prompt, pending)
+
+    def should_resume_pending(self, prompt: str, pending: Optional[dict]) -> bool:
+        return self.get_pending_disposition(prompt, pending) == "resume_direct"
 
     @staticmethod
     def _extract_pending_candidates(pending: Optional[dict]) -> list[str]:
@@ -352,16 +380,6 @@ class PendingManager:
             return "yes"
         if text in _NO_REPLY_TOKENS:
             return "no"
-        for prefix in _YES_REPLY_PREFIXES:
-            if text.startswith(prefix):
-                suffix = text[len(prefix) :].strip(" ，,。.!！？?~")
-                if not suffix:
-                    return "yes"
-        for prefix in _NO_REPLY_PREFIXES:
-            if text.startswith(prefix):
-                suffix = text[len(prefix) :].strip(" ，,。.!！？?~")
-                if not suffix:
-                    return "no"
         return None
 
     def resolve_pending_clarification_choice(
@@ -374,13 +392,12 @@ class PendingManager:
             return "contextual"
         if text in _CLARIFICATION_NEW_TOKENS:
             return "standalone"
-        choice = resolve_followup_choice(text, self._extract_pending_options(pending))
-        if not choice:
-            return None
-        if "继续当前" in choice:
-            return "contextual"
-        if "开启新" in choice or "新任务" in choice:
-            return "standalone"
+        options = [str(item).strip().lower() for item in self._extract_pending_options(pending)]
+        if text in options:
+            if text == "继续当前任务":
+                return "contextual"
+            if text == "开启新任务":
+                return "standalone"
         return None
 
     def _matches_pending_clarification(
@@ -388,40 +405,221 @@ class PendingManager:
     ) -> bool:
         return self.resolve_pending_clarification_choice(prompt, pending) is not None
 
-    @staticmethod
-    def _looks_like_new_question(prompt: str) -> bool:
+    def _matches_typed_pending_field_reply(
+        self, prompt: str, pending: Optional[dict]
+    ) -> Optional[bool]:
+        missing_fields = get_followup_missing_fields(pending)
+        if len(missing_fields) != 1:
+            return None
+        field = missing_fields[0]
+        reply_type = _FIELD_REPLY_TYPES.get(field)
+        if not reply_type:
+            return None
+        if reply_type == "id_like":
+            return self._matches_id_like_reply(prompt, pending)
+        if reply_type == "enum_like":
+            return self._matches_enum_like_reply(prompt, field)
+        if reply_type == "date_like":
+            return self._matches_date_like_reply(prompt)
+        if reply_type == "region_like":
+            return self._matches_region_like_reply(prompt)
+        if reply_type == "variety_like":
+            return self._matches_variety_like_reply(prompt)
+        if reply_type == "task_name_like":
+            return self._matches_task_name_like_reply(prompt)
+        if reply_type == "operator_like":
+            return self._matches_operator_like_reply(prompt)
+        if reply_type == "work_desc_like":
+            return self._matches_work_desc_like_reply(prompt)
+        return None
+
+    def _matches_id_like_reply(self, prompt: str, pending: Optional[dict]) -> bool:
         text = (prompt or "").strip()
         if not text:
             return False
-        for token in _NEW_TOPIC_TOKENS:
-            if token in text:
-                return True
-        if "?" in text or "？" in text:
+        if self._matches_pending_choice(text, pending):
             return True
-        if text.endswith(("吗", "么")):
+        if text.isdigit():
             return True
-        for token in _QUESTION_HINTS:
-            if token in text:
-                return True
+        return _ID_LIKE_REPLY_RE.search(text) is not None
+
+    @staticmethod
+    def _matches_enum_like_reply(prompt: str, field: str) -> bool:
+        text = (prompt or "").strip()
+        if not text:
+            return False
+        if text in _UNKNOWN_REPLY_TOKENS:
+            return True
+        if field == "planting_method":
+            return any(token in text for token in _PLANTING_METHOD_REPLY_TOKENS)
+        if field == "culti_type":
+            return any(token in text for token in _CULTI_TYPE_REPLY_TOKENS)
+        if field == "task_type":
+            return any(token in text for token in _TASK_TYPE_REPLY_TOKENS)
         return False
 
     @staticmethod
-    def _looks_like_pending_field_reply(prompt: str, pending: Optional[dict]) -> bool:
+    def _matches_date_like_reply(prompt: str) -> bool:
         text = (prompt or "").strip()
         if not text:
+            return False
+        if text in _UNKNOWN_REPLY_TOKENS:
+            return True
+        return bool(extract_explicit_dates(text, today=date.today()))
+
+    @staticmethod
+    def _matches_region_like_reply(prompt: str) -> bool:
+        extraction = extract_followup_overrides(prompt, ("region_id",))
+        return bool(extraction.overrides.get("region_id"))
+
+    @staticmethod
+    def _matches_variety_like_reply(prompt: str) -> bool:
+        text = (prompt or "").strip()
+        if not text:
+            return False
+        if text in _UNKNOWN_REPLY_TOKENS:
+            return True
+        if extract_followup_overrides(text, ("variety",)).overrides.get("variety"):
+            return True
+        if find_exact_variety_in_text(text):
+            return True
+        return bool(retrieve_variety_candidates(text, limit=3))
+
+    @staticmethod
+    def _matches_task_name_like_reply(prompt: str) -> bool:
+        text = str(prompt or "").strip()
+        if not text:
+            return False
+        if extract_followup_overrides(text, ("name",)).overrides.get("name"):
+            return True
+        return True
+
+    @staticmethod
+    def _matches_operator_like_reply(prompt: str) -> bool:
+        return bool(
+            extract_followup_overrides(prompt, ("operator",)).overrides.get("operator")
+        )
+
+    @staticmethod
+    def _matches_work_desc_like_reply(prompt: str) -> bool:
+        return bool(
+            extract_followup_overrides(prompt, ("work_desc",)).overrides.get("work_desc")
+        )
+
+    def _classify_input_validation_pending(
+        self, prompt: str, pending: Optional[dict]
+    ) -> str:
+        if not isinstance(pending, dict):
+            return "drop"
+        if self._looks_like_explicit_new_task(prompt):
+            return "drop"
+        draft = get_followup_draft(pending)
+        fields = list(
+            dict.fromkeys(
+                get_followup_missing_fields(pending)
+                + [str(item).strip() for item in list(pending.get("invalid_fields") or [])]
+            )
+        )
+        extraction = extract_followup_overrides(
+            prompt,
+            fields,
+            draft=draft if isinstance(draft, dict) else None,
+        )
+        if extraction.overrides:
+            return "carry_pending"
+        return self._classify_pending_thread(prompt, pending)
+
+    def _classify_pending_thread(
+        self,
+        prompt: str,
+        pending: Optional[dict],
+        *,
+        can_carry: bool = True,
+    ) -> str:
+        text = str(prompt or "").strip()
+        if not text:
+            return "drop"
+        if self._looks_like_explicit_new_task(text):
+            return "drop"
+        if self._looks_like_standalone_question(text):
+            return "drop"
+        decision = classify_pending_thread(
+            text,
+            pending_summary=summarize_pending(pending) or {},
+        )
+        if decision is not None and float(decision.confidence or 0.0) >= 0.75:
+            if decision.decision == "continue":
+                return "carry_pending" if can_carry else "drop"
+            if decision.decision == "new":
+                return "drop"
+        return "carry_pending" if can_carry else "drop"
+
+    @staticmethod
+    def _looks_like_explicit_new_task(prompt: str) -> bool:
+        text = str(prompt or "").strip()
+        if not text:
+            return False
+        return any(token in text for token in _EXPLICIT_NEW_TASK_TOKENS)
+
+    @staticmethod
+    def _looks_like_standalone_question(prompt: str) -> bool:
+        text = str(prompt or "").strip()
+        if not text:
+            return False
+        if any(token in text for token in _QUESTION_MARK_TOKENS):
+            return True
+        return any(
+            token in text
+            for token in ("天气", "播种", "播期", "方案", "计划", "删除", "生育期", "适合")
+        )
+
+    def _matches_structured_pending_reply(
+        self, prompt: str, pending: Optional[dict]
+    ) -> bool:
+        text = (prompt or "").strip()
+        if not text or not isinstance(pending, dict):
             return False
         missing_fields = get_followup_missing_fields(pending)
         if not missing_fields:
             return False
         if text in _UNKNOWN_REPLY_TOKENS:
             return True
-        pieces = [
-            piece.strip()
-            for piece in _FOLLOWUP_REPLY_SPLIT_RE.split(text)
-            if piece.strip()
-        ]
-        if len(missing_fields) == 1:
-            return len(text) <= 16
-        if pieces and len(pieces) <= len(missing_fields) + 1 and len(text) <= 32:
+        if any(field in {"plant_season_id", "plan_id"} for field in missing_fields):
+            if self._matches_id_like_reply(text, pending):
+                return True
+        planting_overrides = extract_followup_overrides(
+            text,
+            tuple(
+                field
+                for field in missing_fields
+                if field
+                in {
+                    "region_id",
+                    "region",
+                    "variety",
+                    "culti_type",
+                    "planting_method",
+                    "sowing_date",
+                    "transplant_date",
+                    "crop",
+                    "date",
+                }
+            ),
+        ).overrides
+        if "date" in missing_fields and (
+            planting_overrides.get("sowing_date") or planting_overrides.get("transplant_date")
+        ):
             return True
-        return len(text) <= 20
+        if any(field in planting_overrides for field in missing_fields):
+            return True
+        for field in missing_fields:
+            reply_type = _FIELD_REPLY_TYPES.get(field)
+            if reply_type == "enum_like" and self._matches_enum_like_reply(text, field):
+                return True
+            if reply_type == "task_name_like" and self._matches_task_name_like_reply(text):
+                return True
+            if reply_type == "operator_like" and self._matches_operator_like_reply(text):
+                return True
+            if reply_type == "work_desc_like" and self._matches_work_desc_like_reply(text):
+                return True
+        return False

@@ -30,7 +30,7 @@ The evaluation system has two lines:
 
 ## Lines And Profiles
 
-Profiles are defined in [src/eval_assets/governance.yaml](/f:/workspace/nlp-crop-calendar/src/eval_assets/governance.yaml).
+Profiles are defined in [src/eval_assets/governance.yaml](../src/eval_assets/governance.yaml).
 
 - `expert_blocking_gate`
   - blocking cases only

@@ -120,6 +120,20 @@ class VarietyServiceScenarioTests(unittest.TestCase):
                     scenario["expected"]["step2_variety"],
                 )
 
+    def test_unsupported_variety_attribute_returns_unavailable_message(self) -> None:
+        with patch(
+            "src.application.services.variety_service._lookup_variety_records",
+            return_value=(
+                [{"品种名称": "美香占2号", "审定区域": "湖南", "审定年份": "2020"}],
+                [{"variety_name": "美香占2号", "approval_region": "湖南"}],
+            ),
+        ):
+            result = variety_service.lookup_variety("美香占2号抗病性怎么样")
+
+        self.assertEqual(result.name, "variety_lookup")
+        self.assertIn("当前暂无品种 美香占2号 的抗病性信息", result.message)
+        self.assertIn("审定区域、审定年份、适种地区", result.message)
+
 
 if __name__ == "__main__":
     unittest.main()

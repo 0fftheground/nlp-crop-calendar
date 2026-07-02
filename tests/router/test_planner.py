@@ -20,6 +20,58 @@ class _DummyLLM:
         return {"action": "none", "response": "noop"}
 
 
+class _DummyBoundaryLLM:
+    def with_structured_output(self, _schema):
+        return self
+
+    def invoke(self, _messages):
+        return {
+            "out_of_scope": False,
+            "confidence": 0.99,
+            "reason": "in-scope",
+        }
+
+
+class _DummySessionActionLLM:
+    def with_structured_output(self, _schema):
+        return self
+
+    def invoke(self, messages):
+        prompt = ""
+        if isinstance(messages, list) and messages:
+            last = messages[-1]
+            prompt = str(getattr(last, "content", "") or "")
+        if "换个问题" in prompt or "新任务" in prompt:
+            return {
+                "thread_switch": True,
+                "action_type": "none",
+                "confidence": 0.95,
+            }
+        if "删除" in prompt or "移除" in prompt:
+            return {
+                "thread_switch": False,
+                "action_type": "delete_plan",
+                "confidence": 0.95,
+            }
+        if "生育期" in prompt or "生长阶段" in prompt or "成熟期" in prompt:
+            return {
+                "thread_switch": False,
+                "action_type": "query_growth_stage",
+                "confidence": 0.95,
+            }
+        if any(token in prompt for token in ("记录", "录入", "登记", "新增", "添加")):
+            return {
+                "thread_switch": False,
+                "action_type": "record_task",
+                "confidence": 0.95,
+            }
+        return {
+            "thread_switch": False,
+            "action_type": "none",
+            "confidence": 0.2,
+        }
+
+
 @unittest.skipUnless(
     not _MISSING_PYDANTIC_SETTINGS, "pydantic_settings is not installed"
 )
@@ -42,6 +94,16 @@ class PlannerRouterTests(unittest.TestCase):
             "src.agent.fast_intent.get_extractor_model", return_value=_DummyLLM()
         )
         self._fast_intent_patch.start()
+        self._session_action_patch = patch(
+            "src.agent.session_context.get_extractor_model",
+            return_value=_DummySessionActionLLM(),
+        )
+        self._session_action_patch.start()
+        self._boundary_patch = patch(
+            "src.agent.intent_router.get_extractor_model",
+            return_value=_DummyBoundaryLLM(),
+        )
+        self._boundary_patch.start()
         from src.agent.router import RequestRouter
 
         self.router = RequestRouter()
@@ -49,6 +111,8 @@ class PlannerRouterTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._llm_patch.stop()
         self._fast_intent_patch.stop()
+        self._session_action_patch.stop()
+        self._boundary_patch.stop()
         for key, value in self._env_backup.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -258,6 +322,111 @@ class PlannerRouterTests(unittest.TestCase):
         mocked_plan.assert_called_once()
         self.assertIsNone(self.router._pending_store.get("s-pending-new-question"))
 
+    def test_pending_plan_task_missing_plan_id_list_query_does_not_resume(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        self.router._pending_store.set(
+            "s-plan-task-new-question",
+            {
+                "mode": "tool",
+                "tool_name": "plant_task_create",
+                "draft": {"name": "追肥"},
+                "missing_fields": ["plant_season_id"],
+                "followup_count": 0,
+                "pending_message": "请补充plant_season_id，我才能新增或记录农事。",
+            },
+        )
+        plan = ActionPlan(
+            action="tool",
+            name="plant_plan_list_active",
+            input="我现在有哪些种植计划",
+            response="ok",
+        )
+        tool_payload = ToolInvocation(name="plant_plan_list_active", message="ok", data={})
+        with patch.object(self.router, "_resume_pending") as mocked_resume:
+            with patch.object(
+                self.router._intent_router, "plan", return_value=plan
+            ) as mocked_plan:
+                with patch(
+                    "src.agent.router.execute_tool", return_value=tool_payload
+                ) as mocked_execute:
+                    result = self.router.handle(
+                        UserRequest(
+                            prompt="我现在有哪些种植计划",
+                            session_id="s-plan-task-new-question",
+                        )
+                    )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "plant_plan_list_active")
+        mocked_resume.assert_not_called()
+        mocked_plan.assert_called_once()
+        mocked_execute.assert_called_once()
+        self.assertIsNone(self.router._pending_store.get("s-plan-task-new-question"))
+
+    def test_pending_plan_task_missing_plan_id_numeric_reply_still_resumes(self) -> None:
+        from src.schemas.models import HandleResponse, ToolInvocation, UserRequest
+
+        self.router._pending_store.set(
+            "s-plan-task-id-reply",
+            {
+                "mode": "tool",
+                "tool_name": "plant_task_create",
+                "draft": {"name": "追肥"},
+                "missing_fields": ["plant_season_id"],
+                "followup_count": 0,
+                "pending_message": "请补充plant_season_id，我才能新增或记录农事。",
+            },
+        )
+        pending_response = HandleResponse(
+            mode="tool",
+            tool=ToolInvocation(name="plant_task_create", message="ok", data={}),
+        )
+        with patch.object(
+            self.router, "_resume_pending", return_value=pending_response
+        ) as mocked_resume:
+            with patch.object(self.router._intent_router, "plan") as mocked_plan:
+                result = self.router.handle(
+                    UserRequest(prompt="11", session_id="s-plan-task-id-reply")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "plant_task_create")
+        mocked_resume.assert_called_once()
+        mocked_plan.assert_not_called()
+
+    def test_pending_plan_task_missing_name_reply_still_resumes(self) -> None:
+        from src.schemas.models import HandleResponse, ToolInvocation, UserRequest
+
+        self.router._pending_store.set(
+            "s-plan-task-name-reply",
+            {
+                "mode": "tool",
+                "tool_name": "plant_task_create",
+                "draft": {"plan_id": "189", "date": "2026-04-15"},
+                "missing_fields": ["name"],
+                "followup_count": 1,
+                "pending_message": "请补充农事名称，我才能新增或记录农事。",
+            },
+        )
+        pending_response = HandleResponse(
+            mode="tool",
+            tool=ToolInvocation(name="plant_task_create", message="ok", data={}),
+        )
+        with patch.object(
+            self.router, "_resume_pending", return_value=pending_response
+        ) as mocked_resume:
+            with patch.object(self.router._intent_router, "plan") as mocked_plan:
+                result = self.router.handle(
+                    UserRequest(prompt="施分蘖肥", session_id="s-plan-task-name-reply")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "plant_task_create")
+        mocked_resume.assert_called_once()
+        mocked_plan.assert_not_called()
+
     def test_pending_save_confirmation_new_question_does_not_resume(self) -> None:
         from src.agent.planner import ActionPlan
         from src.schemas.models import ToolInvocation, UserRequest
@@ -337,8 +506,9 @@ class PlannerRouterTests(unittest.TestCase):
         mocked_resume.assert_called_once()
         mocked_plan.assert_not_called()
 
-    def test_pending_save_confirmation_phrase_still_resumes(self) -> None:
-        from src.schemas.models import HandleResponse, UserRequest, WorkflowResponse
+    def test_pending_save_confirmation_phrase_no_longer_resumes(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
 
         self.router._pending_store.set(
             "s-save-confirm-phrase",
@@ -352,21 +522,32 @@ class PlannerRouterTests(unittest.TestCase):
                 "pending_kind": "confirmation",
             },
         )
-        pending_response = HandleResponse(
-            mode="workflow",
-            plan=WorkflowResponse(message="已保存。"),
+        plan = ActionPlan(
+            action="tool",
+            name="weather_lookup",
+            input={
+                "region": "常德",
+                "start_date": "2026-03-23",
+                "end_date": "2026-03-29",
+                "year": 2026,
+            },
         )
-        with patch.object(
-            self.router, "_resume_pending", return_value=pending_response
-        ) as mocked_resume:
-            with patch.object(self.router._intent_router, "plan") as mocked_plan:
-                result = self.router.handle(
-                    UserRequest(prompt="是的", session_id="s-save-confirm-phrase")
-                )
+        tool_payload = ToolInvocation(name="weather_lookup", message="ok", data={})
+        with patch.object(self.router, "_resume_pending") as mocked_resume:
+            with patch.object(
+                self.router._intent_router, "plan", return_value=plan
+            ) as mocked_plan:
+                with patch(
+                    "src.agent.router.execute_tool", return_value=tool_payload
+                ) as mocked_execute:
+                    result = self.router.handle(
+                        UserRequest(prompt="是的", session_id="s-save-confirm-phrase")
+                    )
 
-        self.assertEqual(result.mode, "workflow")
-        mocked_resume.assert_called_once()
-        mocked_plan.assert_not_called()
+        self.assertEqual(result.mode, "tool")
+        mocked_resume.assert_not_called()
+        mocked_plan.assert_called_once()
+        mocked_execute.assert_called_once()
 
     def test_ambiguous_thread_ownership_returns_clarification(self) -> None:
         from src.agent.planner import ActionPlan
@@ -664,7 +845,7 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertEqual(result.mode, "tool")
         self.assertIsNotNone(result.tool)
         self.assertEqual(result.tool.name, "plant_plan_delete")
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         self.assertEqual(mocked_execute.call_args[0][0], "plant_plan_delete")
         self.assertIn('"plant_season_id": "12"', mocked_execute.call_args[0][1])
 
@@ -686,6 +867,191 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertIsNotNone(result.plan)
         self.assertIn("请检查这些字段的格式", result.plan.message)
         self.assertIn("起始日期(YYYY-MM-DD)", result.plan.message)
+
+    def test_input_validation_followup_reuses_pending_action_with_partial_draft(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        self.router._pending_store.set(
+            "s-input-followup",
+            {
+                "mode": "input_validation",
+                "action": "tool",
+                "name": "weather_lookup",
+                "draft": {
+                    "start_date": "2026-03-23",
+                    "end_date": "2026-03-29",
+                },
+                "missing_fields": ["region"],
+                "invalid_fields": [],
+                "input_attempts": 1,
+            },
+        )
+        tool_payload = ToolInvocation(name="weather_lookup", message="ok", data={})
+        with patch.object(self.router._intent_router, "plan") as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = self.router.handle(
+                    UserRequest(prompt="芜湖", session_id="s-input-followup")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        mocked_plan.assert_not_called()
+        self.assertEqual(mocked_execute.call_args[0][0], "weather_lookup")
+        self.assertIn('"region": "芜湖"', mocked_execute.call_args[0][1])
+        self.assertIn('"start_date": "2026-03-23"', mocked_execute.call_args[0][1])
+        self.assertIn('"end_date": "2026-03-29"', mocked_execute.call_args[0][1])
+
+    def test_fast_intent_empty_dict_input_falls_back_to_default_tool_input(self) -> None:
+        from src.agent.fast_intent import FastIntentResult
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        result_payload = ToolInvocation(
+            name="plant_task_create",
+            message="请补充plant_season_id，我才能新增或记录农事。",
+            data={
+                "query": "我要记录农事",
+                "missing_fields": ["plant_season_id"],
+                "draft": {},
+                "followup_count": 0,
+                "pending_kind": "field_fill",
+            },
+        )
+        with patch.object(
+            self.router._fast_router,
+            "classify",
+            return_value=FastIntentResult(
+                action="tool",
+                name="plant_task_create",
+                confidence=0.9,
+                reason="fast_intent",
+                input={},
+            ),
+        ):
+            with patch.object(self.router._planner, "plan", return_value=None):
+                with patch(
+                    "src.agent.router.execute_tool", return_value=result_payload
+                ) as mocked_execute:
+                    response = self.router.handle(
+                        UserRequest(prompt="我要记录农事", session_id="s-fast-empty-input")
+                    )
+
+        self.assertEqual(response.mode, "tool")
+        self.assertIsNotNone(response.tool)
+        self.assertEqual(response.tool.name, "plant_task_create")
+        self.assertEqual(mocked_execute.call_args[0][0], "plant_task_create")
+        self.assertIn('"query": "我要记录农事"', mocked_execute.call_args[0][1])
+
+    def test_fast_intent_structured_dict_input_merges_query_wrapper_prompt(self) -> None:
+        from src.agent.fast_intent import FastIntentResult
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        result_payload = ToolInvocation(
+            name="plant_task_create",
+            message="请补充农事名称，我才能新增或记录农事。",
+            data={
+                "query": "记录 plant_season_id=33的基肥，2026-03-26，已完成，操作人张三，说明：亩施10kg",
+                "missing_fields": ["name"],
+                "draft": {
+                    "plant_season_id": 33,
+                    "date": "2026-03-26",
+                    "operator": "张三",
+                    "work_desc": "亩施10kg",
+                },
+                "followup_count": 0,
+                "pending_kind": "field_fill",
+            },
+        )
+        with patch.object(
+            self.router._fast_router,
+            "classify",
+            return_value=FastIntentResult(
+                action="tool",
+                name="plant_task_create",
+                confidence=0.95,
+                reason="fast_intent",
+                input={
+                    "plant_season_id": 33,
+                    "task_type": "基肥",
+                    "date": "2026-03-26",
+                    "status": "已完成",
+                    "operator": "张三",
+                    "description": "亩施10kg",
+                },
+            ),
+        ):
+            with patch.object(self.router._planner, "plan", return_value=None):
+                with patch(
+                    "src.agent.router.execute_tool", return_value=result_payload
+                ) as mocked_execute:
+                    response = self.router.handle(
+                        UserRequest(
+                            prompt="记录 plant_season_id=33的基肥，2026-03-26，已完成，操作人张三，说明：亩施10kg",
+                            session_id="s-fast-structured-input",
+                        )
+                    )
+
+        self.assertEqual(response.mode, "tool")
+        self.assertIsNotNone(response.tool)
+        self.assertEqual(response.tool.name, "plant_task_create")
+        self.assertEqual(mocked_execute.call_args[0][0], "plant_task_create")
+        executed_payload = mocked_execute.call_args[0][1]
+        self.assertIn(
+            '"query": "记录 plant_season_id=33的基肥，2026-03-26，已完成，操作人张三，说明：亩施10kg"',
+            executed_payload,
+        )
+
+    def test_planner_structured_dict_input_merges_query_wrapper_prompt(self) -> None:
+        from src.agent.planner import ActionPlan
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        result_payload = ToolInvocation(
+            name="plant_task_create",
+            message="请补充农事名称，我才能新增或记录农事。",
+            data={
+                "query": "记录 plant_season_id=33的基肥，2026-03-26，已完成，操作人张三，说明：亩施10kg",
+                "missing_fields": ["name"],
+                "draft": {
+                    "plant_season_id": 33,
+                    "date": "2026-03-26",
+                    "operator": "张三",
+                    "work_desc": "亩施10kg",
+                },
+                "followup_count": 0,
+            },
+        )
+        plan = ActionPlan(
+            action="tool",
+            name="plant_task_create",
+            input={
+                "plant_season_id": 33,
+                "task_type": "基肥",
+                "date": "2026-03-26",
+                "status": "已完成",
+                "operator": "张三",
+                "description": "亩施10kg",
+            },
+        )
+        with patch.object(self.router._intent_router, "plan", return_value=plan):
+            with patch(
+                "src.agent.router.execute_tool", return_value=result_payload
+            ) as mocked_execute:
+                response = self.router.handle(
+                    UserRequest(
+                        prompt="记录 plant_season_id=33的基肥，2026-03-26，已完成，操作人张三，说明：亩施10kg",
+                        session_id="s-planner-structured-input",
+                    )
+                )
+
+        self.assertEqual(response.mode, "tool")
+        self.assertIsNotNone(response.tool)
+        self.assertEqual(response.tool.name, "plant_task_create")
+        self.assertEqual(mocked_execute.call_args[0][0], "plant_task_create")
+        executed_payload = mocked_execute.call_args[0][1]
+        self.assertIn(
+            '"query": "记录 plant_season_id=33的基肥，2026-03-26，已完成，操作人张三，说明：亩施10kg"',
+            executed_payload,
+        )
 
 
 if __name__ == "__main__":

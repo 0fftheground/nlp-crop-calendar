@@ -668,6 +668,15 @@ def list_code_names(category: str, *, limit: int = 8) -> List[str]:
     return names[: max(1, int(limit))]
 
 
+def resolve_code_name(category: str, value: object) -> Optional[str]:
+    code = _resolve_code(category, value)
+    if code is None:
+        return None
+    mapping = _get_code_map(category)
+    name = mapping.get(code)
+    return str(name).strip() if name else None
+
+
 def _build_crop_calendar_payload(
     planting: PlantingDetails,
 ) -> tuple[Dict[str, object], Optional[object]]:

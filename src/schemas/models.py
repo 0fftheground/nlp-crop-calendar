@@ -229,6 +229,20 @@ class QueryInput(BaseModel):
     )
 
 
+class PlanTaskCreateInput(BaseModel):
+    """Structured input for creating or recording tasks under an existing plan."""
+
+    query: str = Field(
+        ...,
+        min_length=1,
+        description="用户原始问题或当前追问回复。",
+    )
+    followup: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="可选的追问上下文，用于携带已有 draft、选项或计划 ID。",
+    )
+
+
 class SowingSuitabilityQueryInput(BaseModel):
     """Structured input for sowing suitability lookup."""
 

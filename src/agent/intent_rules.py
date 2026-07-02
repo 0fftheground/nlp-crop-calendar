@@ -17,10 +17,8 @@ class IntentRule(BaseModel):
     action: Literal["tool", "workflow", "none"]
     name: Optional[str] = None
     priority: int = 0
-    any: List[str] = Field(default_factory=list)
-    all: List[str] = Field(default_factory=list)
-    regex: List[str] = Field(default_factory=list)
-    negative: List[str] = Field(default_factory=list)
+    exact: List[str] = Field(default_factory=list)
+    full_regex: List[str] = Field(default_factory=list)
     enabled: bool = True
     handler: Optional[str] = None
 
@@ -33,7 +31,8 @@ class IntentRuleSet(BaseModel):
 @dataclass(frozen=True)
 class _CompiledRule:
     rule: IntentRule
-    regex: List[object]
+    exact: List[str]
+    full_regex: List[object]
 
 
 class IntentRuleEngine:
@@ -51,26 +50,18 @@ class IntentRuleEngine:
         text = (prompt or "").strip()
         if not text:
             return None
-        lowered = text.lower()
         for compiled in self._rules:
             rule = compiled.rule
             if not rule.enabled:
                 continue
-            if rule.negative and any(token in text for token in rule.negative):
-                continue
-            if rule.any and not any(token in text for token in rule.any):
-                continue
-            if rule.all and not all(token in text for token in rule.all):
-                continue
-            if compiled.regex:
-                matched = False
-                for regex in compiled.regex:
-                    if regex.search(text) or regex.search(lowered):
-                        matched = True
+            exact_hit = text in compiled.exact
+            regex_hit = False
+            if compiled.full_regex:
+                for regex in compiled.full_regex:
+                    if regex.fullmatch(text):
+                        regex_hit = True
                         break
-                if not matched:
-                    continue
-            if not rule.any and not rule.all and not compiled.regex:
+            if not exact_hit and not regex_hit:
                 continue
             if rule.action in {"tool", "workflow"} and not rule.name:
                 continue
@@ -113,11 +104,17 @@ class IntentRuleEngine:
     def _compile_rules(ruleset: IntentRuleSet) -> List[_CompiledRule]:
         compiled: List[_CompiledRule] = []
         for rule in sorted(ruleset.rules, key=lambda r: r.priority, reverse=True):
-            regex_list: List[object] = []
-            for pattern in rule.regex:
+            full_regex_list: List[object] = []
+            for pattern in rule.full_regex:
                 try:
-                    regex_list.append(re.compile(pattern))
+                    full_regex_list.append(re.compile(pattern))
                 except Exception:
                     continue
-            compiled.append(_CompiledRule(rule=rule, regex=regex_list))
+            compiled.append(
+                _CompiledRule(
+                    rule=rule,
+                    exact=[text.strip() for text in rule.exact if text and text.strip()],
+                    full_regex=full_regex_list,
+                )
+            )
         return compiled

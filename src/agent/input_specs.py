@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ..schemas import (
     MemoryClearInput,
+    PlanTaskCreateInput,
     PromptInput,
     QueryInput,
     SowingSuitabilityQueryInput,
@@ -73,6 +74,11 @@ TOOL_INPUT_SPECS: Dict[str, InputSpec] = {
     ),
     "growth_stage_lookup": InputSpec(
         model=QueryInput,
+        field_labels=QUERY_FIELD_LABELS,
+        to_prompt=_to_json_payload,
+    ),
+    "plant_task_create": InputSpec(
+        model=PlanTaskCreateInput,
         field_labels=QUERY_FIELD_LABELS,
         to_prompt=_to_json_payload,
     ),

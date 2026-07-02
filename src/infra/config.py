@@ -85,6 +85,9 @@ class AppConfig(BaseSettings):
     recent_week_farm_work_api_url: Optional[str] = Field(
         default=None, validation_alias="RECENT_WEEK_FARM_WORK_API_URL"
     )
+    task_create_api_url: Optional[str] = Field(
+        default=None, validation_alias="TASK_CREATE_API_URL"
+    )
     farm_weather_api_url: Optional[str] = Field(
         default=None, validation_alias="FARM_WEATHER_API_URL"
     )

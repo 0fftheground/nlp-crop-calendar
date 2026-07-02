@@ -125,7 +125,6 @@ class WeatherSessionContextTests(unittest.TestCase):
 
                 self.assertEqual(result.mode, "tool")
                 self.assertEqual(result.tool.name, "weather_lookup")
-                mocked_plan.assert_not_called()
                 if scenario["expected"].get("message_contains"):
                     self.assertIn(
                         scenario["expected"]["message_contains"], result.tool.message
@@ -168,6 +167,7 @@ class WeatherSessionContextTests(unittest.TestCase):
                 "start_date": "2026-03-25",
                 "end_date": "2026-03-31",
                 "granularity": "daily",
+                "requested_operations": ["施肥"],
                 "points": [],
             },
         )
@@ -178,13 +178,59 @@ class WeatherSessionContextTests(unittest.TestCase):
                 "src.agent.router.execute_tool", return_value=weather_payload
             ) as mocked_execute:
                 result = router.handle(
-                    UserRequest(prompt="在芜湖呢", session_id="s-last")
+                    UserRequest(prompt="芜湖今天适合施肥吗", session_id="s-last")
                 )
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "weather_lookup")
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         self.assertEqual(mocked_execute.call_args[0][0], "weather_lookup")
+
+    def test_session_context_can_fallback_to_non_last_context_when_last_has_no_candidate(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "s-context-fallback",
+            {
+                "tool_contexts": {
+                    "sowing_suitability_lookup": {
+                        "variety": "美香占2号",
+                        "culti_type": "早稻",
+                        "planting_method": "direct_seeding",
+                        "region_id": "长沙",
+                        "crop": "水稻",
+                    },
+                    "weather_lookup": {
+                        "region": "长沙",
+                        "start_date": "2026-03-25",
+                        "end_date": "2026-03-31",
+                        "granularity": "daily",
+                    },
+                },
+                "last_context": {"kind": "tool", "name": "weather_lookup"},
+            },
+        )
+
+        tool_payload = ToolInvocation(
+            name="sowing_suitability_lookup",
+            message="ok",
+            data={"resolved": {"region_id": "长沙", "variety": "美香占2号"}},
+        )
+        with patch.object(
+            router._intent_router, "plan", return_value=None
+        ) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(prompt="那播种适宜期呢", session_id="s-context-fallback")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "sowing_suitability_lookup")
+        mocked_plan.assert_called_once()
+        self.assertEqual(mocked_execute.call_args[0][0], "sowing_suitability_lookup")
 
     def test_sowing_session_context_reuses_farm_id_without_validation_followup(self) -> None:
         from src.schemas.models import ToolInvocation, UserRequest
@@ -223,7 +269,7 @@ class WeatherSessionContextTests(unittest.TestCase):
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "sowing_suitability_lookup")
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         self.assertEqual(mocked_execute.call_args[0][0], "sowing_suitability_lookup")
         payload = json.loads(mocked_execute.call_args[0][1])
         self.assertEqual(payload.get("farm_id"), "12")
@@ -291,7 +337,7 @@ class WeatherSessionContextTests(unittest.TestCase):
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "weather_lookup")
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         payload = json.loads(mocked_execute.call_args[0][1])
         self.assertEqual(payload.get("region"), "长沙")
         self.assertEqual(payload.get("start_date"), "2026-03-16")
@@ -346,7 +392,7 @@ class WeatherSessionContextTests(unittest.TestCase):
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "weather_lookup")
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         payload = json.loads(mocked_execute.call_args[0][1])
         self.assertEqual(payload.get("region"), "长沙")
         self.assertEqual(payload.get("start_date"), "2026-03-13")
@@ -400,7 +446,7 @@ class WeatherSessionContextTests(unittest.TestCase):
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "weather_lookup")
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         payload = json.loads(mocked_execute.call_args[0][1])
         self.assertEqual(payload.get("region"), "芜湖")
         self.assertEqual(payload.get("start_date"), "2026-03-23")
@@ -524,7 +570,7 @@ class WeatherSessionContextTests(unittest.TestCase):
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "weather_lookup")
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         payload = json.loads(mocked_execute.call_args[0][1])
         self.assertEqual(payload.get("region"), "芜湖")
         self.assertEqual(payload.get("start_date"), "2026-03-16")
@@ -630,7 +676,7 @@ class WeatherSessionContextTests(unittest.TestCase):
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "weather_lookup")
-        mocked_plan.assert_not_called()
+        mocked_plan.assert_called_once()
         payload = json.loads(mocked_execute.call_args[0][1])
         self.assertEqual(payload.get("region"), "长沙")
         self.assertEqual(payload.get("start_date"), "2026-03-23")
@@ -769,7 +815,7 @@ class WeatherSessionContextTests(unittest.TestCase):
         self.assertEqual(first_result.tool.name, "sowing_suitability_lookup")
         self.assertEqual(second_result.mode, "tool")
         self.assertEqual(second_result.tool.name, "sowing_suitability_lookup")
-        mocked_plan.assert_not_called()
+        self.assertGreaterEqual(mocked_plan.call_count, 1)
         self.assertEqual(mocked_execute.call_args_list[0][0][0], "sowing_suitability_lookup")
         self.assertEqual(mocked_execute.call_args_list[1][0][0], "sowing_suitability_lookup")
         second_call_payload = json.loads(mocked_execute.call_args_list[1][0][1])
@@ -781,6 +827,7 @@ class WeatherSessionContextTests(unittest.TestCase):
         )
 
     def test_full_sowing_question_does_not_get_hijacked_by_weather_context(self) -> None:
+        from src.agent.planner import ActionPlan
         from src.schemas.models import ToolInvocation, UserRequest
 
         router = build_test_router()
@@ -805,12 +852,19 @@ class WeatherSessionContextTests(unittest.TestCase):
             message="ok",
             data={"resolved": {"variety": "美香占2号", "region_id": "常德"}},
         )
-        with patch(
-            "src.agent.router.execute_tool", return_value=sowing_payload
-        ) as mocked_execute:
-            result = router.handle(
-                UserRequest(prompt="美香占2号在常德种什么时候播种", session_id="s-weather-to-sowing")
-            )
+        sowing_plan = ActionPlan(
+            action="tool",
+            name="sowing_suitability_lookup",
+            input={"query": "美香占2号在常德种什么时候播种"},
+            reason="standalone:sowing",
+        )
+        with patch.object(router._intent_router, "plan", return_value=sowing_plan):
+            with patch(
+                "src.agent.router.execute_tool", return_value=sowing_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(prompt="美香占2号在常德种什么时候播种", session_id="s-weather-to-sowing")
+                )
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "sowing_suitability_lookup")
@@ -819,6 +873,7 @@ class WeatherSessionContextTests(unittest.TestCase):
         self.assertEqual(payload.get("query"), "美香占2号在常德种什么时候播种")
 
     def test_plain_sowing_followup_routes_to_sowing_tool_not_weather(self) -> None:
+        from src.agent.planner import ActionPlan
         from src.schemas.models import ToolInvocation, UserRequest
 
         router = build_test_router()
@@ -843,12 +898,19 @@ class WeatherSessionContextTests(unittest.TestCase):
             message="请补充品种、稻作类型、播种方式和区域，我才能给出播期推荐。",
             data={},
         )
-        with patch(
-            "src.agent.router.execute_tool", return_value=sowing_payload
-        ) as mocked_execute:
-            result = router.handle(
-                UserRequest(prompt="那播种怎么样", session_id="s-weather-to-plain-sowing")
-            )
+        sowing_plan = ActionPlan(
+            action="tool",
+            name="sowing_suitability_lookup",
+            input={"query": "那播种怎么样"},
+            reason="standalone:sowing",
+        )
+        with patch.object(router._intent_router, "plan", return_value=sowing_plan):
+            with patch(
+                "src.agent.router.execute_tool", return_value=sowing_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(prompt="那播种怎么样", session_id="s-weather-to-plain-sowing")
+                )
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "sowing_suitability_lookup")
@@ -859,6 +921,7 @@ class WeatherSessionContextTests(unittest.TestCase):
     def test_transplanting_sowing_question_does_not_get_hijacked_by_weather_context(
         self,
     ) -> None:
+        from src.agent.planner import ActionPlan
         from src.schemas.models import ToolInvocation, UserRequest
 
         router = build_test_router()
@@ -883,15 +946,22 @@ class WeatherSessionContextTests(unittest.TestCase):
             message="ok",
             data={"resolved": {"variety": "湘早籼24", "region_id": "湖南常德"}},
         )
-        with patch(
-            "src.agent.router.execute_tool", return_value=sowing_payload
-        ) as mocked_execute:
-            result = router.handle(
-                UserRequest(
-                    prompt="我在常德种植早稻湘早籼24，移栽什么时候播种合适",
-                    session_id="s-weather-to-transplant-sowing",
+        sowing_plan = ActionPlan(
+            action="tool",
+            name="sowing_suitability_lookup",
+            input={"query": "我在常德种植早稻湘早籼24，移栽什么时候播种合适"},
+            reason="standalone:sowing",
+        )
+        with patch.object(router._intent_router, "plan", return_value=sowing_plan):
+            with patch(
+                "src.agent.router.execute_tool", return_value=sowing_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(
+                        prompt="我在常德种植早稻湘早籼24，移栽什么时候播种合适",
+                        session_id="s-weather-to-transplant-sowing",
+                    )
                 )
-            )
 
         self.assertEqual(result.mode, "tool")
         self.assertEqual(result.tool.name, "sowing_suitability_lookup")
@@ -936,6 +1006,7 @@ class WeatherSessionContextTests(unittest.TestCase):
             get_session_context_adapter("tool", "plant_plan_list_active")
         )
         self.assertIsNotNone(get_session_context_adapter("tool", "plant_plan_delete"))
+        self.assertIsNotNone(get_session_context_adapter("tool", "plant_task_create"))
         self.assertIsNotNone(get_session_context_adapter("tool", "growth_stage_lookup"))
         self.assertIsNotNone(
             get_session_context_adapter("workflow", "crop_calendar_workflow")

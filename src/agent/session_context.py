@@ -1,59 +1,71 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import lru_cache
 import re
+import time
 from datetime import date, datetime
 from typing import Callable, Mapping, Optional
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel
 
 from ..application.services.sowing_suitability_service import (
     build_contextual_sowing_query,
 )
 from .field_updates import (
-    extract_planting_field_overrides,
+    extract_field_overrides,
     extract_region_followup_hint,
 )
 from ..application.services.weather_service import (
     extract_weather_operations,
-    normalize_weather_prompt,
 )
 from ..domain.date_parser import (
     extract_date_range,
     extract_explicit_dates,
     extract_relative_date_range,
 )
+from ..infra.llm import get_extractor_model
 from ..infra.variety_store import find_exact_variety_in_text
+from ..observability.llm_usage import log_llm_error, log_llm_request, log_llm_response
 from ..schemas.models import ToolInvocation, WorkflowResponse
 from .followup import get_followup_missing_fields, parse_followup_index
-from .intent_boundaries import (
-    looks_like_crop_calendar_query,
-    looks_like_non_agri_life_query,
-    looks_like_sowing_query,
-)
 from .planner import ActionPlan
 
 _TOOL_CONTEXT_KEY = "tool_contexts"
 _WORKFLOW_CONTEXT_KEY = "workflow_contexts"
 _LAST_CONTEXT_KEY = "last_context"
 _YEAR_RE = re.compile(r"(20\d{2})年")
-_VARIETY_FOLLOWUP_TOKENS = (
-    "审定",
-    "品种",
-    "适种",
-    "适宜",
-    "抗",
-    "产量",
-    "生育期",
-    "湖南",
-    "湖北",
-    "安徽",
-    "江苏",
-    "区域",
-    "地区",
-)
 _METHOD_LABELS = {
     "direct_seeding": "直播",
     "transplanting": "移栽",
 }
+_VARIETY_SUPPORTED_ATTRIBUTE_ALIASES = {
+    "审定区域": ("审定区域", "审定地区", "哪里审定", "哪些地区审定", "哪些地方审定"),
+    "审定年份": ("审定年份", "哪年审定", "什么时候审定", "何时审定"),
+    "适种地区": ("适种地区", "适种区域", "适宜地区", "适宜区域", "适合哪里种"),
+    "稻作类型": ("稻作类型",),
+    "亚种类型": ("亚种", "亚种类型"),
+    "熟期/熟制": ("熟期", "熟制"),
+    "生育期(天)": ("生育期", "生育期天数", "多少天"),
+}
+_VARIETY_UNSUPPORTED_ATTRIBUTE_ALIASES = (
+    "成熟期",
+    "抗病",
+    "抗性",
+    "抗倒",
+    "产量",
+    "品质",
+    "米质",
+    "口感",
+    "株高",
+    "穗长",
+    "千粒重",
+    "蛋白",
+    "直链淀粉",
+    "香味",
+    "香型",
+)
 _INVALID_REGION_TOKENS = (
     "改成",
     "换成",
@@ -81,47 +93,9 @@ _INVALID_REGION_TOKENS = (
     "收获",
     "整地",
 )
-_BRIEF_FOLLOWUP_SUFFIX_RE = re.compile(r"(呢|吗|呀|啊|怎么样|如何|行吗|可以吗)$")
-_WEATHER_QUERY_TOKENS = ("天气", "气象", "气温", "降雨", "降水", "湿度", "风速", "预报")
-_WEATHER_OPERATION_ONLY_PATTERNS = (
-    re.compile(r"施[\u4e00-\u9fffA-Za-z0-9]{0,8}肥"),
-    re.compile(r"打[\u4e00-\u9fffA-Za-z0-9]{0,8}药"),
-    re.compile(r"喷[\u4e00-\u9fffA-Za-z0-9]{0,8}药"),
-)
-_WEATHER_OPERATION_ONLY_ALIASES = (
-    "施肥",
-    "追肥",
-    "炼苗",
-    "移栽",
-    "插秧",
-    "翻地",
-    "打药",
-    "喷药",
-    "收割",
-    "收获",
-    "整地",
-    "浇水",
-    "灌溉",
-    "除草",
-    "育秧",
-    "病虫害防治",
-    "防病",
-    "治虫",
-)
 _PLAN_ID_RE = re.compile(
     r"(?:plant_season_id|plan_id|计划id|计划编号|id)\s*[:=]?\s*(\d+)",
     re.IGNORECASE,
-)
-_PLAN_DELETE_TOKENS = ("删除", "删掉", "删了", "移除")
-_GROWTH_STAGE_QUERY_TOKENS = (
-    "生育期",
-    "生长阶段",
-    "成熟期",
-    "抽穗",
-    "返青",
-    "分蘖",
-    "拔节",
-    "孕穗",
 )
 _PLAN_SELF_REFERENCE_TOKENS = (
     "这个计划",
@@ -131,19 +105,19 @@ _PLAN_SELF_REFERENCE_TOKENS = (
     "这个",
     "该",
 )
-_EXPLICIT_THREAD_SWITCH_TOKENS = (
-    "换个问题",
-    "换一个问题",
-    "另一个问题",
-    "新问题",
+_THREAD_SWITCH_TOKENS = (
+    "开启新任务",
     "新任务",
-    "重新问",
+    "换个问题",
+    "换个任务",
     "重新开始",
-    "不相关",
-    "无关",
     "先不说这个",
-    "换一个",
+    "先不聊这个",
 )
+_PLAN_DELETE_TOKENS = ("删除", "删掉", "移除")
+_PLAN_TASK_TOKENS = ("记录", "录", "新增", "添加", "补记")
+_GROWTH_STAGE_TOKENS = ("生育期", "生长阶段", "生长周期")
+_AMBIGUOUS_THREAD_TOKENS = ("这个", "那个", "这个呢", "那个呢", "那这个", "接着", "然后")
 _CHINESE_INDEX_MAP = {
     "一": 1,
     "二": 2,
@@ -182,6 +156,27 @@ class SessionContextAdapter:
     ] = None
 
 
+class _SessionActionDecision(BaseModel):
+    thread_switch: bool = False
+    action_type: str = "none"
+    confidence: float = 0.0
+
+
+_SESSION_ACTION_PROMPT = (
+    "你是会话线程动作判定器。"
+    "只判断这条用户输入是否在表达以下动作之一："
+    "delete_plan、record_task、query_growth_stage、thread_switch。"
+    "如果都不是，则 action_type=none。"
+    "只有在表达非常明确时才返回对应动作；不要因为局部关键词或主题词误判。"
+    "thread_switch=true 只用于用户明确说要换问题、换任务、重新开始当前以外的话题。"
+    "输出严格 JSON："
+    '{"thread_switch":true|false,"action_type":"none|delete_plan|record_task|query_growth_stage","confidence":0-1}'
+)
+
+_session_action_llm = None
+_session_action_llm_initialized = False
+
+
 def build_contextual_plan(
     prompt: str, session_payload: Optional[Mapping[str, object]]
 ) -> Optional[ActionPlan]:
@@ -197,28 +192,128 @@ def build_contextual_candidate(
     text = str(prompt or "").strip()
     if not text:
         return None
+    best: Optional[ContextualPlanCandidate] = None
     for adapter, context in _iter_context_candidates(session_payload):
         if adapter.build_candidate is None:
             continue
         candidate = adapter.build_candidate(text, context)
         if candidate is not None:
-            return replace(
+            candidate = replace(
                 candidate,
                 adapter_task_type=adapter.task_type,
                 updatable_fields=adapter.updatable_fields,
             )
-    return None
+            if best is None or candidate.confidence > best.confidence:
+                best = candidate
+    return best
+
+
+def _get_session_action_llm():
+    global _session_action_llm, _session_action_llm_initialized
+    if _session_action_llm_initialized:
+        return _session_action_llm
+    _session_action_llm_initialized = True
+    try:
+        _session_action_llm = get_extractor_model()
+    except Exception:
+        _session_action_llm = None
+    return _session_action_llm
+
+
+@lru_cache(maxsize=256)
+def _extract_session_action_decision(prompt: str) -> _SessionActionDecision:
+    text = str(prompt or "").strip()
+    if not text:
+        return _SessionActionDecision()
+    llm = _get_session_action_llm()
+    if llm is None:
+        return _heuristic_session_action_decision(text)
+    try:
+        extractor = llm.with_structured_output(_SessionActionDecision)
+        log_llm_request(
+            "session_context_action",
+            model=llm,
+            system_prompt=_SESSION_ACTION_PROMPT,
+            user_prompt=text,
+        )
+        started_at = time.perf_counter()
+        raw = extractor.invoke(
+            [
+                SystemMessage(content=_SESSION_ACTION_PROMPT),
+                HumanMessage(content=text),
+            ]
+        )
+        if isinstance(raw, _SessionActionDecision):
+            result = raw
+        else:
+            result = _SessionActionDecision.model_validate(raw)
+        log_llm_response(
+            "session_context_action",
+            model=llm,
+            result=result,
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+            response_text=result.model_dump(mode="json"),
+        )
+        if result.action_type == "none" and not result.thread_switch:
+            heuristic = _heuristic_session_action_decision(text)
+            if heuristic.action_type != "none" or heuristic.thread_switch:
+                return heuristic
+        return result
+    except Exception as exc:
+        log_llm_error(
+            "session_context_action",
+            error=exc,
+            model=llm,
+            system_prompt=_SESSION_ACTION_PROMPT,
+            user_prompt=text,
+            latency_ms=None,
+        )
+        return _heuristic_session_action_decision(text)
 
 
 def is_explicit_thread_switch_prompt(prompt: str) -> bool:
+    return _extract_session_action_decision(prompt).thread_switch
+
+
+def _heuristic_session_action_decision(prompt: str) -> _SessionActionDecision:
     text = str(prompt or "").strip()
     if not text:
-        return False
-    if looks_like_non_agri_life_query(text):
-        return True
-    if any(token in text for token in _EXPLICIT_THREAD_SWITCH_TOKENS):
-        return True
-    return False
+        return _SessionActionDecision()
+    if any(token in text for token in _THREAD_SWITCH_TOKENS):
+        return _SessionActionDecision(
+            thread_switch=True,
+            action_type="none",
+            confidence=0.95,
+        )
+    if any(token in text for token in _PLAN_DELETE_TOKENS) and (
+        _extract_plan_reference(text) is not None
+        or _has_plan_self_reference(text)
+        or _extract_plan_id_from_text(text) is not None
+    ):
+        return _SessionActionDecision(
+            action_type="delete_plan",
+            confidence=0.9,
+        )
+    if any(token in text for token in _GROWTH_STAGE_TOKENS) and (
+        _extract_plan_reference(text) is not None
+        or _has_plan_self_reference(text)
+        or _extract_plan_id_from_text(text) is not None
+    ):
+        return _SessionActionDecision(
+            action_type="query_growth_stage",
+            confidence=0.88,
+        )
+    if any(token in text for token in _PLAN_TASK_TOKENS):
+        task_overrides = extract_field_overrides(
+            text,
+            ("name", "task_type", "date", "operator", "work_desc"),
+        )
+        if task_overrides or _extract_plan_reference(text) is not None or _has_plan_self_reference(text):
+            return _SessionActionDecision(
+                action_type="record_task",
+                confidence=0.86,
+            )
+    return _SessionActionDecision()
 
 
 def build_thread_ownership_clarification(
@@ -236,7 +331,7 @@ def build_thread_ownership_clarification(
         and standalone_plan.name == contextual_candidate.plan.name
     ):
         return None
-    if len(text) > 16 or parse_followup_index(text) is not None:
+    if not _is_ambiguous_thread_ownership_prompt(text):
         return None
     standalone_label = _describe_thread_target(standalone_plan)
     contextual_label = _describe_thread_target(contextual_candidate.plan)
@@ -246,6 +341,17 @@ def build_thread_ownership_clarification(
         f"我不确定你是想继续当前的{contextual_label}，还是想改成新的{standalone_label}。"
         "请回复“继续当前任务”或“开启新任务”。"
     )
+
+
+def _is_ambiguous_thread_ownership_prompt(text: str) -> bool:
+    prompt = str(text or "").strip()
+    if not prompt:
+        return False
+    if parse_followup_index(prompt) is not None:
+        return False
+    if len(prompt) <= 24:
+        return True
+    return len(prompt) <= 40 and any(token in prompt for token in _AMBIGUOUS_THREAD_TOKENS)
 
 
 def should_short_circuit_contextual_candidate(
@@ -331,8 +437,6 @@ def _build_variety_contextual_candidate(
 def _build_sowing_contextual_candidate(
     prompt: str, context: Mapping[str, object]
 ) -> Optional[ContextualPlanCandidate]:
-    if _looks_like_weather_query(prompt):
-        return None
     payload = build_contextual_sowing_query(prompt, context)
     if not payload:
         return None
@@ -367,6 +471,22 @@ def _build_plan_list_contextual_candidate(
             name="plant_plan_list_active",
             evidence=_collect_plan_delete_candidate_evidence(prompt, payload),
         )
+    payload = _build_contextual_plan_task_input(
+        prompt, context, allow_implicit_current_plan=False
+    )
+    if payload:
+        return ContextualPlanCandidate(
+            plan=ActionPlan(
+                action="tool",
+                name="plant_task_create",
+                input=payload,
+                reason="session_context:plant_plan_list_active->plant_task_create",
+            ),
+            confidence=_score_plan_task_contextual_candidate(prompt, payload),
+            kind="tool",
+            name="plant_plan_list_active",
+            evidence=_collect_plan_task_candidate_evidence(prompt, payload),
+        )
     query = _build_contextual_growth_prompt_from_plan_context(prompt, context)
     if not query:
         return None
@@ -387,6 +507,22 @@ def _build_plan_list_contextual_candidate(
 def _build_growth_stage_contextual_candidate(
     prompt: str, context: Mapping[str, object]
 ) -> Optional[ContextualPlanCandidate]:
+    payload = _build_contextual_plan_task_input(
+        prompt, context, allow_implicit_current_plan=True
+    )
+    if payload:
+        return ContextualPlanCandidate(
+            plan=ActionPlan(
+                action="tool",
+                name="plant_task_create",
+                input=payload,
+                reason="session_context:growth_stage_lookup->plant_task_create",
+            ),
+            confidence=_score_plan_task_contextual_candidate(prompt, payload),
+            kind="tool",
+            name="growth_stage_lookup",
+            evidence=_collect_plan_task_candidate_evidence(prompt, payload),
+        )
     query = _build_contextual_growth_prompt(prompt, context)
     if not query:
         return None
@@ -421,6 +557,22 @@ def _build_crop_calendar_contextual_candidate(
             name="crop_calendar_workflow",
             evidence=_collect_plan_delete_candidate_evidence(prompt, payload),
         )
+    payload = _build_contextual_plan_task_input(
+        prompt, context, allow_implicit_current_plan=True
+    )
+    if payload:
+        return ContextualPlanCandidate(
+            plan=ActionPlan(
+                action="tool",
+                name="plant_task_create",
+                input=payload,
+                reason="session_context:crop_calendar_workflow->plant_task_create",
+            ),
+            confidence=_score_plan_task_contextual_candidate(prompt, payload),
+            kind="workflow",
+            name="crop_calendar_workflow",
+            evidence=_collect_plan_task_candidate_evidence(prompt, payload),
+        )
     growth_query = _build_contextual_growth_prompt_from_plan_context(prompt, context)
     if growth_query:
         return ContextualPlanCandidate(
@@ -452,30 +604,16 @@ def _build_crop_calendar_contextual_candidate(
     )
 
 
-def _looks_like_weather_query(prompt: str) -> bool:
-    text = str(prompt or "").strip()
-    if not text or looks_like_sowing_query(text) or looks_like_crop_calendar_query(text):
-        return False
-    if any(token in text for token in _WEATHER_QUERY_TOKENS):
-        return True
-    supported, unsupported = extract_weather_operations(
-        text, require_suitability_cues=True
-    )
-    return bool(supported or unsupported)
-
-
 def _score_weather_contextual_candidate(
     prompt: str, payload: Mapping[str, object]
 ) -> float:
     score = 0.55
-    if _is_brief_weather_followup(prompt):
-        score += 0.35
     if payload.get("region") not in (None, ""):
-        score += 0.1
+        score += 0.15
     if payload.get("requested_operations"):
-        score += 0.1
+        score += 0.15
     if _prompt_has_temporal_signal(prompt):
-        score += 0.1
+        score += 0.15
     return min(score, 0.98)
 
 
@@ -483,8 +621,6 @@ def _collect_weather_candidate_evidence(
     prompt: str, payload: Mapping[str, object]
 ) -> tuple[str, ...]:
     evidence: list[str] = ["weather_context"]
-    if _is_brief_weather_followup(prompt):
-        evidence.append("brief_followup")
     if payload.get("region") not in (None, ""):
         evidence.append("region")
     if payload.get("requested_operations"):
@@ -495,34 +631,39 @@ def _collect_weather_candidate_evidence(
 
 
 def _score_variety_contextual_candidate(prompt: str) -> float:
-    score = 0.65
-    if len(str(prompt or "").strip()) <= 12:
-        score += 0.2
+    score = 0.55
     if _extract_region_hint(prompt):
+        score += 0.2
+    if _find_exact_variety(prompt):
+        score += 0.15
+    if _has_explicit_variety_followup(prompt):
         score += 0.1
     return min(score, 0.95)
 
 
 def _collect_variety_candidate_evidence(prompt: str) -> tuple[str, ...]:
     evidence: list[str] = ["variety_context"]
-    if len(str(prompt or "").strip()) <= 12:
-        evidence.append("brief_followup")
     if _extract_region_hint(prompt):
         evidence.append("region")
+    if _find_exact_variety(prompt):
+        evidence.append("variety")
+    if _has_explicit_variety_followup(prompt):
+        evidence.append("attribute_request")
     return tuple(evidence)
 
 
 def _score_sowing_contextual_candidate(
     prompt: str, payload: Mapping[str, object]
 ) -> float:
-    score = 0.65
-    text = str(prompt or "").strip()
-    if len(text) <= 16 or _extract_region_hint(text):
-        score += 0.2
+    score = 0.55
     if any(payload.get(key) not in (None, "") for key in ("region_id", "farm_id")):
-        score += 0.1
+        score += 0.15
     if payload.get("variety") not in (None, ""):
-        score += 0.05
+        score += 0.15
+    if payload.get("culti_type") not in (None, ""):
+        score += 0.1
+    if payload.get("planting_method") not in (None, ""):
+        score += 0.1
     return min(score, 0.95)
 
 
@@ -530,22 +671,66 @@ def _collect_sowing_candidate_evidence(
     prompt: str, payload: Mapping[str, object]
 ) -> tuple[str, ...]:
     evidence: list[str] = ["sowing_context"]
-    if len(str(prompt or "").strip()) <= 16:
-        evidence.append("brief_followup")
     if any(payload.get(key) not in (None, "") for key in ("region_id", "farm_id")):
         evidence.append("region")
     if payload.get("variety") not in (None, ""):
         evidence.append("variety")
+    if payload.get("culti_type") not in (None, ""):
+        evidence.append("culti_type")
+    if payload.get("planting_method") not in (None, ""):
+        evidence.append("planting_method")
+    return tuple(evidence)
+
+
+def _score_plan_task_contextual_candidate(
+    prompt: str, payload: Mapping[str, object]
+) -> float:
+    score = 0.7
+    text = str(prompt or "").strip()
+    if _has_explicit_plan_task_action(text):
+        score += 0.12
+    if _extract_plan_reference(text) is not None or _has_plan_self_reference(text):
+        score += 0.08
+    followup = payload.get("followup")
+    if isinstance(followup, Mapping):
+        draft = followup.get("draft")
+        if isinstance(draft, Mapping) and draft.get("plan_id") not in (None, ""):
+            score += 0.05
+        if isinstance(draft, Mapping) and any(
+            draft.get(key) not in (None, "", [])
+            for key in ("name", "date", "task_type", "operator", "work_desc")
+        ):
+            score += 0.08
+    return min(score, 0.97)
+
+
+def _collect_plan_task_candidate_evidence(
+    prompt: str, payload: Mapping[str, object]
+) -> tuple[str, ...]:
+    evidence: list[str] = ["plan_context", "task_record_action"]
+    if _has_explicit_plan_task_action(prompt):
+        evidence.append("explicit_action")
+    if _extract_plan_reference(prompt) is not None or _has_plan_self_reference(prompt):
+        evidence.append("plan_reference")
+    followup = payload.get("followup")
+    if isinstance(followup, Mapping):
+        draft = followup.get("draft")
+        if isinstance(draft, Mapping) and draft.get("plan_id") not in (None, ""):
+            evidence.append("plan_id")
+        if isinstance(draft, Mapping):
+            for key in ("name", "date", "task_type", "operator", "work_desc"):
+                if draft.get(key) not in (None, "", []):
+                    evidence.append(key)
     return tuple(evidence)
 
 
 def _score_plan_action_contextual_candidate(prompt: str) -> float:
-    score = 0.75
+    score = 0.65
     text = str(prompt or "").strip()
     if _extract_plan_reference(text) is not None or _has_plan_self_reference(text):
         score += 0.15
-    if len(text) <= 16:
-        score += 0.05
+    if _has_explicit_plan_delete_action(text) or _has_explicit_growth_stage_action(text):
+        score += 0.1
     return min(score, 0.96)
 
 
@@ -572,16 +757,17 @@ def _collect_growth_stage_candidate_evidence(
 
 
 def _score_workflow_contextual_candidate(prompt: str) -> float:
-    score = 0.7
-    if len(str(prompt or "").strip()) <= 16:
-        score += 0.15
+    score = 0.62
+    overrides = _extract_planting_overrides(prompt)
+    if overrides:
+        score += min(0.28, 0.08 * len(overrides))
     return min(score, 0.95)
 
 
 def _collect_workflow_candidate_evidence(prompt: str) -> tuple[str, ...]:
     evidence: list[str] = ["workflow_context"]
-    if len(str(prompt or "").strip()) <= 16:
-        evidence.append("brief_followup")
+    overrides = _extract_planting_overrides(prompt)
+    evidence.extend(sorted(str(key) for key in overrides.keys()))
     return tuple(evidence)
 
 
@@ -679,6 +865,24 @@ def _extract_plan_delete_context(tool: object) -> Optional[dict[str, object]]:
     return {"plant_season_id": str(plan_id).strip()}
 
 
+def _extract_plan_task_context(tool: object) -> Optional[dict[str, object]]:
+    if not isinstance(tool, ToolInvocation):
+        return None
+    data = tool.data or {}
+    plan_id = data.get("plant_season_id")
+    if plan_id in (None, ""):
+        return None
+    context: dict[str, object] = {"plan_id": str(plan_id).strip()}
+    request = data.get("request")
+    if isinstance(request, Mapping):
+        for key in ("name", "task_type", "date", "is_completed"):
+            value = request.get(key)
+            if value in (None, ""):
+                continue
+            context[key] = value
+    return context
+
+
 def _extract_growth_stage_context(value: object) -> Optional[dict[str, object]]:
     data: Mapping[str, object]
     if isinstance(value, ToolInvocation):
@@ -763,14 +967,21 @@ def extract_session_context_from_workflow(
 
 
 def _iter_context_candidates(session_payload: Mapping[str, object]):
+    yielded: set[tuple[str, str]] = set()
     last = session_payload.get(_LAST_CONTEXT_KEY)
     if isinstance(last, Mapping):
         kind = str(last.get("kind") or "").strip()
         name = str(last.get("name") or "").strip()
         adapter = get_session_context_adapter(kind, name)
-        if adapter is None:
-            return
         context = _get_context(session_payload, kind, name)
+        if adapter is not None and context:
+            yielded.add((kind, name))
+            yield adapter, context
+    for adapter in _SESSION_CONTEXT_ADAPTERS:
+        key = (adapter.kind, adapter.name)
+        if key in yielded:
+            continue
+        context = _get_context(session_payload, adapter.kind, adapter.name)
         if context:
             yield adapter, context
 
@@ -828,6 +1039,40 @@ _SESSION_CONTEXT_ADAPTERS: tuple[SessionContextAdapter, ...] = (
     ),
     SessionContextAdapter(
         kind="tool",
+        name="plant_task_create",
+        task_type="plan_task",
+        updatable_fields=(
+            "plant_season_id",
+            "name",
+            "date",
+            "is_completed",
+            "task_type",
+            "work_desc",
+        ),
+        extract_context=_extract_plan_task_context,
+        build_candidate=lambda prompt, context: (
+            ContextualPlanCandidate(
+                plan=ActionPlan(
+                    action="tool",
+                    name="plant_task_create",
+                    input=payload,
+                    reason="session_context:plant_task_create",
+                ),
+                confidence=_score_plan_task_contextual_candidate(prompt, payload),
+                kind="tool",
+                name="plant_task_create",
+                evidence=_collect_plan_task_candidate_evidence(prompt, payload),
+            )
+            if (
+                payload := _build_contextual_plan_task_input(
+                    prompt, context, allow_implicit_current_plan=True
+                )
+            )
+            else None
+        ),
+    ),
+    SessionContextAdapter(
+        kind="tool",
         name="growth_stage_lookup",
         task_type="growth_stage",
         updatable_fields=("plan_id", "plan_filters", "planting"),
@@ -868,8 +1113,6 @@ def _build_contextual_weather_query(
 ) -> Optional[dict[str, object]]:
     if not isinstance(context, Mapping):
         return None
-    if looks_like_sowing_query(prompt) or looks_like_crop_calendar_query(prompt):
-        return None
     base = {
         key: value
         for key, value in dict(context).items()
@@ -889,46 +1132,82 @@ def _build_contextual_weather_query(
     supported_ops, unsupported_ops = extract_weather_operations(
         prompt, require_suitability_cues=False
     )
-    overrides: dict[str, object] = {}
-    _, query = normalize_weather_prompt(prompt)
-    if query is not None:
-        payload = query.model_dump(mode="json")
-        for key in ("region", "start_date", "end_date", "granularity", "include_advice"):
-            value = payload.get(key)
-            if value not in (None, ""):
-                overrides[key] = value
-    else:
-        region = None
-        if not _looks_like_weather_operation_only_followup(
-            prompt, supported_ops, unsupported_ops
-        ):
-            region = _extract_region_hint(prompt)
-        if region:
-            overrides["region"] = region
-        parsed_range = extract_date_range(prompt, today=date.today())
-        if parsed_range:
-            overrides["start_date"] = parsed_range[0].isoformat()
-            overrides["end_date"] = parsed_range[1].isoformat()
-        year = _extract_year(prompt)
-        if year is not None and "start_date" in base and "end_date" in base:
-            start = _parse_iso_date(base.get("start_date"))
-            end = _parse_iso_date(base.get("end_date"))
-            if start and end:
-                overrides["start_date"] = start.replace(year=year).isoformat()
-                overrides["end_date"] = end.replace(year=year).isoformat()
-    if supported_ops:
-        overrides["requested_operations"] = supported_ops
+    overrides = extract_field_overrides(
+        prompt,
+        ("region", "start_date", "end_date", "granularity", "include_advice", "requested_operations"),
+    )
+    text = str(prompt or "").strip()
+    if _should_block_weather_contextual_candidate(text, overrides, supported_ops):
+        return None
+    has_date_override = bool(
+        overrides.get("start_date") not in (None, "")
+        and overrides.get("end_date") not in (None, "")
+    )
+    has_supported_operation = bool(overrides.get("requested_operations"))
+    has_region_override = overrides.get("region") not in (None, "")
+    year = _extract_year(prompt)
+    if (
+        year is not None
+        and not has_date_override
+        and "start_date" in base
+        and "end_date" in base
+    ):
+        start = _parse_iso_date(base.get("start_date"))
+        end = _parse_iso_date(base.get("end_date"))
+        if start and end:
+            overrides["start_date"] = start.replace(year=year).isoformat()
+            overrides["end_date"] = end.replace(year=year).isoformat()
+            has_date_override = True
+    if unsupported_ops and not supported_ops and not has_date_override:
+        return None
+    has_structured_weather_evidence = (
+        has_date_override
+        or has_supported_operation
+        or (
+            has_region_override
+            and (
+                (
+                    base.get("start_date") not in (None, "")
+                    and base.get("end_date") not in (None, "")
+                )
+                or bool(base.get("requested_operations"))
+            )
+        )
+    )
+    if not overrides and has_structured_weather_evidence:
+        return dict(base)
     if not overrides and (supported_ops or unsupported_ops):
-        if unsupported_ops and not supported_ops and not _is_brief_weather_followup(prompt):
+        if unsupported_ops and not supported_ops:
             return None
         return dict(base)
-    if not overrides:
+    if not overrides or not has_structured_weather_evidence:
         return None
     merged = dict(base)
     merged.update(overrides)
     if not (merged.get("start_date") and merged.get("end_date")):
         return None
     return merged
+
+
+def _should_block_weather_contextual_candidate(
+    prompt: str,
+    overrides: Mapping[str, object],
+    supported_ops: list[str],
+) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+    if any(
+        token in text
+        for token in ("播种", "播期", "适播", "建立", "生成", "方案")
+    ):
+        weather_keywords = ("天气", "气象", "降雨", "降水", "温度", "预报")
+        if not any(keyword in text for keyword in weather_keywords):
+            return True
+    if not supported_ops and not overrides.get("requested_operations"):
+        if "适合" in text and "施肥" not in text and "移栽" not in text and "打药" not in text:
+            return True
+    return False
 
 
 def _prompt_has_temporal_signal(prompt: str) -> bool:
@@ -943,38 +1222,6 @@ def _prompt_has_temporal_signal(prompt: str) -> bool:
         return True
     return False
 
-
-def _is_brief_weather_followup(prompt: str) -> bool:
-    text = str(prompt or "").strip()
-    if not text:
-        return False
-    if len(text) <= 12 and _BRIEF_FOLLOWUP_SUFFIX_RE.search(text):
-        return True
-    if any(text.startswith(prefix) for prefix in ("那", "那就", "那改成", "改成", "换成")):
-        return True
-    return False
-
-
-def _looks_like_weather_operation_only_followup(
-    prompt: str, supported_ops: list[str], unsupported_ops: list[str]
-) -> bool:
-    if not (supported_ops or unsupported_ops):
-        return False
-    text = str(prompt or "").strip()
-    if not text:
-        return False
-    text = re.sub(r"^(?:那|那就|那改成|改成|换成)", "", text).strip()
-    text = _BRIEF_FOLLOWUP_SUFFIX_RE.sub("", text).strip()
-    if not text:
-        return False
-    normalized = re.sub(r"\s+", "", text)
-    if normalized in _WEATHER_OPERATION_ONLY_ALIASES:
-        return True
-    if any(pattern.fullmatch(normalized) for pattern in _WEATHER_OPERATION_ONLY_PATTERNS):
-        return True
-    return False
-
-
 def _build_contextual_variety_query(
     prompt: str, context: Optional[Mapping[str, object]]
 ) -> Optional[str]:
@@ -983,11 +1230,23 @@ def _build_contextual_variety_query(
     variety = str(context.get("variety") or "").strip()
     if not variety:
         return None
-    region = _extract_region_hint(prompt) or str(context.get("region_choice") or "").strip()
-    explicit_variety = (
-        _find_exact_variety(prompt) if _should_try_variety_match(prompt) else None
-    ) or variety
-    if not _should_resume_variety(prompt, region != str(context.get("region_choice") or "").strip()):
+    overrides = extract_field_overrides(
+        prompt,
+        ("variety", "region_choice"),
+        variety_matcher=_find_exact_variety if _should_try_variety_match(prompt) else None,
+    )
+    region = str(
+        overrides.get("region_choice")
+        or overrides.get("region_id")
+        or context.get("region_choice")
+        or ""
+    ).strip()
+    explicit_variety = str(overrides.get("variety") or variety).strip() or variety
+    if not _should_resume_variety(
+        prompt,
+        region_changed=region != str(context.get("region_choice") or "").strip(),
+        explicit_variety=explicit_variety != variety,
+    ):
         return None
     region_part = f"在{region}" if region else ""
     return f"查询品种{explicit_variety}{region_part}的审定信息。用户补充：{prompt}"
@@ -1007,7 +1266,7 @@ def _build_contextual_growth_prompt_from_plan_context(
 ) -> Optional[str]:
     if not isinstance(context, Mapping):
         return None
-    if not _looks_like_growth_stage_query(prompt):
+    if not _has_explicit_growth_stage_action(prompt):
         return None
     plan_id = _resolve_plan_id_from_context(prompt, context)
     if not plan_id:
@@ -1049,7 +1308,7 @@ def _build_contextual_plan_delete_input(
 ) -> Optional[dict[str, object]]:
     if not isinstance(context, Mapping):
         return None
-    if not _looks_like_plan_delete_query(prompt):
+    if not _has_explicit_plan_delete_action(prompt):
         return None
     plan_id = _resolve_plan_id_from_context(prompt, context)
     if not plan_id:
@@ -1057,16 +1316,47 @@ def _build_contextual_plan_delete_input(
     return {"plant_season_id": plan_id}
 
 
+def _build_contextual_plan_task_input(
+    prompt: str,
+    context: Optional[Mapping[str, object]],
+    *,
+    allow_implicit_current_plan: bool,
+) -> Optional[dict[str, object]]:
+    text = str(prompt or "").strip()
+    if not isinstance(context, Mapping):
+        return None
+    draft = _extract_plan_task_followup_draft(text)
+    if not draft:
+        return None
+    plan_id = _resolve_plan_id_from_context(text, context)
+    if not plan_id and allow_implicit_current_plan:
+        current_plan_id = context.get("plant_season_id") or context.get("plan_id")
+        if current_plan_id not in (None, ""):
+            plan_id = str(current_plan_id).strip()
+    if not plan_id:
+        return None
+    draft["plan_id"] = plan_id
+    plan_name = str(context.get("plan_name") or "").strip()
+    if plan_name:
+        draft["plan_name"] = plan_name
+    return {
+        "query": text,
+        "followup": {
+            "draft": draft,
+            "missing_fields": [],
+            "followup_count": 0,
+        },
+    }
+
+
 def _extract_planting_overrides(prompt: str) -> dict[str, object]:
     text = str(prompt or "").strip()
     if not text:
         return {}
     include_variety = _should_try_variety_match(text)
-    return extract_planting_field_overrides(
+    return extract_field_overrides(
         text,
-        include_variety=include_variety,
-        include_dates=True,
-        include_crop=False,
+        ("region_id", "culti_type", "planting_method", "sowing_date", "transplant_date", "variety"),
         variety_matcher=_find_exact_variety if include_variety else None,
     )
 
@@ -1086,6 +1376,8 @@ def _describe_thread_target(plan: ActionPlan) -> str:
         return "种植计划列表查询"
     if plan.action == "tool" and plan.name == "plant_plan_delete":
         return "种植计划删除"
+    if plan.action == "tool" and plan.name == "plant_task_create":
+        return "农事新增/记录"
     return str(plan.name or plan.action or "").strip()
 
 
@@ -1135,31 +1427,101 @@ def _describe_planting(planting: Mapping[str, object]) -> str:
     return "，".join(parts)
 
 
-def _should_resume_variety(prompt: str, region_changed: bool) -> bool:
+def _should_resume_variety(
+    prompt: str, *, region_changed: bool, explicit_variety: bool
+) -> bool:
     text = str(prompt or "").strip()
     if not text:
         return False
     if region_changed:
         return True
-    if any(token in text for token in _VARIETY_FOLLOWUP_TOKENS):
+    if explicit_variety:
         return True
-    if len(text) <= 12 and re.search(r"(呢|吗|如何|怎么样)$", text):
+    if _has_explicit_variety_followup(text):
         return True
     return False
 
 
-def _looks_like_plan_delete_query(prompt: str) -> bool:
+def _has_explicit_variety_followup(prompt: str) -> bool:
     text = str(prompt or "").strip()
     if not text:
         return False
-    return any(token in text for token in _PLAN_DELETE_TOKENS)
+    if _find_exact_variety(text):
+        return True
+    if _has_variety_attribute_followup(text):
+        return True
+    return False
 
 
-def _looks_like_growth_stage_query(prompt: str) -> bool:
+def _has_variety_attribute_followup(prompt: str) -> bool:
     text = str(prompt or "").strip()
     if not text:
         return False
-    return any(token in text for token in _GROWTH_STAGE_QUERY_TOKENS)
+    for aliases in _VARIETY_SUPPORTED_ATTRIBUTE_ALIASES.values():
+        if any(alias in text for alias in aliases):
+            return True
+    return any(alias in text for alias in _VARIETY_UNSUPPORTED_ATTRIBUTE_ALIASES)
+
+
+def _has_explicit_plan_delete_action(prompt: str) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+    decision = _extract_session_action_decision(text)
+    if decision.action_type != "delete_plan":
+        return False
+    return (
+        _extract_plan_reference(text) is not None
+        or _has_plan_self_reference(text)
+        or _extract_plan_id_from_text(text) is not None
+    )
+
+
+def _has_explicit_plan_task_action(prompt: str) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+    decision = _extract_session_action_decision(text)
+    if decision.action_type != "record_task":
+        return False
+    task_overrides = extract_field_overrides(
+        text,
+        ("name", "task_type", "date", "operator", "work_desc"),
+    )
+    if task_overrides:
+        return True
+    if (
+        _extract_plan_reference(text) is not None
+        or _has_plan_self_reference(text)
+        or extract_field_overrides(text, ("plan_id",)).get("plan_id") not in (None, "")
+    ):
+        return True
+    return False
+
+
+def _has_explicit_growth_stage_action(prompt: str) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+    decision = _extract_session_action_decision(text)
+    if decision.action_type != "query_growth_stage":
+        return False
+    return (
+        _extract_plan_reference(text) is not None
+        or _has_plan_self_reference(text)
+        or _extract_plan_id_from_text(text) is not None
+    )
+
+
+def _extract_plan_task_followup_draft(prompt: str) -> dict[str, object]:
+    text = str(prompt or "").strip()
+    if not _has_explicit_plan_task_action(text):
+        return {}
+    draft = extract_field_overrides(
+        text,
+        ("name", "task_type", "date", "operator", "work_desc"),
+    )
+    return draft or {"_explicit_action": True}
 
 
 def _extract_plan_reference(text: str) -> Optional[int]:

@@ -35,12 +35,14 @@ def build_initial_interaction_context(
     *,
     request_id: str,
     session_id: str,
+    user_id: Optional[str] = None,
     previous_interaction_id: Optional[int] = None,
     previous_thread_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "request_id": request_id,
         "session_id": session_id,
+        "user_id": user_id,
         "previous_interaction_id": previous_interaction_id,
         "previous_thread_id": previous_thread_id,
         "thread_id": request_id,

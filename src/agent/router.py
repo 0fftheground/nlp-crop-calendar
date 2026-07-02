@@ -8,6 +8,7 @@ from .followup import (
     get_followup_options,
     resolve_followup_choice,
 )
+from .followup_extract import extract_followup_overrides
 from .session_context import (
     build_thread_ownership_clarification,
     build_contextual_candidate,
@@ -24,6 +25,7 @@ from ..observability.interaction_context import get_interaction_context, update_
 from ..observability.otel import annotate_current_span, build_span_attributes
 from ..schemas.models import HandleResponse, UserRequest, WorkflowResponse
 from .fast_intent import FastIntentRouter
+from .input_specs import get_input_spec
 from .intent_router import IntentRouter
 from .intent_rules import IntentRuleEngine
 from .plan_executor import PlanExecutor
@@ -140,7 +142,11 @@ class RequestRouter:
                 plan = WorkflowResponse(message=DEFAULT_NONE_MESSAGE)
                 return HandleResponse(mode="none", plan=plan)
             pending = self._pending_manager.get(session_id)
-            if self._pending_manager.should_resume_pending(prompt, pending):
+            pending_disposition = self._pending_manager.get_pending_disposition(
+                prompt, pending
+            )
+            carry_pending = pending_disposition == "carry_pending"
+            if pending_disposition == "resume_direct":
                 if pending and pending.get("mode") == "clarification":
                     self._mark_interaction_lineage(
                         continuity_type="pending_resume",
@@ -165,11 +171,24 @@ class RequestRouter:
                     reason="auto",
                 )
                 return self._resume_pending(prompt, pending, session_id)
-            if pending:
+            if carry_pending and pending and pending.get("mode") == "input_validation":
+                self._mark_interaction_lineage(
+                    continuity_type="pending_resume",
+                    continuity_source="pending",
+                    continue_thread=True,
+                    dialogue_act="update_fields",
+                    task_type=self._task_type_from_pending(pending),
+                )
+                return self._resume_input_validation_pending(prompt, pending, session_id)
+            if pending and not carry_pending:
                 # New question: clear stale pending to avoid misrouting follow-ups.
                 self._pending_manager.delete(session_id)
                 pending = None
-            contextual_candidate = self._get_contextual_candidate(prompt, session_id)
+            contextual_candidate = (
+                None
+                if carry_pending
+                else self._get_contextual_candidate(prompt, session_id)
+            )
             if contextual_candidate:
                 contextual_summary = {
                     "action": contextual_candidate.plan.action,
@@ -191,7 +210,7 @@ class RequestRouter:
                 )
             standalone_plan = self._intent_router.plan(
                 prompt,
-                pending=pending,
+                pending=pending if carry_pending else None,
                 intent_mode=self._intent_mode,
             )
             if standalone_plan:
@@ -314,8 +333,14 @@ class RequestRouter:
                     dialogue_act="start_new_task",
                     task_type="none",
                 )
-                return self._fallback_from_planner(prompt, pending, session_id)
-            return self._execute_with_validation(plan, prompt, pending, session_id)
+                return self._fallback_from_planner(
+                    prompt,
+                    pending if carry_pending else None,
+                    session_id,
+                )
+            return self._execute_with_validation(
+                plan, prompt, pending if carry_pending else None, session_id
+            )
         finally:
             self._memory_id_ctx.reset(memory_token)
             self._session_id_ctx.reset(session_token)
@@ -411,12 +436,32 @@ class RequestRouter:
         pending: Optional[dict],
         session_id: str,
     ) -> HandleResponse:
+        plan = self._hydrate_wrapper_plan_input(plan, prompt)
         plan, exec_pending, response = self._plan_executor.apply_input_validation(
             plan, pending, session_id
         )
         if response:
             return response
         return self._execute_plan(plan, prompt, exec_pending, session_id)
+
+    def _hydrate_wrapper_plan_input(self, plan: ActionPlan, prompt: str) -> ActionPlan:
+        if plan.action not in {"tool", "workflow"} or not plan.name:
+            return plan
+        payload = plan.input
+        if not isinstance(payload, dict):
+            return plan
+        spec = get_input_spec(plan.action, plan.name)
+        if not spec:
+            return plan
+        updated = dict(payload)
+        changed = False
+        for field_name in spec.required_fields:
+            if field_name in {"query", "prompt"} and field_name not in updated:
+                updated[field_name] = prompt
+                changed = True
+        if not changed:
+            return plan
+        return plan.model_copy(update={"input": updated})
 
     def _execute_plan(
         self,
@@ -520,6 +565,31 @@ class RequestRouter:
             response, session_id=session_id, pending=pending
         )
         return response
+
+    def _resume_input_validation_pending(
+        self, prompt: str, pending: dict, session_id: str
+    ) -> HandleResponse:
+        fields = list(
+            dict.fromkeys(
+                get_followup_missing_fields(pending)
+                + [str(item).strip() for item in list(pending.get("invalid_fields") or [])]
+            )
+        )
+        draft = pending.get("draft")
+        extraction = extract_followup_overrides(
+            prompt,
+            fields,
+            draft=draft if isinstance(draft, dict) else None,
+        )
+        payload = dict(draft) if isinstance(draft, dict) else {}
+        payload.update(extraction.overrides)
+        plan = ActionPlan(
+            action=str(pending.get("action") or "none"),
+            name=str(pending.get("name") or "") or None,
+            input=payload,
+            reason="pending:input_validation",
+        )
+        return self._execute_with_validation(plan, prompt, pending, session_id)
 
     def _resume_clarification_pending(
         self, prompt: str, pending: dict, session_id: str

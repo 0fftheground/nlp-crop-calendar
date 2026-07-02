@@ -39,6 +39,7 @@ def _build_capability_guide() -> str:
 - `sowing_suitability_lookup`：查询播期推荐
 - `plant_plan_list_active`：查询当前启用的种植计划
 - `plant_plan_delete`：删除指定种植计划
+- `plant_task_create`：为已有种植计划新增或记录农事
 - `growth_stage_lookup`：根据已有种植计划查询生育期结果
 
 支持的 Workflow：
@@ -53,6 +54,7 @@ def _build_capability_guide() -> str:
 - 播期推荐：`查询美香占2号、一季晚稻、直播在长沙的播期推荐`
 - 品种信息：`南粳9108的生育期和适宜种植区域是什么？`
 - 计划管理：`列出当前启用的种植计划` / `删除种植计划 plant_season_id=123`
+- 农事录入：`记录 plant_season_id=123 的追肥，2026-03-26，已完成，操作人张三，说明：亩施10kg`
 
 提问时尽量带上：`地区 / 品种 / 稻作类型 / 播种方式 / 日期或计划ID`
 如需保存计划，默认使用系统配置的 `DEFAULT_FARM_ID`。
@@ -320,6 +322,15 @@ def _is_capability_help_prompt(prompt: str) -> bool:
         "示例提问",
     )
     return any(item in text for item in fuzzy_hits)
+
+
+def _format_backend_request_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        seconds = int(BACKEND_TIMEOUT_SECONDS)
+        return f"请求超时：后端在 {seconds} 秒内未返回结果，请稍后重试或换一种更具体的表达。"
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        return f"请求失败：后端返回 {exc.response.status_code}。"
+    return f"请求失败: {exc}"
 
 
 def _format_weather_tool_details(
@@ -743,7 +754,7 @@ async def on_message(message: cl.Message):
             data = response.json()
     except Exception as exc:
         await _clear_status_message(status_msg)
-        await cl.Message(content=f"请求失败: {exc}").send()
+        await cl.Message(content=_format_backend_request_error(exc)).send()
         return
 
     await _clear_status_message(status_msg)

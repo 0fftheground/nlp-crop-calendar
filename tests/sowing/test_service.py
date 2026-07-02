@@ -266,7 +266,7 @@ class SowingSuitabilityServiceTests(unittest.TestCase):
         self.assertEqual(result.name, "sowing_suitability_lookup")
         self.assertEqual(result.message, "品种 美香占2号 未在 芜湖 审定。")
 
-    def test_lookup_sowing_suitability_prefers_llm_extraction(self) -> None:
+    def test_lookup_sowing_suitability_skips_llm_extraction_for_vague_prompt(self) -> None:
         class StubConfig:
             agri_db_url = "postgresql://example"
             business_api_key = None
@@ -313,30 +313,14 @@ class SowingSuitabilityServiceTests(unittest.TestCase):
             sql_port=StubSql(),
         )
         with patch(
-            "src.application.services.sowing_suitability_service._llm_extract_planting_for_sowing",
-            return_value={
-                "variety": "南粳46",
-                "culti_type": "一季稻",
-                "planting_method": "direct_seeding",
-            },
-        ):
+            "src.application.services.sowing_suitability_service._llm_extract_planting_for_sowing"
+        ) as mocked_extract:
             result = lookup_sowing_suitability("最近适合播种嘛")
 
         self.assertEqual(result.name, "sowing_suitability_lookup")
-        self.assertEqual(result.message, "success")
-        self.assertEqual(len(http.calls), 1)
-        self.assertEqual(
-            http.calls[0],
-            {
-                "farm_id": 12,
-                "culti_type": 4,
-                "sowing_method": 0,
-                "sub_type": 9,
-                "crop": 0,
-            },
-        )
-        self.assertEqual(result.data.get("resolved", {}).get("variety"), "南粳46")
-        self.assertEqual(result.data.get("resolved", {}).get("culti_type"), "一季晚稻")
+        self.assertIn("请补充", result.message)
+        self.assertEqual(len(http.calls), 0)
+        mocked_extract.assert_not_called()
 
     def test_lookup_sowing_suitability_returns_variety_candidates_for_partial_name(self) -> None:
         class StubConfig:

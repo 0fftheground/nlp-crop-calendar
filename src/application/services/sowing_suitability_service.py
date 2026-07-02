@@ -13,11 +13,8 @@ from ..adapters import (
 )
 from ..ports import ConfigPort, HttpPort, SqlPort
 from ...agent.followup import build_tool_followup_invocation, resolve_followup_choice
-from ...agent.field_updates import (
-    extract_planting_field_overrides,
-    extract_region_followup_hint,
-)
-from ...agent.intent_boundaries import looks_like_sowing_query
+from ...agent.extract_decision import should_extract_for_route
+from ...agent.field_updates import extract_field_overrides
 from ...domain.planting import DEFAULT_CROP, extract_planting_details
 from ...domain.region_text import build_region_text_variants, normalize_region_token
 from ...infra.llm_extract import llm_structured_extract
@@ -319,8 +316,16 @@ def _build_query_from_prompt(prompt: str) -> Dict[str, object]:
         if value is not None and value != "":
             draft[key] = value
     query_text = _extract_query_text(prompt)
+    extract_decision = should_extract_for_route(
+        action="tool",
+        name="sowing_suitability_lookup",
+        prompt=query_text,
+    )
     planting = extract_planting_details(
-        query_text, llm_extract=_llm_extract_planting_for_sowing
+        query_text,
+        llm_extract=(
+            _llm_extract_planting_for_sowing if extract_decision.should_extract else None
+        ),
     )
     if planting.variety and "variety" not in draft:
         draft["variety"] = planting.variety
@@ -334,8 +339,18 @@ def _build_query_from_prompt(prompt: str) -> Dict[str, object]:
     if planting.crop and "crop" not in draft:
         draft["crop"] = planting.crop
     if followup_prompt:
+        followup_decision = should_extract_for_route(
+            action="tool",
+            name="sowing_suitability_lookup",
+            prompt=followup_prompt,
+        )
         followup_planting = extract_planting_details(
-            followup_prompt, llm_extract=_llm_extract_planting_for_sowing
+            followup_prompt,
+            llm_extract=(
+                _llm_extract_planting_for_sowing
+                if followup_decision.should_extract
+                else None
+            ),
         )
         followup_variety = _extract_variety_hint(followup_prompt)
         if followup_planting.variety and not draft.get("variety"):
@@ -371,27 +386,29 @@ def _build_query_from_prompt(prompt: str) -> Dict[str, object]:
     return draft
 
 
-def _extract_contextual_region_hint(text: str) -> Optional[str]:
-    return extract_region_followup_hint(text, invalid_tokens=())
-
-
 def _extract_contextual_sowing_overrides(text: str) -> dict[str, object]:
-    overrides = extract_planting_field_overrides(
+    return extract_field_overrides(
         text,
-        include_variety=True,
-        include_dates=False,
-        include_crop=True,
+        ("region_id", "variety", "culti_type", "planting_method", "crop"),
         variety_matcher=find_exact_variety_in_text,
     )
-    # Short follow-ups like "早稻呢" / "直播呢" should only override the explicitly
-    # extracted field, not be reinterpreted as a region.
-    if "region_id" not in overrides and not any(
-        key in overrides for key in ("variety", "culti_type", "planting_method")
+
+
+def _has_contextual_sowing_signal(
+    text: str, overrides: Mapping[str, object]
+) -> bool:
+    prompt = str(text or "").strip()
+    if not prompt:
+        return False
+    if any(
+        token in prompt
+        for token in ("播种", "播期", "适播", "播吗", "什么时候播", "何时播", "适合播")
     ):
-        region_hint = _extract_contextual_region_hint(text)
-        if region_hint:
-            overrides["region_id"] = region_hint
-    return overrides
+        return True
+    for field in ("region_id", "variety", "culti_type", "planting_method"):
+        if overrides.get(field) not in (None, ""):
+            return True
+    return False
 
 
 def build_contextual_sowing_query(
@@ -411,10 +428,12 @@ def build_contextual_sowing_query(
     if not base:
         return None
     overrides = _extract_contextual_sowing_overrides(text)
+    if not _has_contextual_sowing_signal(text, overrides):
+        return None
     merged = dict(base)
     if overrides:
         merged.update(overrides)
-    elif not looks_like_sowing_query(text):
+    else:
         return None
     merged["query"] = text
     return merged

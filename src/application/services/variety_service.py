@@ -103,6 +103,18 @@ _FOLLOWUP_ALL_TOKENS = {
     "全部区域",
     "全部信息",
 }
+_UNSUPPORTED_VARIETY_ATTRIBUTES = {
+    "成熟期": ("成熟期",),
+    "抗病性": ("抗病", "抗性"),
+    "抗倒性": ("抗倒",),
+    "产量": ("产量",),
+    "品质": ("品质", "米质", "口感"),
+    "株高": ("株高",),
+    "穗部性状": ("穗长", "千粒重"),
+    "营养品质": ("蛋白", "直链淀粉"),
+    "香型": ("香味", "香型"),
+}
+_SUPPORTED_VARIETY_ATTRIBUTE_TEXT = "审定区域、审定年份、适种地区、稻作类型、亚种类型、熟期/熟制、生育期(天)"
 
 
 class VarietyMatchDecision(BaseModel):
@@ -316,6 +328,28 @@ def _resolve_followup_region(
         if answer in candidate or candidate in answer:
             return candidate
     return None
+
+
+def _detect_unsupported_variety_attributes(prompt: str) -> list[str]:
+    text = _normalize_variety_prompt(prompt) or str(prompt or "").strip()
+    if not text:
+        return []
+    labels: list[str] = []
+    for label, aliases in _UNSUPPORTED_VARIETY_ATTRIBUTES.items():
+        if any(alias in text for alias in aliases):
+            labels.append(label)
+    return labels
+
+
+def _build_unsupported_variety_attribute_message(
+    variety: str, unsupported_attributes: List[str]
+) -> str:
+    variety_text = str(variety or "").strip() or "该品种"
+    labels = "、".join(dict.fromkeys(unsupported_attributes)) or "这些"
+    return (
+        f"当前暂无品种 {variety_text} 的{labels}信息。"
+        f"目前仅支持查询{_SUPPORTED_VARIETY_ATTRIBUTE_TEXT}。"
+    )
 
 
 def _extract_region_hint(prompt: str) -> Optional[str]:
@@ -931,6 +965,7 @@ def lookup_variety(prompt: str) -> ToolInvocation:
     prompt_is_workflow = _is_workflow_prompt(prompt)
     explicit_candidate = _extract_confirmed_candidate(prompt)
     confirmed_candidate = explicit_candidate
+    unsupported_attributes = _detect_unsupported_variety_attributes(prompt)
     records, raw_records = _lookup_variety_records(
         prompt, confirmed_candidate=confirmed_candidate
     )
@@ -943,6 +978,21 @@ def lookup_variety(prompt: str) -> ToolInvocation:
             or _extract_variety(prompt)
             or "未知"
         )
+        if unsupported_attributes:
+            return ToolInvocation(
+                name="variety_lookup",
+                message=_build_unsupported_variety_attribute_message(
+                    str(variety), unsupported_attributes
+                ),
+                data={
+                    "query": query_source,
+                    "crop": DEFAULT_CROP,
+                    "variety": variety,
+                    "unsupported_attributes": unsupported_attributes,
+                    "supported_attributes": _SUPPORTED_VARIETY_ATTRIBUTE_TEXT,
+                    "source": "sqlite",
+                },
+            )
         if is_record_followup and isinstance(payload_data, dict):
             followup = payload_data.get("followup")
             draft = get_followup_draft(followup) or {}
@@ -1202,6 +1252,21 @@ def lookup_variety(prompt: str) -> ToolInvocation:
                 return followup
         return _build_variety_open_followup(prompt)
     crop, variety = _infer_crop_and_variety(prompt)
+    if unsupported_attributes:
+        return ToolInvocation(
+            name="variety_lookup",
+            message=_build_unsupported_variety_attribute_message(
+                str(variety), unsupported_attributes
+            ),
+            data={
+                "query": query_source,
+                "crop": crop,
+                "variety": variety,
+                "unsupported_attributes": unsupported_attributes,
+                "supported_attributes": _SUPPORTED_VARIETY_ATTRIBUTE_TEXT,
+                "source": "mock",
+            },
+        )
     payload = {
         "query": prompt,
         "crop": crop,

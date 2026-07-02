@@ -95,11 +95,79 @@ class VarietySessionContextTests(unittest.TestCase):
 
                 self.assertEqual(result.mode, "tool")
                 self.assertEqual(result.tool.name, "variety_lookup")
-                mocked_plan.assert_not_called()
+                mocked_plan.assert_called_once()
                 payload = json.loads(mocked_execute.call_args[0][1])
                 merged_prompt = str(payload.get("prompt") or "")
                 for snippet in scenario["expected"]["prompt_contains"]:
                     self.assertIn(snippet, merged_prompt)
+
+    def test_supported_variety_attribute_followup_reuses_context(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "v-supported",
+            {
+                "tool_contexts": {
+                    "variety_lookup": {
+                        "crop": "水稻",
+                        "variety": "美香占2号",
+                        "region_choice": "湖南",
+                        "selected": {"品种名称": "美香占2号"},
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "variety_lookup"},
+            },
+        )
+        tool_payload = ToolInvocation(name="variety_lookup", message="ok", data={})
+        with patch.object(router._intent_router, "plan", return_value=None) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(prompt="生育期天数呢", session_id="v-supported")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "variety_lookup")
+        mocked_plan.assert_called_once()
+        payload = json.loads(mocked_execute.call_args[0][1])
+        self.assertIn("美香占2号", str(payload.get("prompt") or ""))
+        self.assertIn("生育期天数呢", str(payload.get("prompt") or ""))
+
+    def test_unsupported_variety_attribute_followup_reuses_context(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "v-unsupported",
+            {
+                "tool_contexts": {
+                    "variety_lookup": {
+                        "crop": "水稻",
+                        "variety": "美香占2号",
+                        "region_choice": "湖南",
+                        "selected": {"品种名称": "美香占2号"},
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "variety_lookup"},
+            },
+        )
+        tool_payload = ToolInvocation(name="variety_lookup", message="暂无信息", data={})
+        with patch.object(router._intent_router, "plan", return_value=None) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(prompt="抗病性怎么样", session_id="v-unsupported")
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertEqual(result.tool.name, "variety_lookup")
+        mocked_plan.assert_called_once()
+        payload = json.loads(mocked_execute.call_args[0][1])
+        self.assertIn("美香占2号", str(payload.get("prompt") or ""))
+        self.assertIn("抗病性怎么样", str(payload.get("prompt") or ""))
 
 
 if __name__ == "__main__":

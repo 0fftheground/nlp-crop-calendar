@@ -75,7 +75,7 @@ Runtime order:
 7. execute tool or workflow
 8. persist interaction and session state
 
-The system is thread-aware, not only session-aware. See [dialogue-orchestration.md](/f:/workspace/nlp-crop-calendar/doc/dialogue-orchestration.md).
+The system is thread-aware, not only session-aware. See [dialogue-orchestration.md](./dialogue-orchestration.md).
 
 ## Routing
 
@@ -171,4 +171,4 @@ Main test areas:
 - `tests/domain/`
 - `tests/architecture/`
 
-Model-governance and online audit are documented separately in [eval-governance.md](/f:/workspace/nlp-crop-calendar/doc/eval-governance.md).
+Model-governance and online audit are documented separately in [eval-governance.md](./eval-governance.md).

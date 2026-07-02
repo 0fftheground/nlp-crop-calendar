@@ -332,6 +332,134 @@ class WorkflowSessionContextTests(unittest.TestCase):
         self.assertEqual(mocked_execute.call_args[0][0], "plant_plan_delete")
         self.assertIn('"plant_season_id": "21"', mocked_execute.call_args[0][1])
 
+    def test_crop_calendar_context_can_resume_plan_task_create_tool(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "w-crop-task",
+            {
+                "workflow_contexts": {
+                    "crop_calendar_workflow": {
+                        "planting": {
+                            "region_id": "长沙",
+                            "crop": "水稻",
+                            "variety": "美香占2号",
+                            "culti_type": "早稻",
+                            "planting_method": "direct_seeding",
+                        },
+                        "plant_season_id": 31,
+                    }
+                },
+                "last_context": {"kind": "workflow", "name": "crop_calendar_workflow"},
+            },
+        )
+
+        tool_payload = ToolInvocation(
+            name="plant_task_create",
+            message="已记录农事。",
+            data={"plant_season_id": "31", "response": {"status": "success"}},
+        )
+        with patch.object(router._intent_router, "plan", return_value=None) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(
+                        prompt="记录今天施肥，已完成，说明：完成追肥。",
+                        session_id="w-crop-task",
+                    )
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertIsNotNone(result.tool)
+        self.assertEqual(result.tool.name, "plant_task_create")
+        mocked_plan.assert_called_once()
+        self.assertEqual(mocked_execute.call_args[0][0], "plant_task_create")
+        self.assertIn('"plan_id": "31"', mocked_execute.call_args[0][1])
+
+    def test_plan_list_context_can_resume_plan_task_create_tool(self) -> None:
+        from src.schemas.models import ToolInvocation, UserRequest
+
+        router = build_test_router()
+        router._session_context_store.set(
+            "w-plan-task",
+            {
+                "tool_contexts": {
+                    "plant_plan_list_active": {
+                        "plans": [
+                            {"plan_id": "11", "plan_name": "早稻计划"},
+                            {"plan_id": "12", "plan_name": "晚稻计划"},
+                        ]
+                    }
+                },
+                "last_context": {"kind": "tool", "name": "plant_plan_list_active"},
+            },
+        )
+
+        tool_payload = ToolInvocation(
+            name="plant_task_create",
+            message="已新增农事。",
+            data={"plant_season_id": "11", "response": {"status": "success"}},
+        )
+        with patch.object(router._intent_router, "plan", return_value=None) as mocked_plan:
+            with patch(
+                "src.agent.router.execute_tool", return_value=tool_payload
+            ) as mocked_execute:
+                result = router.handle(
+                    UserRequest(
+                        prompt="记录第1个计划今天打药，未完成。",
+                        session_id="w-plan-task",
+                    )
+                )
+
+        self.assertEqual(result.mode, "tool")
+        self.assertIsNotNone(result.tool)
+        self.assertEqual(result.tool.name, "plant_task_create")
+        mocked_plan.assert_called_once()
+        self.assertEqual(mocked_execute.call_args[0][0], "plant_task_create")
+        self.assertIn('"plan_id": "11"', mocked_execute.call_args[0][1])
+
+    def test_plan_list_context_plain_region_phrase_does_not_resume(self) -> None:
+        from src.agent.session_context import build_contextual_candidate
+
+        payload = {
+            "tool_contexts": {
+                "plant_plan_list_active": {
+                    "plans": [
+                        {"plan_id": "11", "plan_name": "早稻计划"},
+                        {"plan_id": "12", "plan_name": "晚稻计划"},
+                    ]
+                }
+            },
+            "last_context": {"kind": "tool", "name": "plant_plan_list_active"},
+        }
+
+        candidate = build_contextual_candidate("长沙", payload)
+        self.assertIsNone(candidate)
+
+    def test_crop_calendar_context_new_weather_query_does_not_resume_workflow(self) -> None:
+        from src.agent.session_context import build_contextual_candidate
+
+        payload = {
+            "workflow_contexts": {
+                "crop_calendar_workflow": {
+                    "planting": {
+                        "region_id": "长沙",
+                        "crop": "水稻",
+                        "variety": "美香占2号",
+                        "culti_type": "早稻",
+                        "planting_method": "direct_seeding",
+                    },
+                    "plant_season_id": 31,
+                }
+            },
+            "last_context": {"kind": "workflow", "name": "crop_calendar_workflow"},
+        }
+
+        candidate = build_contextual_candidate("下周长沙适合打药吗", payload)
+        self.assertIsNone(candidate)
+
 
 if __name__ == "__main__":
     unittest.main()
